@@ -1,7 +1,11 @@
-const CACHE_NAME = 'kapulits-v2';
+const CACHE_NAME = 'kapulits-v3';
+const BASE = '/kapulits/';
 const ASSETS = [
-  '/index.html',
-  '/manifest.json',
+  BASE,
+  BASE + 'index.html',
+  BASE + 'manifest.json',
+  BASE + 'icon-192.png',
+  BASE + 'icon-512.png',
   'https://cdn.tailwindcss.com',
   'https://unpkg.com/react@18/umd/react.production.min.js',
   'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
@@ -36,6 +40,6 @@ self.addEventListener('fetch', event => {
           return response;
         })
       )
-      .catch(() => caches.match('/index.html'))
+      .catch(() => caches.match(BASE + 'index.html'))
   );
 });
