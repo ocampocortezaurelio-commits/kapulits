@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="theme-color" content="#ea580c"/>
+<link rel="manifest" href="manifest.json"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<title>K'apul'Its</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<style>
+  *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
+  body{margin:0;padding:0;background:#fff7ed;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overscroll-behavior:none}
+  #root{max-width:430px;margin:0 auto;min-height:100vh;position:relative;background:#fff7ed;box-shadow:0 0 40px rgba(0,0,0,.15)}
+  .safe-top{padding-top:env(safe-area-inset-top,0px)}
+  .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom,0px) + 76px)}
+  .bottom-nav{padding-bottom:env(safe-area-inset-bottom,0px)}
+  ::-webkit-scrollbar{display:none}
+  .slide-up{animation:slideUp .25s ease}
+  @keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+  .pulse-dot{animation:pulse 2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback,useMemo,useRef} = React;
+
+// ─── CONFIG ─────────────────────────────────────────────────────────
+const APP_VERSION = '0.2';
+const NEGOCIO = {
+  nombre: "K'apul'Its",
+  slogan: 'Birria y algo más',
+  direccion: 'Calle 36 x 19 y 21, Col. Salsipuedes, Escárcega, Camp.',
+  telefono: '981 126 54 56',
+};
+
+const TARIFAS_ENVIO = {
+  recoger: {label:'Pasa a recoger',precio:0,emoji:'🏃'},
+  zona_centro: {label:'Envío Zona Centro',precio:30,emoji:'🛵'},
+  retirado: {label:'Envío Retirado',precio:45,emoji:'🚗'},
+};
+
+// ─── DATA ───────────────────────────────────────────────────────────
+const PRODUCTOS_DEFAULT = [
+  {id:'consome',nombre:'Consomé',precio:115,costo:38,cat:'platillo',emoji:'🍲',activo:true},
+  {id:'taco_maiz',nombre:'Taco de Maíz',precio:30,costo:11,cat:'platillo',emoji:'🌮',activo:true},
+  {id:'taco_mano',nombre:'Taco Tortilla Mano',precio:35,costo:13,cat:'platillo',emoji:'🫓',activo:true},
+  {id:'quesabirria',nombre:'Quesabirria',precio:37,costo:14,cat:'platillo',emoji:'🧀',activo:true},
+  {id:'quesabirria_harina',nombre:'Quesabirria Harina',precio:60,costo:22,cat:'platillo',emoji:'🥙',activo:true},
+  {id:'quesabirria_mano',nombre:'Quesabirria Mano',precio:60,costo:24,cat:'platillo',emoji:'🫔',activo:true},
+  {id:'torta',nombre:'Torta',precio:85,costo:31,cat:'platillo',emoji:'🥪',activo:true},
+  {id:'birriamen',nombre:'BIRRIAMEN',precio:145,costo:52,cat:'platillo',emoji:'🍜',activo:true},
+  {id:'coca',nombre:'Coca-Cola',precio:30,costo:14,cat:'bebida',emoji:'🥤',activo:true},
+  {id:'jamaica',nombre:'Jamaica',precio:35,costo:7,cat:'bebida',emoji:'🍹',activo:true},
+  {id:'horchata',nombre:'Horchata',precio:35,costo:9,cat:'bebida',emoji:'🥛',activo:true},
+];
+
+const COSTOS_DEFAULT = [
+  {id:'carne',nombre:'Carne (Birria)',unidad:'KG',pu:170,cat:'carne'},
+  {id:'chile_guajillo',nombre:'Chile Guajillo',unidad:'KG',pu:140,cat:'especias'},
+  {id:'ajo',nombre:'Ajo',unidad:'KG',pu:100,cat:'verduras'},
+  {id:'cebolla',nombre:'Cebolla',unidad:'KG',pu:35,cat:'verduras'},
+  {id:'queso',nombre:'Queso',unidad:'KG',pu:130,cat:'lacteos'},
+  {id:'tomate_verde',nombre:'Tomate Verde',unidad:'KG',pu:60,cat:'verduras'},
+  {id:'tortilla_maiz',nombre:'Tortilla de Maíz',unidad:'KG',pu:26,cat:'base'},
+  {id:'tortilla_harina',nombre:'Tortilla de Harina',unidad:'KG',pu:25,cat:'base'},
+  {id:'aceite',nombre:'Aceite',unidad:'LT',pu:47,cat:'base'},
+  {id:'lena',nombre:'Leña',unidad:'LOTE',pu:100,cat:'combustible'},
+];
+
+const EMPLEADOS_DEFAULT = [
+  {id:'jmanuel',nombre:'Juan Manuel',rol:'Dueño / Producción',sueldo:0},
+  {id:'melena',nombre:'María Elena',rol:'Dueña / Producción',sueldo:0},
+  {id:'mayrani',nombre:'Mayrani Jaqueline',rol:'Línea de Producción',sueldo:300},
+  {id:'joana',nombre:'Joana Yoselin',rol:'Línea de Producción',sueldo:300},
+  {id:'cinthia',nombre:'Cinthia Paola',rol:'Atención al Cliente',sueldo:300},
+  {id:'aurelio',nombre:'Aurelio Ocampo',rol:'Envíos / Marketing',sueldo:300},
+];
+
+const CATS_GASTO = [
+  {id:'ingredientes',label:'Ingredientes',emoji:'🥩'},
+  {id:'empaque',label:'Empaque',emoji:'📦'},
+  {id:'combustible',label:'Gas / Leña',emoji:'🔥'},
+  {id:'personal',label:'Personal',emoji:'👥'},
+  {id:'transporte',label:'Transporte',emoji:'🚗'},
+  {id:'marketing',label:'Marketing',emoji:'📢'},
+  {id:'varios',label:'Varios',emoji:'🔧'},
+];
+
+const ESTADO_PEDIDO = {
+  nuevo:{label:'Nuevo',color:'bg-yellow-100 text-yellow-800 border-yellow-300',dot:'bg-yellow-400'},
+  entregado:{label:'Entregado',color:'bg-green-100 text-green-800 border-green-300',dot:'bg-green-500'},
+  cancelado:{label:'Cancelado',color:'bg-red-100 text-red-800 border-red-300',dot:'bg-red-500'},
+};
+
+const INITIAL_STATE = {
+  jornadas:[],
+  jornadaActiva:null,
+  productos:PRODUCTOS_DEFAULT,
+  costos:COSTOS_DEFAULT,
+  empleados:EMPLEADOS_DEFAULT,
+  gastosFijos:[{id:'renta',nombre:'Renta',monto:0},{id:'luz',nombre:'Luz',monto:0},{id:'gas_fijo',nombre:'Gas (fijo)',monto:0}],
+  impresora:{tipo:null,nombre:null,conectada:false,autoImprimir:true},
+};
+
+// ─── STORE ──────────────────────────────────────────────────────────
+function useStore(){
+  const [state,setState]=useState(()=>{
+    try{const s=localStorage.getItem('kapulits_v2');if(s){const p=JSON.parse(s);
+      return{...INITIAL_STATE,...p,productos:p.productos||PRODUCTOS_DEFAULT,costos:p.costos||COSTOS_DEFAULT,
+        empleados:p.empleados||EMPLEADOS_DEFAULT,impresora:p.impresora||INITIAL_STATE.impresora};}}catch(e){}
+    return INITIAL_STATE;
+  });
+  const save=useCallback(ns=>{try{localStorage.setItem('kapulits_v2',JSON.stringify(ns));}catch(e){}setState(ns);},[]);
+  const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const now=()=>new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+  const today=()=>new Date().toISOString().slice(0,10);
+
+  const abrirJornada=useCallback((fondoInicial,fecha)=>{
+    const j={id:uid(),fecha:fecha||today(),estado:'abierta',fondoInicial:Number(fondoInicial)||0,
+      ventas:[],gastos:[],pedidos:[],mandaditos:[],contadorPedido:1,
+      horaApertura:now(),horaCierre:null,totalEfectivo:null,diferencia:null,observaciones:''};
+    save({...state,jornadas:[...state.jornadas,j],jornadaActiva:j});
+  },[state,save]);
+
+  const cerrarJornada=useCallback((totalEfectivo,observaciones)=>{
+    if(!state.jornadaActiva)return;
+    const ja={...state.jornadaActiva,estado:'cerrada',horaCierre:now(),
+      totalEfectivo:Number(totalEfectivo)||0,observaciones:observaciones||''};
+    const ventasEf=ja.ventas.filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+v.total,0);
+    const gastosEf=ja.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+    const esperado=ja.fondoInicial+ventasEf-gastosEf;
+    ja.diferencia=(Number(totalEfectivo)||0)-esperado;
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:null});
+  },[state,save]);
+
+  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas)=>{
+    if(!state.jornadaActiva)return null;
+    const ja=state.jornadaActiva;
+    const totalProductos=items.reduce((s,i)=>s+i.subtotal,0);
+    const tarifa=TARIFAS_ENVIO[tipoEntrega]||TARIFAS_ENVIO.recoger;
+    const costoEnvio=tarifa.precio;
+    const pedido={id:uid(),numero:ja.contadorPedido,fecha:ja.fecha,hora:now(),
+      items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
+      tipoEntrega,cliente:cliente||'',direccion:direccion||'',notas:notas||'',
+      estado:'nuevo',cobrado:false,metodoPago:null};
+    const jaNew={...ja,pedidos:[...ja.pedidos,pedido],contadorPedido:ja.contadorPedido+1};
+    // Si tiene costo de envío, registrar en mandaditos
+    if(costoEnvio>0){
+      jaNew.mandaditos=[...ja.mandaditos,{id:uid(),pedidoId:pedido.id,pedidoNum:pedido.numero,
+        hora:now(),cliente:pedido.cliente,direccion:pedido.direccion,
+        tipo:tipoEntrega,tarifa:costoEnvio,cobrado:false}];
+    }
+    const js=state.jornadas.map(j=>j.id===jaNew.id?jaNew:j);
+    save({...state,jornadas:js,jornadaActiva:jaNew});
+    return pedido;
+  },[state,save]);
+
+  const actualizarPedido=useCallback((pedidoId,cambios)=>{
+    if(!state.jornadaActiva)return;
+    const ja={...state.jornadaActiva};
+    ja.pedidos=ja.pedidos.map(p=>p.id===pedidoId?{...p,...cambios}:p);
+    if(cambios.cobrado&&cambios.metodoPago){
+      const ped=ja.pedidos.find(p=>p.id===pedidoId);
+      if(ped){
+        // Venta = solo productos (sin envío)
+        const venta={id:uid(),hora:now(),items:ped.items,total:ped.totalProductos,
+          metodoPago:cambios.metodoPago,pedidoId:ped.id};
+        ja.ventas=[...ja.ventas,venta];
+        // Marcar mandadito como cobrado
+        ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true}:m);
+      }
+    }
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
+  const registrarGasto=useCallback((categoria,descripcion,monto,enEfectivo=true)=>{
+    if(!state.jornadaActiva)return;
+    const gasto={id:uid(),hora:now(),categoria,descripcion,monto:Number(monto),enEfectivo};
+    const ja={...state.jornadaActiva,gastos:[...state.jornadaActiva.gastos,gasto]};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
+  const eliminarGasto=useCallback(gastoId=>{
+    if(!state.jornadaActiva)return;
+    const ja={...state.jornadaActiva,gastos:state.jornadaActiva.gastos.filter(g=>g.id!==gastoId)};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
+  const actualizarProducto=useCallback((pid,datos)=>{save({...state,productos:state.productos.map(p=>p.id===pid?{...p,...datos}:p)});},[state,save]);
+  const actualizarGastoFijo=useCallback((gid,monto)=>{save({...state,gastosFijos:state.gastosFijos.map(g=>g.id===gid?{...g,monto:Number(monto)}:g)});},[state,save]);
+  const actualizarImpresora=useCallback(datos=>{save({...state,impresora:{...state.impresora,...datos}});},[state,save]);
+  const importarProductos=useCallback(prods=>{save({...state,productos:prods});},[state,save]);
+  const importarCostos=useCallback(costos=>{save({...state,costos});},[state,save]);
+
+  return{state,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,
+    actualizarImpresora,importarProductos,importarCostos};
+}
+
+// ─── UTILS ──────────────────────────────────────────────────────────
+const fmt=n=>{const v=Number(n||0);return(v<0?'-$':'$')+Math.abs(v).toLocaleString('es-MX',{minimumFractionDigits:0,maximumFractionDigits:0});};
+const fmtDate=iso=>{if(!iso)return'';const d=new Date(iso+'T12:00:00');return d.toLocaleDateString('es-MX',{weekday:'long',day:'numeric',month:'long',year:'numeric'});};
+const fmtDateShort=iso=>{if(!iso)return'';const d=new Date(iso+'T12:00:00');return d.toLocaleDateString('es-MX',{day:'numeric',month:'short'});};
+const pct=(a,b)=>b>0?((a/b)*100).toFixed(1)+'%':'0%';
+const calcVentasTotal=(ventas=[])=>ventas.reduce((s,v)=>s+v.total,0);
+const calcGastosTotal=(gastos=[])=>gastos.reduce((s,g)=>s+g.monto,0);
+const calcMandaditosTotal=(mandaditos=[])=>mandaditos.reduce((s,m)=>s+m.tarifa,0);
+
+function getProductoStats(jornadas,productos){
+  const stats={};
+  productos.forEach(p=>{stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cantidad:0,revenue:0};});
+  jornadas.forEach(j=>{j.ventas.forEach(v=>{v.items.forEach(item=>{
+    if(stats[item.productoId]){stats[item.productoId].cantidad+=item.cantidad;stats[item.productoId].revenue+=item.subtotal;}
+  });});});
+  return Object.values(stats).sort((a,b)=>b.revenue-a.revenue);
+}
+
+function calcProjections(jornadas){
+  const cerradas=jornadas.filter(j=>j.estado==='cerrada');
+  if(!cerradas.length)return null;
+  const revenues=cerradas.map(j=>calcVentasTotal(j.ventas));
+  const expenses=cerradas.map(j=>calcGastosTotal(j.gastos));
+  const profits=revenues.map((r,i)=>r-expenses[i]);
+  const mandas=cerradas.map(j=>calcMandaditosTotal(j.mandaditos||[]));
+  const recoger=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length);
+  const envios=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length);
+  const avg=a=>a.reduce((s,v)=>s+v,0)/a.length;
+  const avgR=avg(revenues),avgE=avg(expenses),avgP=avg(profits),avgM=avg(mandas);
+  const margin=avgR>0?(avgP/avgR*100):0;
+  return{jornadasCount:cerradas.length,avgRevenue:avgR,avgExpenses:avgE,avgProfit:avgP,margin,
+    projRevenue:avgR*4,projExpenses:avgE*4,projProfit:avgP*4,
+    revenues,expenses,profits,mandas,dates:cerradas.map(j=>j.fecha),
+    avgMandaditos:avgM,projMandaditos:avgM*4,
+    totalRecoger:recoger.reduce((a,b)=>a+b,0),totalEnvios:envios.reduce((a,b)=>a+b,0)};
+}
+
+function getRecomendaciones(proj,stats){
+  if(!proj)return[];const recs=[];
+  if(proj.margin<25)recs.push({type:'warn',icon:'⚠️',text:`Margen de utilidad: ${proj.margin.toFixed(1)}%. Revisa costos o ajusta precios.`});
+  else if(proj.margin>50)recs.push({type:'ok',icon:'🌟',text:`¡Excelente! Margen del ${proj.margin.toFixed(1)}%.`});
+  else recs.push({type:'ok',icon:'✅',text:`Margen de ${proj.margin.toFixed(1)}% saludable.`});
+  const top=stats.filter(s=>s.cantidad>0).sort((a,b)=>b.cantidad-a.cantidad)[0];
+  if(top)recs.push({type:'info',icon:'⭐',text:`Producto estrella: ${top.emoji} ${top.nombre} (${top.cantidad} pz). ¡Asegura stock!`});
+  const mp=stats.filter(s=>s.cantidad>0&&s.precio>0).map(s=>({...s,m:(s.precio-s.costo)/s.precio*100})).sort((a,b)=>b.m-a.m)[0];
+  if(mp)recs.push({type:'info',icon:'💡',text:`Mayor rentabilidad: ${mp.emoji} ${mp.nombre} con ${mp.m.toFixed(0)}% margen. ¡Promuévelo!`});
+  recs.push({type:'info',icon:'📈',text:`Proyección mensual (4 jornadas): ${fmt(proj.projRevenue)} ventas, ${fmt(proj.projProfit)} utilidad.`});
+  if(proj.totalEnvios>0||proj.totalRecoger>0){
+    recs.push({type:'info',icon:'🛵',text:`Envíos: ${proj.totalEnvios} · Recogen: ${proj.totalRecoger}. Mandaditos proyectados: ${fmt(proj.projMandaditos)}/mes.`});
+  }
+  return recs;
+}
+
+// ─── PRINTER ────────────────────────────────────────────────────────
+let printerCharacteristic=null;
+
+async function connectBluetooth(){
+  try{
+    const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,
+      optionalServices:['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455']});
+    const server=await device.gatt.connect();
+    let service;
+    for(const sid of['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455']){
+      try{service=await server.getPrimaryService(sid);break;}catch(e){}}
+    if(!service){const svcs=await server.getPrimaryServices();if(svcs.length)service=svcs[0];}
+    if(service){const chars=await service.getCharacteristics();
+      printerCharacteristic=chars.find(c=>c.properties.write||c.properties.writeWithoutResponse)||chars[0];}
+    return{success:true,name:device.name||'Impresora BT'};
+  }catch(e){return{success:false,error:e.message};}
+}
+
+function buildTicketHTML(pedido){
+  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+  let h=`<html><head><title>Ticket</title><style>
+    *{margin:0;padding:0}body{font-family:monospace;font-size:12px;width:80mm;padding:5mm}
+    .c{text-align:center}.b{font-weight:bold}.s{border-top:1px dashed #000;margin:4px 0}
+    .r{display:flex;justify-content:space-between}.sm{font-size:10px;color:#555}
+    @media print{@page{size:80mm auto;margin:0}}</style></head><body>`;
+  h+=`<div class="c b" style="font-size:18px">K'apul'Its</div>`;
+  h+=`<div class="c sm">Birria y algo más</div><div class="s"></div>`;
+  h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
+  h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
+  if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
+  h+=`<div>Tipo: ${tarifa.emoji} ${tarifa.label}</div>`;
+  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>📍 ${pedido.direccion}</div>`;
+  h+=`<div class="s"></div>`;
+  pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
+  h+=`<div class="s"></div>`;
+  h+=`<div class="r"><span>Subtotal productos</span><span>${fmt(pedido.totalProductos)}</span></div>`;
+  if(pedido.costoEnvio>0)h+=`<div class="r"><span>Costo envío</span><span>${fmt(pedido.costoEnvio)}</span></div>`;
+  h+=`<div class="r b" style="font-size:14px"><span>TOTAL</span><span>${fmt(pedido.total)}</span></div>`;
+  h+=`<div class="s"></div>`;
+  if(pedido.notas)h+=`<div class="sm">📝 ${pedido.notas}</div>`;
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c sm" style="margin-top:6px">${NEGOCIO.direccion}</div>`;
+  h+=`<div class="c sm">Tel.: ${NEGOCIO.telefono}</div>`;
+  h+=`<div class="c b" style="margin-top:4px">¡Gracias por tu compra! 🙏</div>`;
+  h+=`</body></html>`;
+  return h;
+}
+
+async function printTicket(pedido){
+  if(printerCharacteristic){
+    try{
+      const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+      const sep='━'.repeat(32);
+      let t=`\n      K'apul'Its\n    Birria y algo más\n${sep}\n`;
+      t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}\n  ${pedido.fecha}  ${pedido.hora}\n`;
+      if(pedido.cliente)t+=`  Cliente: ${pedido.cliente}\n`;
+      t+=`  ${tarifa.emoji} ${tarifa.label}\n`;
+      if(pedido.direccion&&pedido.tipoEntrega!=='recoger')t+=`  📍 ${pedido.direccion}\n`;
+      t+=sep+'\n';
+      pedido.items.forEach(i=>{t+=` ${String(i.cantidad).padStart(2)}x ${i.nombre.substring(0,18).padEnd(18)} ${fmt(i.subtotal).padStart(7)}\n`;});
+      t+=sep+'\n';
+      if(pedido.costoEnvio>0)t+=`  Envío:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
+      t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
+      t+=`  ${NEGOCIO.direccion}\n  Tel.: ${NEGOCIO.telefono}\n  ¡Gracias por tu compra!\n\n\n`;
+      const data=new TextEncoder().encode(t);
+      for(let i=0;i<data.length;i+=100){await printerCharacteristic.writeValue(data.slice(i,i+100));}
+      return{success:true,method:'bluetooth'};
+    }catch(e){}
+  }
+  const w=window.open('','','width=320,height=600');
+  if(w){w.document.write(buildTicketHTML(pedido));w.document.close();setTimeout(()=>w.print(),300);
+    return{success:true,method:'window'};}
+  return{success:false};
+}
+
+// ─── CHARTS ─────────────────────────────────────────────────────────
+function BarChart({labels=[],values=[],color='#f97316',height=140}){
+  if(!values.length)return null;const max=Math.max(...values,1);const W=Math.max(labels.length*56,300);const bw=36;
+  return(<div className="overflow-x-auto"><svg width={W} height={height+44} style={{minWidth:'100%'}}>
+    {values.map((v,i)=>{const bh=Math.max((v/max)*(height-10),v>0?4:0);const x=i*56+12;
+      return(<g key={i}><rect x={x} y={height-bh} width={bw} height={bh} fill={color} rx={4} opacity={.85}/>
+        {v>0&&<text x={x+bw/2} y={height-bh-5} textAnchor="middle" fontSize={10} fill={color} fontWeight="700">{Math.round(v)}</text>}
+        <text x={x+bw/2} y={height+16} textAnchor="middle" fontSize={9} fill="#6b7280">{labels[i]}</text></g>);
+    })}</svg></div>);
+}
+function LineChart({dates=[],revenues=[],profits=[]}){
+  if(revenues.length<2)return null;const allV=[...revenues,...profits];const max=Math.max(...allV,1);const min=Math.min(...profits,0);
+  const range=max-min||1;const W=Math.max(dates.length*70,300);const H=140;
+  const pt=(v,i)=>`${i*(W/(dates.length-1||1))},${H-((v-min)/range)*(H-20)+10}`;
+  return(<div className="overflow-x-auto"><svg width={W} height={H+30} style={{minWidth:'100%'}}>
+    <polyline points={revenues.map((v,i)=>pt(v,i)).join(' ')} fill="none" stroke="#f97316" strokeWidth={2.5} strokeLinejoin="round"/>
+    <polyline points={profits.map((v,i)=>pt(v,i)).join(' ')} fill="none" stroke="#22c55e" strokeWidth={2.5} strokeLinejoin="round" strokeDasharray="4,3"/>
+    {revenues.map((v,i)=><circle key={'r'+i} cx={i*(W/(dates.length-1||1))} cy={H-((v-min)/range)*(H-20)+10} r={4} fill="#f97316"/>)}
+    {profits.map((v,i)=><circle key={'p'+i} cx={i*(W/(dates.length-1||1))} cy={H-((v-min)/range)*(H-20)+10} r={4} fill="#22c55e"/>)}
+    {dates.map((d,i)=><text key={i} x={i*(W/(dates.length-1||1))} y={H+20} textAnchor="middle" fontSize={9} fill="#6b7280">{fmtDateShort(d)}</text>)}
+  </svg></div>);
+}
+
+// ─── BASE COMPONENTS ────────────────────────────────────────────────
+function TopBar({title,subtitle,right}){
+  return(<div className="bg-orange-600 text-white px-4 py-3 safe-top sticky top-0 z-30 shadow-lg">
+    <div className="flex items-center justify-between">
+      <div><h1 className="font-black text-lg leading-tight">{title}</h1>
+        {subtitle&&<p className="text-orange-200 text-xs">{subtitle}</p>}</div>
+      {right&&<div>{right}</div>}</div></div>);
+}
+function MetricCard({label,value,sub,color='orange',icon}){
+  const c={orange:'bg-orange-50 border-orange-200 text-orange-700',green:'bg-green-50 border-green-200 text-green-700',
+    red:'bg-red-50 border-red-200 text-red-700',blue:'bg-blue-50 border-blue-200 text-blue-700',
+    purple:'bg-purple-50 border-purple-200 text-purple-700'};
+  return(<div className={`${c[color]||c.orange} border rounded-2xl p-4 flex flex-col gap-1`}>
+    <div className="flex items-center gap-2">{icon&&<span className="text-xl">{icon}</span>}<span className="text-xs font-medium opacity-70">{label}</span></div>
+    <p className="text-2xl font-black">{value}</p>{sub&&<p className="text-xs opacity-60">{sub}</p>}</div>);
+}
+function Btn({children,onClick,color='orange',size='md',full=false,disabled=false,variant='solid'}){
+  const sz={sm:'px-3 py-1.5 text-xs',md:'px-5 py-3 text-sm',lg:'px-6 py-4 text-base'};
+  const base=`${sz[size]} font-bold rounded-2xl transition-all active:scale-95 ${full?'w-full':''} ${disabled?'opacity-40 pointer-events-none':''}`;
+  const vars={orange:{solid:'bg-orange-500 text-white shadow-md'},green:{solid:'bg-green-500 text-white shadow-md'},
+    red:{solid:'bg-red-500 text-white shadow-md'},gray:{solid:'bg-gray-200 text-gray-700'},
+    orange_o:'border-2 border-orange-500 text-orange-600',red_o:'border-2 border-red-500 text-red-600'};
+  const cls=variant==='outline'?(vars[color+'_o']||vars.orange_o):(vars[color]||vars.orange).solid;
+  return<button className={`${base} ${cls}`} onClick={onClick} disabled={disabled}>{children}</button>;
+}
+function Modal({open,onClose,title,children,fullScreen=false}){
+  if(!open)return null;
+  return(<div className="fixed inset-0 z-50 flex items-end justify-center" style={{maxWidth:430,margin:'0 auto'}}>
+    <div className="absolute inset-0 bg-black/50" onClick={onClose}/>
+    <div className={`relative bg-white rounded-t-3xl w-full shadow-2xl slide-up ${fullScreen?'h-[95vh]':'max-h-[90vh]'} overflow-y-auto`}>
+      <div className="sticky top-0 bg-white px-5 pt-4 pb-3 border-b border-gray-100 z-10">
+        <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-3"/>
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-black text-gray-800">{title}</h2>
+          <button className="text-gray-400 text-2xl leading-none" onClick={onClose}>✕</button></div></div>
+      <div className="px-5 py-4">{children}</div></div></div>);
+}
+function EmptyState({emoji,title,sub}){
+  return(<div className="flex flex-col items-center justify-center py-16 px-8 text-center">
+    <div className="text-6xl mb-4">{emoji}</div><h3 className="text-lg font-bold text-gray-700 mb-2">{title}</h3>
+    {sub&&<p className="text-sm text-gray-500">{sub}</p>}</div>);
+}
+function Badge({children,color='orange'}){
+  const c={orange:'bg-orange-100 text-orange-700',green:'bg-green-100 text-green-700',red:'bg-red-100 text-red-700',
+    blue:'bg-blue-100 text-blue-700',yellow:'bg-yellow-100 text-yellow-700',purple:'bg-purple-100 text-purple-700'};
+  return<span className={`${c[color]||c.orange} text-xs font-bold px-2 py-0.5 rounded-full`}>{children}</span>;
+}
+function Input({label,value,onChange,type='text',placeholder='',prefix}){
+  return(<div className="flex flex-col gap-1">
+    {label&&<label className="text-xs font-bold text-gray-600 uppercase tracking-wide">{label}</label>}
+    <div className="flex items-center border-2 border-gray-200 rounded-xl overflow-hidden focus-within:border-orange-400">
+      {prefix&&<span className="px-3 text-gray-400 font-bold bg-gray-50">{prefix}</span>}
+      <input type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+        className="flex-1 px-3 py-3 text-sm outline-none bg-white"/></div></div>);
+}
+
+// ─── BOTTOM NAV ─────────────────────────────────────────────────────
+function BottomNav({page,setPage,hasJornada,pedidosNuevos=0}){
+  const tabs=[
+    {id:'dashboard',emoji:'🏠',label:'Inicio'},
+    {id:'pedidos',emoji:'📋',label:'Pedidos'},
+    {id:'gastos',emoji:'💸',label:'Gastos'},
+    {id:'reportes',emoji:'📊',label:'Reportes'},
+    {id:'admin',emoji:'⚙️',label:'Admin'},
+  ];
+  return(<div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] bg-white border-t border-gray-200 z-40 bottom-nav shadow-2xl">
+    <div className="flex">{tabs.map(t=>{const active=page===t.id;
+      return(<button key={t.id} onClick={()=>setPage(t.id)}
+        className={`flex-1 flex flex-col items-center justify-center py-2 gap-0.5 ${active?'text-orange-600':'text-gray-400'}`}>
+        <span className="text-xl relative">{t.emoji}
+          {t.id==='pedidos'&&pedidosNuevos>0&&<span className="absolute -top-1 -right-2 bg-red-500 text-white text-[9px] font-black min-w-[16px] h-4 rounded-full flex items-center justify-center">{pedidosNuevos}</span>}
+        </span>
+        <span className={`text-[10px] font-bold ${active?'text-orange-600':'text-gray-400'}`}>{t.label}</span>
+        {active&&<div className="w-1 h-1 bg-orange-500 rounded-full"/>}
+      </button>);})}</div></div>);
+}
+
+// ─── MODALS ─────────────────────────────────────────────────────────
+function AbrirJornadaModal({open,onClose,onAbrir}){
+  const [fondo,setFondo]=useState('');const [fecha,setFecha]=useState(new Date().toISOString().slice(0,10));
+  return(<Modal open={open} onClose={onClose} title="🟢 Abrir Jornada">
+    <div className="flex flex-col gap-5">
+      <div className="bg-orange-50 rounded-2xl p-4 text-sm text-orange-700">
+        <p className="font-bold mb-1">¿Todo listo para comenzar?</p>
+        <p className="opacity-70">Registra el fondo inicial de la caja.</p></div>
+      <Input label="Fecha de jornada" type="date" value={fecha} onChange={setFecha}/>
+      <Input label="Fondo inicial en caja" type="number" placeholder="0" prefix="$" value={fondo} onChange={setFondo}/>
+      <Btn full color="green" size="lg" onClick={()=>{onAbrir(fondo,fecha);setFondo('');onClose();}}>🟢 Abrir Jornada</Btn>
+    </div></Modal>);
+}
+
+function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
+  const [efectivo,setEfectivo]=useState('');const [obs,setObs]=useState('');
+  if(!jornada)return null;
+  const totalV=calcVentasTotal(jornada.ventas);const totalG=calcGastosTotal(jornada.gastos);const util=totalV-totalG;
+  const vEf=jornada.ventas.filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+v.total,0);
+  const gEf=jornada.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+  const esperado=jornada.fondoInicial+vEf-gEf;const dif=(Number(efectivo)||0)-esperado;
+  const totalManda=calcMandaditosTotal(jornada.mandaditos||[]);
+  const pedidosRecoger=(jornada.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
+  const pedidosEnvio=(jornada.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
+  return(<Modal open={open} onClose={onClose} title="🔴 Corte de Caja">
+    <div className="flex flex-col gap-4">
+      <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
+        <h3 className="font-bold text-gray-700 text-sm mb-3">Resumen del día</h3>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas (productos)</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Efectivo</span><span>{fmt(vEf)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Transferencia</span><span>{fmt(totalV-vEf)}</span></div>
+        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">💸 Total Gastos</span><span className="font-bold text-red-500">{fmt(totalG)}</span></div>
+        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm font-bold"><span>Utilidad bruta</span><span className={util>=0?'text-green-600':'text-red-500'}>{fmt(util)}</span></div>
+        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Mandaditos ({pedidosEnvio} envíos)</span><span className="font-bold text-purple-600">{fmt(totalManda)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">🏃 Pasan a recoger</span><span>{pedidosRecoger} clientes</span></div>
+        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">Fondo inicial</span><span>{fmt(jornada.fondoInicial)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">Efectivo esperado</span><span className="font-bold">{fmt(esperado)}</span></div>
+      </div>
+      <Input label="Efectivo real contado" type="number" placeholder="0" prefix="$" value={efectivo} onChange={setEfectivo}/>
+      {efectivo&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
+        {dif===0?'✅ Caja cuadrada':dif>0?`📈 Sobrante: ${fmt(dif)}`:`📉 Faltante: ${fmt(Math.abs(dif))}`}</div>}
+      <Input label="Observaciones (opcional)" value={obs} onChange={setObs} placeholder="Notas del día..."/>
+      <Btn full color="red" size="lg" onClick={()=>{onCerrar(efectivo,obs);onClose();}}>🔴 Cerrar y Guardar Jornada</Btn>
+    </div></Modal>);
+}
+
+// ─── DASHBOARD ──────────────────────────────────────────────────────
+function DashboardPage({state,onAbrir,onCerrar}){
+  const [showAbrir,setShowAbrir]=useState(false);const [showCerrar,setShowCerrar]=useState(false);
+  const ja=state.jornadaActiva;
+  const totalV=ja?calcVentasTotal(ja.ventas):0;const totalG=ja?calcGastosTotal(ja.gastos):0;const util=totalV-totalG;
+  const margen=totalV>0?((util/totalV)*100).toFixed(1):0;
+  const pedidosActivos=ja?(ja.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
+  const totalManda=ja?calcMandaditosTotal(ja.mandaditos||[]):0;
+  const ultimasJ=state.jornadas.filter(j=>j.estado==='cerrada').slice(-5).reverse();
+  return(<div className="safe-bottom">
+    <TopBar title="K'apul'Its 🌮" subtitle={ja?`Jornada abierta · ${ja.horaApertura}`:NEGOCIO.slogan}
+      right={ja&&<button onClick={()=>setShowCerrar(true)} className="bg-white/20 text-white text-xs font-bold px-3 py-1.5 rounded-xl">Cerrar caja</button>}/>
+    <div className="px-4 py-5 space-y-5">
+      {!ja?(
+        <div className="bg-white rounded-3xl p-6 shadow-sm text-center border border-orange-100">
+          <div className="text-5xl mb-3">🌅</div>
+          <h2 className="text-lg font-black text-gray-800 mb-1">Sin jornada activa</h2>
+          <p className="text-sm text-gray-500 mb-5">Abre la jornada para comenzar a operar</p>
+          <Btn full color="green" size="lg" onClick={()=>setShowAbrir(true)}>🟢 Abrir Jornada</Btn>
+        </div>
+      ):(
+        <div className="bg-gradient-to-br from-orange-500 to-orange-600 rounded-3xl p-5 text-white shadow-lg">
+          <div className="flex items-center gap-2 mb-1">
+            <span className="pulse-dot w-2 h-2 bg-green-400 rounded-full inline-block"/>
+            <span className="text-xs font-bold text-orange-200 uppercase tracking-wider">Jornada en curso</span></div>
+          <p className="font-bold text-orange-100 text-sm mb-4">{fmtDate(ja.fecha)}</p>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="bg-white/20 rounded-2xl p-3 text-center"><p className="text-lg font-black">{fmt(totalV)}</p><p className="text-orange-200 text-[10px]">Ventas</p></div>
+            <div className="bg-white/20 rounded-2xl p-3 text-center"><p className="text-lg font-black">{fmt(totalG)}</p><p className="text-orange-200 text-[10px]">Gastos</p></div>
+            <div className={`${util>=0?'bg-green-400/30':'bg-red-400/30'} rounded-2xl p-3 text-center`}><p className="text-lg font-black">{fmt(util)}</p><p className="text-orange-200 text-[10px]">Utilidad</p></div>
+          </div>
+          <div className="mt-3 flex justify-between items-center text-orange-200 text-xs">
+            <span>Margen: <b className="text-white">{margen}%</b> · Pedidos: <b className="text-white">{pedidosActivos}</b> activos</span>
+            {totalManda>0&&<span>🛵 <b className="text-white">{fmt(totalManda)}</b></span>}
+          </div>
+        </div>
+      )}
+      {ja&&ja.ventas.length>0&&(
+        <div className="bg-white rounded-3xl p-4 shadow-sm">
+          <h3 className="font-black text-gray-800 mb-3 text-sm">Últimas ventas</h3>
+          {[...ja.ventas].reverse().slice(0,5).map(v=>(
+            <div key={v.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+              <p className="text-xs text-gray-500 flex-1">{v.hora} · {v.items.map(i=>i.nombre).join(', ').substring(0,40)}</p>
+              <div className="flex items-center gap-2"><p className="font-bold text-sm">{fmt(v.total)}</p>
+                <Badge color={v.metodoPago==='efectivo'?'green':'blue'}>{v.metodoPago==='efectivo'?'💵':'📱'}</Badge></div>
+            </div>))}
+        </div>)}
+      {ultimasJ.length>0&&(
+        <div className="bg-white rounded-3xl p-4 shadow-sm">
+          <h3 className="font-black text-gray-800 mb-3 text-sm">Jornadas anteriores</h3>
+          {ultimasJ.map(j=>{const u=calcVentasTotal(j.ventas)-calcGastosTotal(j.gastos);
+            return(<div key={j.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+              <div><p className="text-xs font-bold text-gray-700">{fmtDate(j.fecha)}</p>
+                <p className="text-xs text-gray-400">{j.ventas.length} ventas · {(j.pedidos||[]).length} pedidos</p></div>
+              <div className="text-right"><p className="font-bold text-sm">{fmt(calcVentasTotal(j.ventas))}</p>
+                <span className={`text-xs font-bold ${u>=0?'text-green-500':'text-red-500'}`}>{u>=0?'+':''}{fmt(u)}</span></div>
+            </div>);})}</div>)}
+      {!ja&&!state.jornadas.length&&(
+        <div className="bg-white rounded-3xl p-5 shadow-sm text-center">
+          <p className="text-4xl mb-2">📊</p><p className="text-sm font-bold text-gray-600 mb-1">Aquí aparecerán tus estadísticas</p>
+          <p className="text-xs text-gray-400">Abre tu primera jornada para comenzar</p></div>)}
+    </div>
+    <AbrirJornadaModal open={showAbrir} onClose={()=>setShowAbrir(false)} onAbrir={onAbrir}/>
+    <CerrarJornadaModal open={showCerrar} onClose={()=>setShowCerrar(false)} onCerrar={onCerrar} jornada={ja}/>
+  </div>);
+}
+
+// ─── PEDIDOS ────────────────────────────────────────────────────────
+function PedidosPage({state,onCrearPedido,onActualizarPedido}){
+  const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
+  const ja=state.jornadaActiva;
+  if(!ja)return(<div className="safe-bottom"><TopBar title="Pedidos 📋"/>
+    <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada para crear pedidos"/></div>);
+  const pedidos=ja.pedidos||[];
+  const nuevos=pedidos.filter(p=>p.estado==='nuevo');
+  const entregados=pedidos.filter(p=>p.estado==='entregado'&&!p.cobrado);
+  const cobrados=pedidos.filter(p=>p.cobrado);
+  const cancelados=pedidos.filter(p=>p.estado==='cancelado');
+  return(<div className="safe-bottom">
+    <TopBar title="Pedidos 📋" subtitle={`${nuevos.length} activos · ${cobrados.length} cobrados`}/>
+    <div className="px-4 py-4 space-y-4">
+      <Btn full size="lg" onClick={()=>setShowCrear(true)}>+ Nuevo Pedido</Btn>
+      {nuevos.length>0&&(<div>
+        <p className="text-xs font-bold text-yellow-600 uppercase tracking-wider mb-2">🟡 Nuevos ({nuevos.length})</p>
+        <div className="space-y-3">{nuevos.map(p=>(
+          <PedidoCard key={p.id} pedido={p} onEntregar={()=>onActualizarPedido(p.id,{estado:'entregado'})}
+            onCobrar={()=>setShowCobrar(p)} onCancelar={()=>onActualizarPedido(p.id,{estado:'cancelado'})}
+            onPrint={()=>printTicket(p)}/>))}</div></div>)}
+      {entregados.length>0&&(<div>
+        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-2">🟢 Entregados ({entregados.length})</p>
+        <div className="space-y-3">{entregados.map(p=>(
+          <PedidoCard key={p.id} pedido={p} onCobrar={()=>setShowCobrar(p)} onPrint={()=>printTicket(p)} showEntregar={false}/>))}</div></div>)}
+      {cobrados.length>0&&(<div>
+        <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-2">✅ Cobrados ({cobrados.length})</p>
+        <div className="space-y-2">{cobrados.map(p=>(
+          <div key={p.id} className="bg-white rounded-xl p-3 shadow-sm border border-green-100 opacity-80">
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-bold text-gray-600">#{String(p.numero).padStart(3,'0')} · {p.hora} · {p.cliente||'—'}</span>
+              <div className="flex items-center gap-1">
+                <Badge color="green">{fmt(p.totalProductos)}</Badge>
+                {p.costoEnvio>0&&<Badge color="purple">🛵{fmt(p.costoEnvio)}</Badge>}
+              </div></div>
+          </div>))}</div></div>)}
+      {cancelados.length>0&&(<div>
+        <p className="text-xs font-bold text-red-500 uppercase tracking-wider mb-2">🔴 Cancelados ({cancelados.length})</p>
+        <div className="space-y-2">{cancelados.map(p=>(
+          <div key={p.id} className="bg-red-50 rounded-xl p-3 border border-red-100 opacity-60">
+            <span className="text-xs font-bold text-gray-500 line-through">#{String(p.numero).padStart(3,'0')} · {p.cliente||'—'}</span>
+          </div>))}</div></div>)}
+      {pedidos.length===0&&<EmptyState emoji="📋" title="Sin pedidos aún" sub="Crea tu primer pedido del día"/>}
+      <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
+        impresora={state.impresora}
+        onCrear={(items,tipo,cliente,dir,notas)=>{
+          const p=onCrearPedido(items,tipo,cliente,dir,notas);
+          if(p&&state.impresora.autoImprimir)printTicket(p);
+          setShowCrear(false);}}/>
+      <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
+        onCobrar={metodo=>{onActualizarPedido(showCobrar.id,{cobrado:true,metodoPago:metodo,estado:'entregado'});setShowCobrar(null);}}/>
+    </div>
+  </div>);
+}
+
+function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onPrint,showEntregar=true}){
+  const est=ESTADO_PEDIDO[pedido.estado];const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+  return(<div className={`bg-white rounded-2xl p-4 shadow-sm border-2 ${est.color.split(' ')[2]||'border-gray-100'}`}>
+    <div className="flex justify-between items-start mb-2">
+      <div>
+        <div className="flex items-center gap-2">
+          <span className={`w-3 h-3 rounded-full ${est.dot}`}/>
+          <span className="font-black text-gray-800 text-lg">#{String(pedido.numero).padStart(3,'0')}</span>
+          <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${est.color}`}>{est.label}</span>
+        </div>
+        <p className="text-xs text-gray-400 mt-0.5">{pedido.hora} · {tarifa.emoji} {tarifa.label}
+          {pedido.cliente&&` · ${pedido.cliente}`}</p>
+        {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<p className="text-xs text-gray-400">📍 {pedido.direccion}</p>}
+      </div>
+      <div className="text-right">
+        <p className="text-xl font-black text-orange-600">{fmt(pedido.total)}</p>
+        {pedido.costoEnvio>0&&<p className="text-[10px] text-purple-500">🛵 envío: {fmt(pedido.costoEnvio)}</p>}
+      </div>
+    </div>
+    <div className="bg-gray-50 rounded-xl p-2 mb-3">
+      {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-0.5">
+        <span className="text-gray-600">{i.emoji} {i.cantidad}x {i.nombre}</span>
+        <span className="font-bold text-gray-700">{fmt(i.subtotal)}</span></div>))}
+      {pedido.notas&&<p className="text-xs text-orange-500 mt-1 italic">📝 {pedido.notas}</p>}
+    </div>
+    <div className="flex gap-2">
+      {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}>✅ Entregar</Btn>}
+      {!pedido.cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}>💰 Cobrar</Btn>}
+      {pedido.estado==='nuevo'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar}>✕</Btn>}
+      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint}>🖨️</Btn>}
+    </div>
+  </div>);
+}
+
+function CrearPedidoModal({open,onClose,productos,impresora,onCrear}){
+  const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
+  const [cliente,setCliente]=useState('');const [direccion,setDireccion]=useState('');const [notas,setNotas]=useState('');
+  const prods=productos.filter(p=>p.activo);const platillos=prods.filter(p=>p.cat==='platillo');const bebidas=prods.filter(p=>p.cat==='bebida');
+  const add=p=>setCart(c=>({...c,[p.id]:{...p,cantidad:(c[p.id]?.cantidad||0)+1,subtotal:((c[p.id]?.cantidad||0)+1)*p.precio}}));
+  const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
+  const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
+  const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
+  const totalFinal=totalProd+costoEnvio;
+  const crear=()=>{
+    if(!items.length)return;
+    const its=items.map(i=>({productoId:i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji}));
+    onCrear(its,tipo,cliente,direccion,notas);setCart({});setCliente('');setDireccion('');setNotas('');};
+  return(<Modal open={open} onClose={onClose} title="📋 Nuevo Pedido" fullScreen>
+    <div className="space-y-4">
+      <div>
+        <p className="text-xs font-bold text-gray-500 uppercase mb-2">Tipo de pedido</p>
+        <div className="grid grid-cols-3 gap-2">
+          {Object.entries(TARIFAS_ENVIO).map(([k,v])=>(
+            <button key={k} onClick={()=>setTipo(k)}
+              className={`py-3 rounded-xl text-center border-2 active:scale-95 ${tipo===k?'border-orange-500 bg-orange-50':'border-gray-200'}`}>
+              <div className="text-xl">{v.emoji}</div>
+              <p className="text-[10px] font-bold text-gray-700">{v.label}</p>
+              {v.precio>0&&<p className="text-[10px] font-bold text-purple-600">+{fmt(v.precio)}</p>}
+            </button>))}
+        </div>
+      </div>
+      <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
+      {tipo!=='recoger'&&<Input label="Dirección de envío" value={direccion} onChange={setDireccion} placeholder="Calle, número, colonia..."/>}
+      <p className="text-xs font-bold text-gray-500 uppercase">🥩 Platillos</p>
+      <div className="grid grid-cols-2 gap-2">
+        {platillos.map(p=>{const qty=cart[p.id]?.cantidad||0;
+          return(<button key={p.id} onClick={()=>add(p)}
+            className={`relative bg-white rounded-xl p-3 text-left shadow-sm border-2 active:scale-95 ${qty>0?'border-orange-400 bg-orange-50':'border-gray-100'}`}>
+            {qty>0&&<span className="absolute top-1 right-1 bg-orange-500 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center">{qty}</span>}
+            <div className="text-2xl mb-1">{p.emoji}</div>
+            <p className="text-xs font-bold text-gray-800 leading-tight">{p.nombre}</p>
+            <p className="text-orange-600 font-black text-sm">{fmt(p.precio)}</p>
+          </button>);})}
+      </div>
+      <p className="text-xs font-bold text-gray-500 uppercase">🥤 Bebidas</p>
+      <div className="grid grid-cols-3 gap-2">
+        {bebidas.map(p=>{const qty=cart[p.id]?.cantidad||0;
+          return(<button key={p.id} onClick={()=>add(p)}
+            className={`relative bg-white rounded-xl p-2 text-center shadow-sm border-2 active:scale-95 ${qty>0?'border-orange-400 bg-orange-50':'border-gray-100'}`}>
+            {qty>0&&<span className="absolute top-0 right-0 bg-orange-500 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">{qty}</span>}
+            <div className="text-xl">{p.emoji}</div>
+            <p className="text-[10px] font-bold text-gray-700">{p.nombre}</p>
+            <p className="text-orange-600 font-black text-xs">{fmt(p.precio)}</p>
+          </button>);})}
+      </div>
+      {items.length>0&&(<React.Fragment>
+        <div className="bg-orange-50 rounded-2xl p-3 space-y-1">
+          {items.map(i=>(<div key={i.id} className="flex items-center justify-between">
+            <span className="text-xs text-gray-600">{i.emoji} {i.nombre}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={()=>rem(i.id)} className="w-6 h-6 rounded-full bg-gray-200 text-gray-700 font-black text-xs flex items-center justify-center">−</button>
+              <span className="font-black text-xs w-4 text-center">{i.cantidad}</span>
+              <button onClick={()=>add(i)} className="w-6 h-6 rounded-full bg-orange-500 text-white font-black text-xs flex items-center justify-center">+</button>
+              <span className="font-bold text-xs w-12 text-right">{fmt(i.subtotal)}</span>
+            </div></div>))}
+          <div className="border-t border-orange-200 pt-2 mt-2 space-y-1">
+            <div className="flex justify-between text-xs"><span className="text-gray-600">Productos</span><span className="font-bold">{fmt(totalProd)}</span></div>
+            {costoEnvio>0&&<div className="flex justify-between text-xs"><span className="text-purple-600">🛵 Costo envío</span><span className="font-bold text-purple-600">{fmt(costoEnvio)}</span></div>}
+            <div className="flex justify-between"><span className="font-black text-gray-800">TOTAL</span><span className="text-xl font-black text-orange-600">{fmt(totalFinal)}</span></div>
+          </div>
+        </div>
+        <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
+        <Btn full color="green" size="lg" onClick={crear}>📋 Crear Pedido · {fmt(totalFinal)}</Btn>
+      </React.Fragment>)}
+    </div></Modal>);
+}
+
+function CobrarModal({open,pedido,onClose,onCobrar}){
+  if(!pedido)return null;
+  return(<Modal open={open} onClose={onClose} title={`💰 Cobrar #${String(pedido.numero).padStart(3,'0')}`}>
+    <div className="space-y-4">
+      <div className="bg-orange-50 rounded-2xl p-4 text-center">
+        <p className="text-3xl font-black text-orange-600">{fmt(pedido.total)}</p>
+        {pedido.costoEnvio>0&&<p className="text-xs text-purple-500 mt-1">Incluye envío: {fmt(pedido.costoEnvio)}</p>}
+        {pedido.cliente&&<p className="text-xs text-gray-500 mt-1">👤 {pedido.cliente}</p>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <button onClick={()=>onCobrar('efectivo')} className="py-5 rounded-2xl border-2 border-green-300 bg-green-50 text-center active:scale-95">
+          <div className="text-3xl mb-1">💵</div><p className="font-black text-green-700">Efectivo</p></button>
+        <button onClick={()=>onCobrar('transferencia')} className="py-5 rounded-2xl border-2 border-blue-300 bg-blue-50 text-center active:scale-95">
+          <div className="text-3xl mb-1">📱</div><p className="font-black text-blue-700">Transferencia</p></button>
+      </div>
+    </div></Modal>);
+}
+
+// ─── GASTOS ─────────────────────────────────────────────────────────
+function GastosPage({state,onRegistrar,onEliminar}){
+  const [catSel,setCatSel]=useState('ingredientes');const [desc,setDesc]=useState('');const [monto,setMonto]=useState('');
+  const [enEfectivo,setEnEfectivo]=useState(true);const ja=state.jornadaActiva;
+  if(!ja)return(<div className="safe-bottom"><TopBar title="Gastos 💸"/>
+    <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada"/></div>);
+  const totalG=calcGastosTotal(ja.gastos);
+  const registrar=()=>{if(!monto||!desc)return;onRegistrar(catSel,desc,monto,enEfectivo);setDesc('');setMonto('');};
+  return(<div className="safe-bottom"><TopBar title="Gastos 💸" subtitle={`Total: ${fmt(totalG)}`}/>
+    <div className="px-4 py-4 space-y-4">
+      <div><p className="text-xs font-bold text-gray-500 mb-2 uppercase">Categoría</p>
+        <div className="flex gap-2 overflow-x-auto pb-1">{CATS_GASTO.map(c=>(
+          <button key={c.id} onClick={()=>setCatSel(c.id)}
+            className={`flex-shrink-0 flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border-2
+              ${catSel===c.id?'border-orange-500 bg-orange-50 text-orange-700':'border-gray-200 text-gray-500'}`}>{c.emoji} {c.label}</button>))}</div></div>
+      <Input label="Descripción" value={desc} onChange={setDesc} placeholder="Ej: Carne 5kg"/>
+      <Input label="Monto" type="number" value={monto} onChange={setMonto} prefix="$" placeholder="0"/>
+      <div className="flex items-center gap-3">
+        <button onClick={()=>setEnEfectivo(!enEfectivo)} className={`w-12 h-6 rounded-full transition-colors ${enEfectivo?'bg-green-500':'bg-gray-300'} relative`}>
+          <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${enEfectivo?'right-0.5':'left-0.5'}`}/></button>
+        <span className="text-sm text-gray-600">{enEfectivo?'💵 Efectivo':'📱 Otro'}</span></div>
+      <Btn full size="lg" onClick={registrar} disabled={!desc||!monto}>+ Registrar Gasto</Btn>
+      {ja.gastos.length>0&&(
+        <div className="bg-white rounded-3xl p-4 shadow-sm">
+          <h3 className="font-black text-gray-800 mb-3 text-sm">Gastos del día</h3>
+          {[...ja.gastos].reverse().map(g=>{const cat=CATS_GASTO.find(c=>c.id===g.categoria);
+            return(<div key={g.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+              <div className="flex items-center gap-2"><span className="text-lg">{cat?.emoji||'💸'}</span>
+                <div><p className="text-sm font-bold text-gray-700">{g.descripcion}</p>
+                  <p className="text-xs text-gray-400">{g.hora} · {cat?.label}</p></div></div>
+              <div className="flex items-center gap-2"><span className="font-black text-red-500 text-sm">{fmt(g.monto)}</span>
+                <button onClick={()=>onEliminar(g.id)} className="text-gray-300 text-lg">✕</button></div></div>);})}
+          <div className="border-t mt-3 pt-3 flex justify-between">
+            <span className="font-bold text-sm">Total</span><span className="font-black text-red-500">{fmt(totalG)}</span></div>
+        </div>)}
+    </div></div>);
+}
+
+// ─── REPORTES ───────────────────────────────────────────────────────
+function ReportesPage({state}){
+  const [tab,setTab]=useState('diario');const [jornadaSel,setJornadaSel]=useState(null);
+  const cerradas=state.jornadas.filter(j=>j.estado==='cerrada');
+  useEffect(()=>{if(cerradas.length&&!jornadaSel)setJornadaSel(cerradas[cerradas.length-1].id);},[cerradas.length]);
+  const jActual=jornadaSel?state.jornadas.find(j=>j.id===jornadaSel):(state.jornadaActiva||null);
+  const proj=calcProjections(state.jornadas);const stats=getProductoStats(state.jornadas,state.productos);const recs=getRecomendaciones(proj,stats);
+  const productSales=useMemo(()=>{if(!jActual)return[];const m={};
+    jActual.ventas.forEach(v=>v.items.forEach(i=>{m[i.nombre]=(m[i.nombre]||0)+i.subtotal;}));
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]);},[jActual]);
+  return(<div className="safe-bottom"><TopBar title="Reportes 📊"/>
+    <div className="px-4 py-4">
+      <div className="flex bg-gray-100 rounded-2xl p-1 mb-5">
+        {[{id:'diario',l:'Diario'},{id:'mensual',l:'Mensual'},{id:'mandaditos',l:'🛵 Mandaditos'}].map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            className={`flex-1 py-2.5 text-xs font-black rounded-xl transition-all ${tab===t.id?'bg-white text-orange-600 shadow-sm':'text-gray-500'}`}>{t.l}</button>))}</div>
+
+      {tab==='diario'&&(<div className="space-y-5">
+        {state.jornadas.length===0&&<EmptyState emoji="📊" title="Sin jornadas aún" sub="Abre tu primera jornada"/>}
+        {state.jornadas.length>0&&(<React.Fragment>
+          <div><p className="text-xs font-bold text-gray-500 mb-2 uppercase">Selecciona jornada</p>
+            <div className="flex gap-2 overflow-x-auto pb-1">
+              {state.jornadaActiva&&<button onClick={()=>setJornadaSel(null)}
+                className={`flex-shrink-0 px-3 py-2 rounded-xl text-xs font-bold border-2 ${!jornadaSel?'border-orange-500 bg-orange-50 text-orange-700':'border-gray-200 text-gray-500'}`}>🟢 Hoy</button>}
+              {[...cerradas].reverse().map(j=>(
+                <button key={j.id} onClick={()=>setJornadaSel(j.id)}
+                  className={`flex-shrink-0 px-3 py-2 rounded-xl text-xs font-bold border-2 ${jornadaSel===j.id?'border-orange-500 bg-orange-50 text-orange-700':'border-gray-200 text-gray-500'}`}>{fmtDateShort(j.fecha)}</button>))}</div></div>
+          {jActual&&(()=>{const tv=calcVentasTotal(jActual.ventas);const tg=calcGastosTotal(jActual.gastos);const ut=tv-tg;
+            const mg=tv>0?((ut/tv)*100).toFixed(1):0;const manda=calcMandaditosTotal(jActual.mandaditos||[]);
+            const pRecoger=(jActual.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
+            const pEnvio=(jActual.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
+            return(<div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <MetricCard icon="💰" label="Ventas" value={fmt(tv)} color="green"/>
+                <MetricCard icon="💸" label="Gastos" value={fmt(tg)} color="red"/>
+                <MetricCard icon="📈" label="Utilidad" value={fmt(ut)} color={ut>=0?'green':'red'} sub={`Margen: ${mg}%`}/>
+                <MetricCard icon="🧾" label="Pedidos" value={(jActual.pedidos||[]).length} color="orange" sub={`${pRecoger} recogen · ${pEnvio} envíos`}/>
+              </div>
+              {manda>0&&<MetricCard icon="🛵" label="Mandaditos (contabilidad aparte)" value={fmt(manda)} color="purple" sub={`${pEnvio} servicios de envío`}/>}
+              {productSales.length>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm">
+                <h3 className="font-black text-gray-800 mb-4 text-sm">Ventas por producto</h3>
+                <BarChart labels={productSales.map(([n])=>n.split(' ')[0])} values={productSales.map(([,v])=>v)}/></div>)}
+            </div>);})()}
+        </React.Fragment>)}</div>)}
+
+      {tab==='mensual'&&(<div className="space-y-5">
+        {cerradas.length===0&&<EmptyState emoji="📅" title="Sin jornadas cerradas" sub="Cierra al menos una jornada"/>}
+        {cerradas.length>0&&(()=>{const tv=cerradas.reduce((s,j)=>s+calcVentasTotal(j.ventas),0);
+          const tg=cerradas.reduce((s,j)=>s+calcGastosTotal(j.gastos),0);const tu=tv-tg;
+          return(<div className="space-y-5">
+            <div className="grid grid-cols-2 gap-3">
+              <MetricCard icon="📅" label="Jornadas" value={cerradas.length} sub="registradas" color="blue"/>
+              <MetricCard icon="📊" label="Prom/Jornada" value={fmt(tv/cerradas.length)} color="orange"/>
+              <MetricCard icon="💰" label="Total Acumulado" value={fmt(tv)} color="green"/>
+              <MetricCard icon="📈" label="Utilidad Prom." value={fmt(tu/cerradas.length)} color={tu>=0?'green':'red'}/>
+            </div>
+            {proj&&cerradas.length>1&&(<div className="bg-white rounded-3xl p-4 shadow-sm">
+              <h3 className="font-black text-gray-800 mb-2 text-sm">Evolución</h3>
+              <div className="flex gap-4 text-xs mb-3"><span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-orange-500 inline-block"/>Ventas</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-green-500 inline-block"/>Utilidad</span></div>
+              <LineChart dates={proj.dates} revenues={proj.revenues} profits={proj.profits}/></div>)}
+            {proj&&(<div className="bg-white rounded-3xl p-4 shadow-sm">
+              <h3 className="font-black text-gray-800 mb-3 text-sm">📈 Proyección mensual</h3>
+              {[{l:'Ventas proyectadas',v:fmt(proj.projRevenue),c:'text-green-600'},
+                {l:'Gastos proyectados',v:fmt(proj.projExpenses),c:'text-red-500'},
+                {l:'Utilidad proyectada',v:fmt(proj.projProfit),c:proj.projProfit>=0?'text-green-700':'text-red-600'},
+                {l:'Margen promedio',v:`${proj.margin.toFixed(1)}%`,c:'text-orange-600'}
+              ].map(r=>(<div key={r.l} className="flex justify-between py-2 border-b border-gray-50 last:border-0">
+                <span className="text-sm text-gray-600">{r.l}</span><span className={`font-black text-sm ${r.c}`}>{r.v}</span></div>))}</div>)}
+            {stats.filter(s=>s.cantidad>0).length>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm">
+              <h3 className="font-black text-gray-800 mb-3 text-sm">⭐ Productos estrella</h3>
+              {stats.filter(s=>s.cantidad>0).slice(0,6).map((s,i)=>(<div key={s.id} className="flex items-center gap-3 py-2 border-b border-gray-50 last:border-0">
+                <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span><span className="text-xl">{s.emoji}</span>
+                <div className="flex-1"><p className="text-xs font-bold">{s.nombre}</p><p className="text-xs text-gray-400">{s.cantidad} pz</p></div>
+                <div className="text-right"><p className="text-xs font-black">{fmt(s.revenue)}</p>
+                  <p className="text-[10px] text-green-600 font-bold">{(((s.precio-s.costo)/s.precio)*100).toFixed(0)}%</p></div></div>))}</div>)}
+            <div className="bg-white rounded-3xl p-4 shadow-sm">
+              <h3 className="font-black text-gray-800 mb-3 text-sm">💡 Recomendaciones</h3>
+              <div className="space-y-3">{recs.map((r,i)=>(<div key={i} className={`rounded-2xl p-3 text-sm
+                ${r.type==='warn'?'bg-yellow-50 border border-yellow-200':r.type==='ok'?'bg-green-50 border border-green-200':'bg-blue-50 border border-blue-200'}`}>
+                <span className="mr-2">{r.icon}</span><span>{r.text}</span></div>))}</div></div>
+          </div>);})()}
+      </div>)}
+
+      {tab==='mandaditos'&&(<MandaditosReport jornadas={state.jornadas} jornadaActiva={state.jornadaActiva}/>)}
+    </div></div>);
+}
+
+function MandaditosReport({jornadas,jornadaActiva}){
+  const todas=[...jornadas.filter(j=>j.estado==='cerrada')];
+  if(jornadaActiva)todas.push(jornadaActiva);
+  const totalManda=todas.reduce((s,j)=>s+calcMandaditosTotal(j.mandaditos||[]),0);
+  const totalEnvios=todas.reduce((s,j)=>s+(j.mandaditos||[]).length,0);
+  const totalRecoger=todas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length,0);
+  const totalClientes=totalEnvios+totalRecoger;
+  const porTipo={};
+  todas.forEach(j=>(j.mandaditos||[]).forEach(m=>{
+    if(!porTipo[m.tipo])porTipo[m.tipo]={cant:0,total:0};
+    porTipo[m.tipo].cant++;porTipo[m.tipo].total+=m.tarifa;
+  }));
+  return(<div className="space-y-5">
+    {totalClientes===0&&<EmptyState emoji="🛵" title="Sin datos de envíos" sub="Los mandaditos aparecerán aquí"/>}
+    {totalClientes>0&&(<React.Fragment>
+      <div className="grid grid-cols-2 gap-3">
+        <MetricCard icon="🛵" label="Ingresos Mandaditos" value={fmt(totalManda)} color="purple" sub="Contabilidad separada"/>
+        <MetricCard icon="📦" label="Total Envíos" value={totalEnvios} color="blue"/>
+        <MetricCard icon="🏃" label="Pasan a Recoger" value={totalRecoger} color="green"/>
+        <MetricCard icon="👥" label="Total Clientes" value={totalClientes} color="orange"/>
+      </div>
+      {Object.keys(porTipo).length>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm">
+        <h3 className="font-black text-gray-800 mb-3 text-sm">Desglose por tipo de envío</h3>
+        {Object.entries(porTipo).map(([tipo,data])=>{const t=TARIFAS_ENVIO[tipo];
+          return(<div key={tipo} className="flex justify-between items-center py-2 border-b border-gray-50 last:border-0">
+            <span className="text-sm text-gray-600">{t?.emoji} {t?.label||tipo}</span>
+            <div className="text-right"><p className="font-bold text-sm text-purple-600">{fmt(data.total)}</p>
+              <p className="text-xs text-gray-400">{data.cant} servicios</p></div></div>);})}
+      </div>)}
+      <div className="bg-purple-50 rounded-2xl p-4 text-sm text-purple-700">
+        <p className="font-bold">📌 Nota: Mandaditos</p>
+        <p className="text-xs mt-1 opacity-70">Este ingreso se contabiliza por separado del negocio. Es un servicio externo que no afecta la utilidad de ventas de productos.</p>
+      </div>
+    </React.Fragment>)}
+  </div>);
+}
+
+// ─── ADMIN ──────────────────────────────────────────────────────────
+function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onActualizarImpresora,onImportarProductos,onImportarCostos}){
+  const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);
+  const productStats=getProductoStats(state.jornadas,state.productos);
+  return(<div className="safe-bottom"><TopBar title="Administración ⚙️" subtitle={`v${APP_VERSION}`}/>
+    <div className="px-4 py-4">
+      <div className="flex bg-gray-100 rounded-2xl p-1 mb-5 gap-1 overflow-x-auto">
+        {[{id:'importar',l:'📥 Importar'},{id:'costos',l:'Costos'},{id:'productos',l:'Productos'},{id:'impresora',l:'🖨️'},{id:'config',l:'Config'}].map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            className={`flex-shrink-0 flex-1 py-2 text-xs font-black rounded-xl ${tab===t.id?'bg-white text-orange-600 shadow-sm':'text-gray-500'}`}>{t.l}</button>))}</div>
+
+      {tab==='importar'&&(<ImportarTab onImportarProductos={onImportarProductos} onImportarCostos={onImportarCostos} productos={state.productos} costos={state.costos}/>)}
+
+      {tab==='costos'&&(<div className="space-y-4">
+        <div className="bg-orange-50 rounded-2xl p-4 text-sm text-orange-700">
+          <p className="font-bold">💡 Rentabilidad por producto</p>
+          <p className="text-xs mt-1 opacity-70">Estos costos se usan para calcular el margen. Actualízalos desde la tab Importar.</p></div>
+        {state.productos.map(p=>{const margen=p.precio>0?(((p.precio-p.costo)/p.precio)*100):0;
+          const s=productStats.find(x=>x.id===p.id);
+          return(<div key={p.id} className="bg-white rounded-2xl p-4 shadow-sm">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2"><span className="text-2xl">{p.emoji}</span><p className="font-bold text-sm">{p.nombre}</p></div>
+              <button onClick={()=>setEditProd(p)} className="text-xs text-orange-500 font-bold border border-orange-300 px-2 py-1 rounded-lg">Editar</button></div>
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="bg-gray-50 rounded-xl p-2"><p className="text-xs text-gray-400">Precio</p><p className="font-black text-sm">{fmt(p.precio)}</p></div>
+              <div className="bg-gray-50 rounded-xl p-2"><p className="text-xs text-gray-400">Costo</p><p className="font-black text-sm text-red-500">{fmt(p.costo)}</p></div>
+              <div className={`rounded-xl p-2 ${margen>=40?'bg-green-50':margen>=20?'bg-yellow-50':'bg-red-50'}`}>
+                <p className="text-xs text-gray-400">Margen</p>
+                <p className={`font-black text-sm ${margen>=40?'text-green-600':margen>=20?'text-yellow-600':'text-red-500'}`}>{margen.toFixed(0)}%</p></div></div>
+            {s&&s.cantidad>0&&<p className="text-xs text-gray-400 mt-2 text-center">{s.cantidad} vendidos · {fmt(s.revenue)}</p>}
+            <div className="mt-2 bg-gray-100 rounded-full h-2"><div className={`h-2 rounded-full ${margen>=40?'bg-green-500':margen>=20?'bg-yellow-400':'bg-red-400'}`} style={{width:`${Math.min(margen,100)}%`}}/></div>
+          </div>);})}
+      </div>)}
+
+      {tab==='productos'&&(<div className="space-y-3">
+        {state.productos.map(p=>(<div key={p.id} className="bg-white rounded-2xl p-4 shadow-sm flex items-center justify-between">
+          <div className="flex items-center gap-3"><span className="text-2xl">{p.emoji}</span>
+            <div><p className="font-bold text-sm">{p.nombre}</p><p className="text-xs text-gray-500">{fmt(p.precio)}</p></div></div>
+          <button onClick={()=>onActualizarProducto(p.id,{activo:!p.activo})}
+            className={`w-12 h-6 rounded-full transition-colors ${p.activo?'bg-green-500':'bg-gray-300'} relative`}>
+            <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${p.activo?'right-0.5':'left-0.5'}`}/></button>
+        </div>))}</div>)}
+
+      {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} onActualizar={onActualizarImpresora}/>)}
+
+      {tab==='config'&&(<div className="space-y-5">
+        <div className="bg-white rounded-3xl p-4 shadow-sm">
+          <h3 className="font-black text-gray-800 mb-3 text-sm">💼 Equipo</h3>
+          {state.empleados.map(e=>(<div key={e.id} className="flex items-center justify-between py-3 border-b border-gray-50 last:border-0">
+            <div><p className="font-bold text-sm">{e.nombre}</p><p className="text-xs text-gray-400">{e.rol}</p></div>
+            <p className={`font-black text-sm ${e.sueldo>0?'text-orange-600':'text-gray-400'}`}>{e.sueldo>0?fmt(e.sueldo):'Socio'}</p></div>))}
+          <div className="mt-3 border-t pt-3 flex justify-between">
+            <span className="font-bold text-sm">Total nómina/jornada</span>
+            <span className="font-black text-orange-600">{fmt(state.empleados.reduce((s,e)=>s+e.sueldo,0))}</span></div></div>
+        <div className="bg-white rounded-3xl p-4 shadow-sm">
+          <h3 className="font-black text-gray-800 mb-3 text-sm">📌 Gastos fijos</h3>
+          {state.gastosFijos.map(g=>(<div key={g.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+            <span className="text-sm text-gray-700">{g.nombre}</span>
+            <div className="flex items-center border-2 border-gray-200 rounded-xl overflow-hidden">
+              <span className="px-2 text-gray-400 text-sm">$</span>
+              <input type="number" value={g.monto} onChange={e=>onActualizarGastoFijo(g.id,e.target.value)}
+                className="w-20 py-1.5 text-sm font-bold text-right outline-none pr-2"/></div></div>))}</div>
+        <div className="bg-gray-50 rounded-2xl p-4 text-xs text-gray-500 text-center">
+          <p className="font-bold">K'apul'Its v{APP_VERSION}</p>
+          <p>{NEGOCIO.direccion}</p>
+          <p>Tel.: {NEGOCIO.telefono}</p></div>
+      </div>)}
+    </div>
+
+    {editProd&&<Modal open={!!editProd} onClose={()=>setEditProd(null)} title={`Editar: ${editProd.nombre}`}>
+      <EditProductoForm producto={editProd} onSave={d=>{onActualizarProducto(editProd.id,d);setEditProd(null);}}/></Modal>}
+  </div>);
+}
+
+// ── Importar Tab ──
+function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
+  const [status,setStatus]=useState('');const fileRef=useRef(null);const [importType,setImportType]=useState(null);
+
+  const handleFile=async(e)=>{
+    const file=e.target.files[0];if(!file)return;
+    setStatus('📂 Leyendo archivo...');
+    try{
+      const data=await file.arrayBuffer();
+      const wb=XLSX.read(data);
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const json=XLSX.utils.sheet_to_json(ws);
+      if(!json.length){setStatus('❌ El archivo está vacío');return;}
+
+      if(importType==='menu'){
+        const prods=json.map((r,i)=>({
+          id:r.id||('prod_'+i),nombre:r.nombre||'',precio:Number(r.precio)||0,
+          costo:Number(r.costo)||0,cat:r.categoria||'platillo',emoji:r.emoji||'🍽️',activo:r.activo!==false&&r.activo!=='no'
+        })).filter(p=>p.nombre);
+        if(prods.length){onImportarProductos(prods);setStatus(`✅ ${prods.length} productos importados`);}
+        else setStatus('❌ No se encontraron productos válidos');
+      }else if(importType==='costos'){
+        const cs=json.map((r,i)=>({
+          id:r.id||('costo_'+i),nombre:r.nombre||'',unidad:r.unidad||'',
+          pu:Number(r.precio_unitario||r.pu||r.precio)||0,cat:r.categoria||''
+        })).filter(c=>c.nombre);
+        if(cs.length){onImportarCostos(cs);setStatus(`✅ ${cs.length} costos importados`);}
+        else setStatus('❌ No se encontraron costos válidos');
+      }
+    }catch(e){setStatus(`❌ Error: ${e.message}`);}
+    if(fileRef.current)fileRef.current.value='';
+  };
+
+  const descargarPlantilla=(tipo)=>{
+    let wb,ws,data;
+    if(tipo==='menu'){
+      data=[{id:'consome',nombre:'Consomé',precio:115,costo:38,categoria:'platillo',emoji:'🍲',activo:'si'}];
+      productos.forEach(p=>{ if(p.id!=='consome')data.push({id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,categoria:p.cat,emoji:p.emoji,activo:p.activo?'si':'no'});});
+    }else{
+      data=costos.map(c=>({id:c.id,nombre:c.nombre,unidad:c.unidad,precio_unitario:c.pu,categoria:c.cat}));
+    }
+    wb=XLSX.utils.book_new();ws=XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb,ws,'Datos');
+    XLSX.writeFile(wb,`plantilla_${tipo}.xlsx`);
+  };
+
+  return(<div className="space-y-5">
+    <div className="bg-orange-50 rounded-2xl p-4 text-sm text-orange-700">
+      <p className="font-bold mb-2">📥 Dashboard de Importación</p>
+      <p className="text-xs opacity-70">Sube archivos Excel (.xlsx) para actualizar datos sin necesidad de modificar código. Primero descarga la plantilla, edítala y súbela de vuelta.</p>
+    </div>
+
+    <div className="bg-white rounded-3xl p-5 shadow-sm">
+      <h3 className="font-black text-gray-800 mb-4 text-sm">🍽️ Menú y Precios</h3>
+      <p className="text-xs text-gray-500 mb-3">Actualiza los productos del menú, precios y costos estimados.</p>
+      <div className="flex gap-2 mb-3">
+        <Btn size="sm" color="gray" onClick={()=>descargarPlantilla('menu')}>📄 Descargar plantilla</Btn>
+        <Btn size="sm" color="orange" onClick={()=>{setImportType('menu');fileRef.current?.click();}}>📤 Subir Excel</Btn>
+      </div>
+      <p className="text-xs text-gray-400">Columnas: id · nombre · precio · costo · categoria · emoji · activo</p>
+    </div>
+
+    <div className="bg-white rounded-3xl p-5 shadow-sm">
+      <h3 className="font-black text-gray-800 mb-4 text-sm">🧾 Base de Costos (Ingredientes)</h3>
+      <p className="text-xs text-gray-500 mb-3">Actualiza la base de datos de costos de insumos y materias primas.</p>
+      <div className="flex gap-2 mb-3">
+        <Btn size="sm" color="gray" onClick={()=>descargarPlantilla('costos')}>📄 Descargar plantilla</Btn>
+        <Btn size="sm" color="orange" onClick={()=>{setImportType('costos');fileRef.current?.click();}}>📤 Subir Excel</Btn>
+      </div>
+      <p className="text-xs text-gray-400">Columnas: id · nombre · unidad · precio_unitario · categoria</p>
+    </div>
+
+    <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden"/>
+
+    {status&&<div className={`rounded-2xl p-4 text-sm font-bold text-center ${status.startsWith('✅')?'bg-green-50 text-green-700':status.startsWith('❌')?'bg-red-50 text-red-600':'bg-blue-50 text-blue-700'}`}>{status}</div>}
+
+    <div className="bg-gray-50 rounded-2xl p-4 text-xs text-gray-500">
+      <p className="font-bold mb-1">💡 ¿Cómo funciona?</p>
+      <ol className="list-decimal pl-4 space-y-1">
+        <li>Descarga la plantilla con los datos actuales</li>
+        <li>Edítala en Excel/Google Sheets (agrega, modifica o elimina filas)</li>
+        <li>Sube el archivo modificado</li>
+        <li>La app se actualiza automáticamente</li>
+      </ol>
+    </div>
+  </div>);
+}
+
+function ImpresoraTab({impresora,onActualizar}){
+  const [status,setStatus]=useState('');const hasBT='bluetooth' in navigator;
+  const conectar=async()=>{setStatus('Buscando...');const r=await connectBluetooth();
+    if(r.success){onActualizar({tipo:'bluetooth',nombre:r.name,conectada:true});setStatus(`✅ ${r.name}`);}
+    else setStatus(`❌ ${r.error}`);};
+  const testPrint=async()=>{
+    const p={numero:0,fecha:new Date().toISOString().slice(0,10),hora:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),
+      tipoEntrega:'recoger',cliente:'PRUEBA',direccion:'',notas:'Ticket de prueba',totalProductos:100,costoEnvio:0,total:100,
+      items:[{productoId:'test',nombre:'Producto prueba',cantidad:1,precio:100,subtotal:100,emoji:'🧪'}]};
+    const r=await printTicket(p);setStatus(r.success?`✅ Impreso (${r.method})`:'❌ Error');};
+  return(<div className="space-y-5">
+    <div className="bg-white rounded-3xl p-5 shadow-sm">
+      <h3 className="font-black text-gray-800 mb-4 text-sm">🖨️ Impresora de tickets</h3>
+      <div className="space-y-4">
+        <div className={`rounded-2xl p-4 border-2 ${impresora.conectada?'border-green-300 bg-green-50':'border-gray-200 bg-gray-50'}`}>
+          <div className="flex items-center gap-3"><span className="text-3xl">{impresora.conectada?'🟢':'⚪'}</span>
+            <div><p className="font-bold text-sm">{impresora.conectada?impresora.nombre:'Sin impresora'}</p>
+              <p className="text-xs text-gray-500">{impresora.conectada?impresora.tipo:'Conecta una para imprimir tickets'}</p></div></div></div>
+        {hasBT&&<Btn full onClick={conectar}>📡 Conectar Bluetooth</Btn>}
+        {!hasBT&&<div className="bg-yellow-50 rounded-xl p-3 text-sm text-yellow-700">
+          <p className="font-bold">⚠️ Bluetooth no disponible</p>
+          <p className="text-xs mt-1">Los tickets se imprimirán como ventana emergente.</p></div>}
+        <Btn full color="gray" onClick={testPrint}>🧪 Ticket de prueba</Btn>
+        <div className="flex items-center justify-between">
+          <div><p className="text-sm font-bold">Auto-imprimir</p><p className="text-xs text-gray-400">Al crear pedido</p></div>
+          <button onClick={()=>onActualizar({autoImprimir:!impresora.autoImprimir})}
+            className={`w-12 h-6 rounded-full ${impresora.autoImprimir?'bg-green-500':'bg-gray-300'} relative`}>
+            <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow ${impresora.autoImprimir?'right-0.5':'left-0.5'}`}/></button></div>
+        {status&&<p className="text-center text-sm font-bold">{status}</p>}
+      </div></div>
+  </div>);
+}
+
+function EditProductoForm({producto,onSave}){
+  const [precio,setPrecio]=useState(producto.precio);const [costo,setCosto]=useState(producto.costo);
+  const margen=precio>0?(((precio-costo)/precio)*100).toFixed(1):0;
+  return(<div className="space-y-4">
+    <Input label="Precio de venta" type="number" prefix="$" value={precio} onChange={v=>setPrecio(Number(v))}/>
+    <Input label="Costo estimado" type="number" prefix="$" value={costo} onChange={v=>setCosto(Number(v))}/>
+    <div className={`rounded-xl p-3 text-center font-bold ${margen>=40?'bg-green-50 text-green-700':margen>=20?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
+      Margen: {margen}% {margen>=40?'✅':margen>=20?'⚠️':'🚨'}</div>
+    <Btn full onClick={()=>onSave({precio,costo})}>Guardar</Btn></div>);
+}
+
+// ─── APP ────────────────────────────────────────────────────────────
+function App(){
+  const [page,setPage]=useState('dashboard');
+  const {state,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,
+    actualizarImpresora,importarProductos,importarCostos}=useStore();
+  const hasJornada=!!state.jornadaActiva;
+  const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
+  const [toast,setToast]=useState(null);
+  const showToast=(msg,color='green')=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
+  return(<div className="relative min-h-screen">
+    {page==='dashboard'&&<DashboardPage state={state}
+      onAbrir={(f,d)=>{abrirJornada(f,d);showToast('🟢 Jornada abierta');}}
+      onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('🔴 Jornada cerrada','red');}}/>}
+    {page==='pedidos'&&<PedidosPage state={state}
+      onCrearPedido={(i,t,c,dir,n)=>{const p=crearPedido(i,t,c,dir,n);showToast(`📋 Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
+      onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
+        if(c.cobrado)showToast('💰 Cobrado','green');
+        else if(c.estado==='entregado')showToast('✅ Entregado','green');
+        else if(c.estado==='cancelado')showToast('🔴 Cancelado','red');}}/>}
+    {page==='gastos'&&<GastosPage state={state}
+      onRegistrar={(c,d,m,e)=>{registrarGasto(c,d,m,e);showToast('💸 Gasto registrado','orange');}}
+      onEliminar={eliminarGasto}/>}
+    {page==='reportes'&&<ReportesPage state={state}/>}
+    {page==='admin'&&<AdminPage state={state} onActualizarProducto={actualizarProducto}
+      onActualizarGastoFijo={actualizarGastoFijo} onActualizarImpresora={actualizarImpresora}
+      onImportarProductos={p=>{importarProductos(p);showToast('✅ Productos actualizados');}}
+      onImportarCostos={c=>{importarCostos(c);showToast('✅ Costos actualizados');}}/>}
+    <BottomNav page={page} setPage={setPage} hasJornada={hasJornada} pedidosNuevos={pedidosNuevos}/>
+    {toast&&(<div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl text-white font-bold text-sm shadow-xl slide-up
+      ${toast.color==='green'?'bg-green-500':toast.color==='red'?'bg-red-500':toast.color==='orange'?'bg-orange-500':'bg-gray-700'}`}>{toast.msg}</div>)}
+  </div>);
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{});}</script>
+</body>
+</html>
