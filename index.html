@@ -14,6 +14,7 @@
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
   body{margin:0;padding:0;background:#fff7ed;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overscroll-behavior:none}
@@ -111,6 +112,28 @@ const INITIAL_STATE = {
   impresora:{tipo:null,nombre:null,conectada:false,autoImprimir:true},
 };
 
+// ─── SUPABASE SYNC ──────────────────────────────────────────────────
+const SB_URL='https://rmzwczoxzemwdoalywfe.supabase.co';
+const SB_KEY='sb_publishable_2lfU9ISeLSrL5yuMgPnILA_N8CQsUoQ';
+let _sb=null;
+try{_sb=window.supabase?.createClient(SB_URL,SB_KEY);}catch(e){}
+
+async function cloudLoad(){
+  if(!_sb)return null;
+  try{
+    const{data,error}=await _sb.from('kapulits_state').select('data,updated_at').eq('id','main').single();
+    if(error||!data)return null;
+    return data;
+  }catch(e){return null;}
+}
+let _saveTimer=null;
+async function cloudSave(state){
+  if(!_sb)return;
+  try{
+    await _sb.from('kapulits_state').upsert({id:'main',data:state,updated_at:new Date().toISOString()},{onConflict:'id'});
+  }catch(e){}
+}
+
 // ─── STORE ──────────────────────────────────────────────────────────
 function useStore(){
   const [state,setState]=useState(()=>{
@@ -119,7 +142,42 @@ function useStore(){
         empleados:p.empleados||EMPLEADOS_DEFAULT,impresora:p.impresora||INITIAL_STATE.impresora};}}catch(e){}
     return INITIAL_STATE;
   });
-  const save=useCallback(ns=>{try{localStorage.setItem('kapulits_v2',JSON.stringify(ns));}catch(e){}setState(ns);},[]);
+  const [syncStatus,setSyncStatus]=useState('idle');
+
+  // Carga inicial desde la nube
+  useEffect(()=>{
+    setSyncStatus('syncing');
+    cloudLoad().then(cloud=>{
+      if(cloud?.data){
+        const localTs=localStorage.getItem('kapulits_ts')||'';
+        if(!localTs||cloud.updated_at>localTs){
+          const p=cloud.data;
+          const ns={...INITIAL_STATE,...p,
+            productos:p.productos||PRODUCTOS_DEFAULT,
+            costos:p.costos||COSTOS_DEFAULT,
+            empleados:p.empleados||EMPLEADOS_DEFAULT,
+            impresora:p.impresora||INITIAL_STATE.impresora};
+          try{localStorage.setItem('kapulits_v2',JSON.stringify(ns));
+              localStorage.setItem('kapulits_ts',cloud.updated_at);}catch(e){}
+          setState(ns);
+        }
+      }
+      setSyncStatus('synced');
+    }).catch(()=>setSyncStatus('offline'));
+  },[]);
+
+  const save=useCallback(ns=>{
+    try{
+      localStorage.setItem('kapulits_v2',JSON.stringify(ns));
+      localStorage.setItem('kapulits_ts',new Date().toISOString());
+    }catch(e){}
+    setState(ns);
+    setSyncStatus('syncing');
+    if(_saveTimer)clearTimeout(_saveTimer);
+    _saveTimer=setTimeout(()=>{
+      cloudSave(ns).then(()=>setSyncStatus('synced')).catch(()=>setSyncStatus('offline'));
+    },1200);
+  },[]);
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   const now=()=>new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
   const today=()=>new Date().toISOString().slice(0,10);
@@ -205,7 +263,7 @@ function useStore(){
   const importarProductos=useCallback(prods=>{save({...state,productos:prods});},[state,save]);
   const importarCostos=useCallback(costos=>{save({...state,costos});},[state,save]);
 
-  return{state,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+  return{state,syncStatus,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos};
 }
@@ -362,10 +420,20 @@ function LineChart({dates=[],revenues=[],profits=[]}){
 }
 
 // ─── BASE COMPONENTS ────────────────────────────────────────────────
-function TopBar({title,subtitle,right}){
+function SyncDot({status}){
+  const cfg={
+    syncing:{color:'bg-yellow-300',pulse:true,title:'Guardando en nube...'},
+    synced:{color:'bg-green-400',pulse:false,title:'Sincronizado ☁️'},
+    offline:{color:'bg-red-400',pulse:false,title:'Sin conexión (datos locales)'},
+    idle:{color:'bg-white/30',pulse:false,title:''},
+  };
+  const c=cfg[status]||cfg.idle;
+  return(<span title={c.title} className={`inline-block w-2 h-2 rounded-full ${c.color} ${c.pulse?'pulse-dot':''} ml-1`}/>);
+}
+function TopBar({title,subtitle,right,syncStatus}){
   return(<div className="bg-orange-600 text-white px-4 py-3 safe-top sticky top-0 z-30 shadow-lg">
     <div className="flex items-center justify-between">
-      <div><h1 className="font-black text-lg leading-tight">{title}</h1>
+      <div><h1 className="font-black text-lg leading-tight">{title}{syncStatus&&<SyncDot status={syncStatus}/>}</h1>
         {subtitle&&<p className="text-orange-200 text-xs">{subtitle}</p>}</div>
       {right&&<div>{right}</div>}</div></div>);
 }
@@ -489,7 +557,7 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
 }
 
 // ─── DASHBOARD ──────────────────────────────────────────────────────
-function DashboardPage({state,onAbrir,onCerrar}){
+function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
   const [showAbrir,setShowAbrir]=useState(false);const [showCerrar,setShowCerrar]=useState(false);
   const ja=state.jornadaActiva;
   const totalV=ja?calcVentasTotal(ja.ventas):0;const totalG=ja?calcGastosTotal(ja.gastos):0;const util=totalV-totalG;
@@ -498,7 +566,7 @@ function DashboardPage({state,onAbrir,onCerrar}){
   const totalManda=ja?calcMandaditosTotal(ja.mandaditos||[]):0;
   const ultimasJ=state.jornadas.filter(j=>j.estado==='cerrada').slice(-5).reverse();
   return(<div className="safe-bottom">
-    <TopBar title="K'apul'Its 🌮" subtitle={ja?`Jornada abierta · ${ja.horaApertura}`:NEGOCIO.slogan}
+    <TopBar title="K'apul'Its 🌮" syncStatus={syncStatus} subtitle={ja?`Jornada abierta · ${ja.horaApertura}`:NEGOCIO.slogan}
       right={ja&&<button onClick={()=>setShowCerrar(true)} className="bg-white/20 text-white text-xs font-bold px-3 py-1.5 rounded-xl">Cerrar caja</button>}/>
     <div className="px-4 py-5 space-y-5">
       {!ja?(
@@ -1107,7 +1175,7 @@ function EditProductoForm({producto,onSave}){
 // ─── APP ────────────────────────────────────────────────────────────
 function App(){
   const [page,setPage]=useState('dashboard');
-  const {state,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+  const {state,syncStatus,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos}=useStore();
   const hasJornada=!!state.jornadaActiva;
@@ -1115,7 +1183,7 @@ function App(){
   const [toast,setToast]=useState(null);
   const showToast=(msg,color='green')=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
   return(<div className="relative min-h-screen">
-    {page==='dashboard'&&<DashboardPage state={state}
+    {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
       onAbrir={(f,d)=>{abrirJornada(f,d);showToast('🟢 Jornada abierta');}}
       onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('🔴 Jornada cerrada','red');}}/>}
     {page==='pedidos'&&<PedidosPage state={state}
