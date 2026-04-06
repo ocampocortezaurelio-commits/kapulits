@@ -128,10 +128,9 @@ async function cloudLoad(){
 }
 let _saveTimer=null;
 async function cloudSave(state){
-  if(!_sb)return;
-  try{
-    await _sb.from('kapulits_state').upsert({id:'main',data:state,updated_at:new Date().toISOString()},{onConflict:'id'});
-  }catch(e){}
+  if(!_sb)throw new Error('no client');
+  const{error}=await _sb.from('kapulits_state').upsert({id:'main',data:state,updated_at:new Date().toISOString()},{onConflict:'id'});
+  if(error)throw error;
 }
 
 // ─── STORE ──────────────────────────────────────────────────────────
