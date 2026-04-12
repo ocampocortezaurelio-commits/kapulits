@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-v4';
+const CACHE_NAME = 'kapulits-v5';
 const BASE = '/kapulits/';
 const ASSETS = [
   BASE,

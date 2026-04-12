@@ -862,7 +862,8 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
 
 // ─── PEDIDOS ────────────────────────────────────────────────────────
 function PedidosPage({state,onCrearPedido,onActualizarPedido}){
-  const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);const [showEditar,setShowEditar]=useState(null);
+  const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
+  const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
   const ja=state.jornadaActiva;
   if(!ja)return(<div className="safe-bottom"><TopBar title="Pedidos 📋"/>
     <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada para crear pedidos"/></div>);
@@ -881,31 +882,37 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
           <PedidoCard key={p.id} pedido={p}
             onEntregar={()=>onActualizarPedido(p.id,{estado:'entregado'})}
             onCobrar={()=>setShowCobrar(p)}
-            onCancelar={()=>onActualizarPedido(p.id,{estado:'cancelado'})}
+            onCancelar={()=>setConfirmCancel(p)}
             onEditar={()=>setShowEditar(p)}
-            onPrint={()=>printTicket(p)}/>))}</div></div>)}
+            onPrint={()=>printTicket(p)}
+            onWhatsApp={()=>shareWhatsApp(p)}/>))}</div></div>)}
       {entregados.length>0&&(<div>
-        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-2">🟢 Entregados ({entregados.length})</p>
+        <p className="text-xs font-bold text-green-600 uppercase tracking-wider mb-2">🟢 Entregados sin cobrar ({entregados.length})</p>
         <div className="space-y-3">{entregados.map(p=>(
-          <PedidoCard key={p.id} pedido={p} onCobrar={()=>setShowCobrar(p)} onPrint={()=>printTicket(p)} showEntregar={false}/>))}</div></div>)}
+          <PedidoCard key={p.id} pedido={p} onCobrar={()=>setShowCobrar(p)} onPrint={()=>printTicket(p)}
+            onWhatsApp={()=>shareWhatsApp(p)} showEntregar={false}/>))}</div></div>)}
       {cobrados.length>0&&(<div>
         <p className="text-xs font-bold text-blue-600 uppercase tracking-wider mb-2">✅ Cobrados ({cobrados.length})</p>
         <div className="space-y-2">{cobrados.map(p=>(
-          <div key={p.id} className="bg-white rounded-xl p-3 shadow-sm border border-green-100 opacity-80">
+          <div key={p.id} className="bg-white rounded-xl p-3 shadow-sm border border-green-100">
             <div className="flex justify-between items-center">
-              <span className="text-xs font-bold text-gray-600">#{String(p.numero).padStart(3,'0')} · {p.hora} · {p.cliente||'—'}</span>
+              <div><span className="text-xs font-bold text-gray-600">#{String(p.numero).padStart(3,'0')} · {p.hora}</span>
+                {p.cliente&&<span className="text-xs text-gray-400"> · {p.cliente}</span>}</div>
               <div className="flex items-center gap-1">
                 <Badge color="green">{fmt(p.totalProductos)}</Badge>
                 {p.costoEnvio>0&&<Badge color="purple">🛵{fmt(p.costoEnvio)}</Badge>}
+                <Badge color={p.metodoPago==='efectivo'?'green':'blue'}>{p.metodoPago==='efectivo'?'💵':'📱'}</Badge>
               </div></div>
           </div>))}</div></div>)}
       {cancelados.length>0&&(<div>
         <p className="text-xs font-bold text-red-500 uppercase tracking-wider mb-2">🔴 Cancelados ({cancelados.length})</p>
         <div className="space-y-2">{cancelados.map(p=>(
-          <div key={p.id} className="bg-red-50 rounded-xl p-3 border border-red-100 opacity-60">
-            <span className="text-xs font-bold text-gray-500 line-through">#{String(p.numero).padStart(3,'0')} · {p.cliente||'—'}</span>
+          <div key={p.id} className="bg-red-50 rounded-xl p-3 border border-red-100 flex justify-between items-center">
+            <span className="text-xs font-bold text-gray-500 line-through">#{String(p.numero).padStart(3,'0')} · {p.cliente||'—'} · {fmt(p.total)}</span>
+            <button onClick={()=>onActualizarPedido(p.id,{estado:'nuevo'})}
+              className="text-xs font-bold text-orange-500 bg-orange-50 px-2 py-1 rounded-lg border border-orange-200" aria-label="Restaurar pedido">↩ Restaurar</button>
           </div>))}</div></div>)}
-      {pedidos.length===0&&<EmptyState emoji="📋" title="Sin pedidos aun" sub="Crea tu primer pedido del dia"/>}
+      {pedidos.length===0&&<EmptyState emoji="📋" title="Sin pedidos" sub="Crea tu primer pedido del dia"/>}
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
         impresora={state.impresora}
         onCrear={(items,tipo,cliente,dir,notas)=>{
@@ -917,11 +924,41 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
       {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos}
         onClose={()=>setShowEditar(null)}
         onGuardar={cambios=>{onActualizarPedido(showEditar.id,cambios);setShowEditar(null);}}/>}
+      <Modal open={!!confirmCancel} onClose={()=>setConfirmCancel(null)} title="⚠️ Cancelar pedido">
+        {confirmCancel&&(<div className="space-y-4">
+          <div className="bg-red-50 rounded-2xl p-4 text-center">
+            <p className="font-black text-red-600 text-lg">#{String(confirmCancel.numero).padStart(3,'0')}</p>
+            <p className="text-sm text-gray-600 mt-1">{confirmCancel.cliente||'Sin nombre'} · {fmt(confirmCancel.total)}</p>
+          </div>
+          <p className="text-sm text-gray-500 text-center">Este pedido se movera a cancelados. Podras restaurarlo despues si es necesario.</p>
+          <div className="flex gap-3">
+            <Btn full color="gray" onClick={()=>setConfirmCancel(null)}>No, volver</Btn>
+            <Btn full color="red" onClick={()=>{onActualizarPedido(confirmCancel.id,{estado:'cancelado'});setConfirmCancel(null);}}>Si, cancelar</Btn>
+          </div>
+        </div>)}
+      </Modal>
     </div>
   </div>);
 }
 
-function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,showEntregar=true}){
+function shareWhatsApp(pedido){
+  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+  let msg=`*K'apul'Its* - Pedido #${String(pedido.numero).padStart(3,'0')}\n`;
+  msg+=`${pedido.fecha} · ${pedido.hora}\n`;
+  if(pedido.cliente)msg+=`Cliente: ${pedido.cliente}\n`;
+  msg+=`${tarifa.emoji} ${tarifa.label}\n`;
+  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')msg+=`Dir: ${pedido.direccion}\n`;
+  msg+=`---\n`;
+  pedido.items.forEach(i=>{msg+=`${i.cantidad}x ${i.nombre} - ${fmt(i.subtotal)}\n`;});
+  msg+=`---\n`;
+  if(pedido.costoEnvio>0)msg+=`Envio: ${fmt(pedido.costoEnvio)}\n`;
+  msg+=`*TOTAL: ${fmt(pedido.total)}*\n`;
+  if(pedido.notas)msg+=`Nota: ${pedido.notas}\n`;
+  msg+=`\nTel.: ${NEGOCIO.telefono}`;
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`,'_blank');
+}
+
+function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWhatsApp,showEntregar=true}){
   const est=ESTADO_PEDIDO[pedido.estado];const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
   return(<div className={`bg-white rounded-2xl p-4 shadow-sm border-2 ${est.color.split(' ')[2]||'border-gray-100'} fade-in`}>
     <div className="flex justify-between items-start mb-2">
@@ -947,11 +984,12 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,show
       {pedido.notas&&<p className="text-xs text-orange-500 mt-1 italic">📝 {pedido.notas}</p>}
     </div>
     <div className="flex gap-2 flex-wrap">
-      {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}>✅ Entregar</Btn>}
+      {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}>✅ Listo</Btn>}
       {!pedido.cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}>💰 Cobrar</Btn>}
       {pedido.estado==='nuevo'&&!pedido.cobrado&&onEditar&&<Btn size="sm" color="orange" variant="outline" onClick={onEditar}>✏️ Editar</Btn>}
-      {pedido.estado==='nuevo'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar}>✕</Btn>}
-      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint}>🖨️</Btn>}
+      {pedido.estado==='nuevo'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar} aria-label="Cancelar pedido">✕</Btn>}
+      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint} aria-label="Imprimir ticket">🖨️</Btn>}
+      {onWhatsApp&&<Btn size="sm" color="green" variant="outline" onClick={onWhatsApp} aria-label="Compartir por WhatsApp">📲</Btn>}
     </div>
   </div>);
 }
@@ -1057,18 +1095,22 @@ function TicketPreviewModal({open,pedido,onClose}){
       <div className="text-center text-gray-400 text-[10px] pt-2">{NEGOCIO.direccion}<br/>Tel.: {NEGOCIO.telefono}</div>
       <div className="text-center font-bold pt-1">Gracias por tu compra!</div>
     </div>
-    <div className="mt-4 bg-blue-50 rounded-xl p-3 text-xs text-blue-700">
-      <p className="font-bold">📱 Impresion desde iPhone</p>
-      <p className="mt-1 opacity-70">La impresora Bluetooth solo funciona desde Android. Para imprimir este ticket, usa el boton 🖨️ desde el telefono Android conectado a la impresora.</p>
+    <div className="mt-4 flex gap-2">
+      <Btn full color="green" onClick={()=>shareWhatsApp(pedido)}>📲 Enviar por WhatsApp</Btn>
+      <Btn full color="gray" onClick={onClose}>Cerrar</Btn>
     </div>
-    <div className="mt-3"><Btn full color="gray" onClick={onClose}>Cerrar</Btn></div>
+    <div className="mt-3 bg-blue-50 rounded-xl p-3 text-xs text-blue-700">
+      <p className="font-bold">💡 Tip</p>
+      <p className="mt-1 opacity-70">Para imprimir tickets, usa el boton 🖨️ desde el telefono Android conectado a la impresora Bluetooth.</p>
+    </div>
   </Modal>);
 }
 
 // ─── GASTOS ─────────────────────────────────────────────────────────
 function GastosPage({state,onRegistrar,onEliminar}){
   const [catSel,setCatSel]=useState('ingredientes');const [desc,setDesc]=useState('');const [monto,setMonto]=useState('');
-  const [enEfectivo,setEnEfectivo]=useState(true);const ja=state.jornadaActiva;
+  const [enEfectivo,setEnEfectivo]=useState(true);const [confirmDel,setConfirmDel]=useState(null);
+  const ja=state.jornadaActiva;
   if(!ja)return(<div className="safe-bottom"><TopBar title="Gastos 💸"/>
     <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada"/></div>);
   const totalG=calcGastosTotal(ja.gastos);
@@ -1096,7 +1138,13 @@ function GastosPage({state,onRegistrar,onEliminar}){
                 <div><p className="text-sm font-bold text-gray-700">{g.descripcion}</p>
                   <p className="text-xs text-gray-400">{g.hora} · {cat?.label}</p></div></div>
               <div className="flex items-center gap-2"><span className="font-black text-red-500 text-sm">{fmt(g.monto)}</span>
-                <button onClick={()=>onEliminar(g.id)} className="text-gray-300 text-lg">✕</button></div></div>);})}
+                <button onClick={()=>setConfirmDel(g)} className="text-gray-300 text-lg" aria-label="Eliminar gasto">✕</button></div></div>);})}
+          {confirmDel&&<div className="mt-3 bg-red-50 rounded-xl p-3 flex items-center justify-between">
+            <span className="text-xs text-red-600">Eliminar "{confirmDel.descripcion}" ({fmt(confirmDel.monto)})?</span>
+            <div className="flex gap-2">
+              <button onClick={()=>setConfirmDel(null)} className="text-xs font-bold text-gray-500 px-2 py-1">No</button>
+              <button onClick={()=>{onEliminar(confirmDel.id);setConfirmDel(null);}} className="text-xs font-bold text-red-600 bg-red-100 px-3 py-1 rounded-lg">Eliminar</button>
+            </div></div>}
           <div className="border-t mt-3 pt-3 flex justify-between">
             <span className="font-bold text-sm">Total</span><span className="font-black text-red-500">{fmt(totalG)}</span></div>
         </div>)}
