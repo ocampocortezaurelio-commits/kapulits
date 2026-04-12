@@ -231,8 +231,12 @@ function useStore(){
   const today=()=>new Date().toISOString().slice(0,10);
 
   const abrirJornada=useCallback((fondoInicial,fecha)=>{
+    // Auto-registrar nomina como gastos
+    const gastosNomina=state.empleados.filter(e=>e.sueldo>0).map(e=>({
+      id:uid(),hora:now(),categoria:'personal',descripcion:`Nomina: ${e.nombre}`,monto:e.sueldo,enEfectivo:true
+    }));
     const j={id:uid(),fecha:fecha||today(),estado:'abierta',fondoInicial:Number(fondoInicial)||0,
-      ventas:[],gastos:[],pedidos:[],mandaditos:[],contadorPedido:1,
+      ventas:[],gastos:gastosNomina,pedidos:[],mandaditos:[],contadorPedido:1,
       horaApertura:now(),horaCierre:null,totalEfectivo:null,diferencia:null,observaciones:''};
     save({...state,jornadas:[...state.jornadas,j],jornadaActiva:j});
   },[state,save]);
@@ -333,13 +337,19 @@ function useStore(){
 
   const actualizarProducto=useCallback((pid,datos)=>{save({...state,productos:state.productos.map(p=>p.id===pid?{...p,...datos}:p)});},[state,save]);
   const actualizarGastoFijo=useCallback((gid,monto)=>{save({...state,gastosFijos:state.gastosFijos.map(g=>g.id===gid?{...g,monto:Number(monto)}:g)});},[state,save]);
+  const agregarGastoFijo=useCallback((nombre)=>{const id=uid();save({...state,gastosFijos:[...state.gastosFijos,{id,nombre,monto:0}]});},[state,save]);
+  const eliminarGastoFijo=useCallback((gid)=>{save({...state,gastosFijos:state.gastosFijos.filter(g=>g.id!==gid)});},[state,save]);
   const actualizarImpresora=useCallback(datos=>{save({...state,impresora:{...state.impresora,...datos}});},[state,save]);
   const importarProductos=useCallback(prods=>{save({...state,productos:prods});},[state,save]);
   const importarCostos=useCallback(costos=>{save({...state,costos});},[state,save]);
+  // Empleados CRUD
+  const agregarEmpleado=useCallback((nombre,rol,sueldo)=>{save({...state,empleados:[...state.empleados,{id:uid(),nombre,rol,sueldo:Number(sueldo)||0}]});},[state,save]);
+  const editarEmpleado=useCallback((eid,datos)=>{save({...state,empleados:state.empleados.map(e=>e.id===eid?{...e,...datos,sueldo:Number(datos.sueldo)||0}:e)});},[state,save]);
+  const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
 
   return{state,syncStatus,remoteUpdate,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
-    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,
-    actualizarImpresora,importarProductos,importarCostos};
+    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
+    actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado};
 }
 
 // ─── UTILS ──────────────────────────────────────────────────────────
@@ -1616,7 +1626,8 @@ function MandaditosReport({jornadas,jornadaActiva}){
 }
 
 // ─── ADMIN ──────────────────────────────────────────────────────────
-function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onActualizarImpresora,onImportarProductos,onImportarCostos}){
+function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
+  onActualizarImpresora,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado}){
   const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);
   const productStats=getProductoStats(state.jornadas,state.productos);
   return(<div className="safe-bottom"><TopBar title="Administracion ⚙️" subtitle={`v${APP_VERSION}`}/>
@@ -1660,42 +1671,117 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onActualiza
 
       {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} onActualizar={onActualizarImpresora}/>)}
 
-      {tab==='config'&&(<div className="space-y-5">
-        <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
-          <h3 className="font-black text-gray-800 mb-3 text-sm">💼 Equipo</h3>
-          {state.empleados.map(e=>(<div key={e.id} className="flex items-center justify-between py-3 border-b border-gray-50 last:border-0">
-            <div><p className="font-bold text-sm">{e.nombre}</p><p className="text-xs text-gray-400">{e.rol}</p></div>
-            <p className={`font-black text-sm ${e.sueldo>0?'text-orange-600':'text-gray-400'}`}>{e.sueldo>0?fmt(e.sueldo):'Socio'}</p></div>))}
-          <div className="mt-3 border-t pt-3 flex justify-between">
-            <span className="font-bold text-sm">Total nomina/jornada</span>
-            <span className="font-black text-orange-600">{fmt(state.empleados.reduce((s,e)=>s+e.sueldo,0))}</span></div></div>
-        <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
-          <h3 className="font-black text-gray-800 mb-3 text-sm">📌 Gastos fijos</h3>
-          {state.gastosFijos.map(g=>(<div key={g.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
-            <span className="text-sm text-gray-700">{g.nombre}</span>
-            <div className="flex items-center border-2 border-gray-200 rounded-xl overflow-hidden">
-              <span className="px-2 text-gray-400 text-sm">$</span>
-              <input type="number" value={g.monto} onChange={e=>onActualizarGastoFijo(g.id,e.target.value)}
-                className="w-20 py-1.5 text-sm font-bold text-right outline-none pr-2"/></div></div>))}</div>
-        <div className="bg-gray-50 rounded-2xl p-4 text-xs text-gray-500 text-center">
-          <p className="font-bold text-sm">K'apul'Its v{APP_VERSION}</p>
-          <p>{NEGOCIO.direccion}</p>
-          <p>Tel.: {NEGOCIO.telefono}</p></div>
-        <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl p-5 text-white text-center mt-4">
-          <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-2">Desarrollado por</p>
-          <p className="font-black text-base">Aurelio Ocampo Cortez</p>
-          <p className="text-gray-400 text-xs mt-1">Desarrollo de software & soluciones digitales para negocios</p>
-          <p className="text-gray-400 text-xs mt-0.5">Apps PWA · Automatizacion · Inteligencia de datos · IA aplicada</p>
-          <div className="mt-3 pt-3 border-t border-gray-700 space-y-1">
-            <p className="text-xs">📱 <a href="https://wa.me/529821057758" className="text-orange-400 font-bold">982 105 77 58</a></p>
-            <p className="text-[10px] text-gray-500">Convierte tu idea en una app. Preguntame como.</p>
-          </div>
-        </div>
-      </div>)}
+      {tab==='config'&&(<ConfigTab state={state} onActualizarGastoFijo={onActualizarGastoFijo}
+        onAgregarGastoFijo={onAgregarGastoFijo} onEliminarGastoFijo={onEliminarGastoFijo}
+        onAgregarEmpleado={onAgregarEmpleado} onEditarEmpleado={onEditarEmpleado} onEliminarEmpleado={onEliminarEmpleado}/>)}
     </div>
 
     {editProd&&<Modal open={!!editProd} onClose={()=>setEditProd(null)} title={`Editar: ${editProd.nombre}`}>
       <EditProductoForm producto={editProd} onSave={d=>{onActualizarProducto(editProd.id,d);setEditProd(null);}}/></Modal>}
+  </div>);
+}
+
+// ── Config Tab ──
+function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
+  onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado}){
+  const [showAddEmp,setShowAddEmp]=useState(false);const [editEmp,setEditEmp]=useState(null);
+  const [empNombre,setEmpNombre]=useState('');const [empRol,setEmpRol]=useState('');const [empSueldo,setEmpSueldo]=useState('');
+  const [nuevoGF,setNuevoGF]=useState('');const [confirmDelEmp,setConfirmDelEmp]=useState(null);const [confirmDelGF,setConfirmDelGF]=useState(null);
+
+  const guardarEmpleado=()=>{
+    if(!empNombre)return;
+    if(editEmp){onEditarEmpleado(editEmp.id,{nombre:empNombre,rol:empRol,sueldo:empSueldo});setEditEmp(null);}
+    else{onAgregarEmpleado(empNombre,empRol,empSueldo);}
+    setEmpNombre('');setEmpRol('');setEmpSueldo('');setShowAddEmp(false);
+  };
+  const iniciarEdicion=(e)=>{setEditEmp(e);setEmpNombre(e.nombre);setEmpRol(e.rol);setEmpSueldo(String(e.sueldo));setShowAddEmp(true);};
+
+  return(<div className="space-y-5">
+    <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-black text-gray-800 text-sm">💼 Equipo</h3>
+        <button onClick={()=>{setEditEmp(null);setEmpNombre('');setEmpRol('');setEmpSueldo('');setShowAddEmp(true);}}
+          className="text-xs font-bold text-orange-500 bg-orange-50 px-3 py-1 rounded-lg border border-orange-200">+ Agregar</button>
+      </div>
+      {state.empleados.map(e=>(<div key={e.id} className="flex items-center justify-between py-3 border-b border-gray-50 last:border-0">
+        <div className="flex-1"><p className="font-bold text-sm">{e.nombre}</p><p className="text-xs text-gray-400">{e.rol}</p></div>
+        <p className={`font-black text-sm mr-3 ${e.sueldo>0?'text-orange-600':'text-gray-400'}`}>{e.sueldo>0?fmt(e.sueldo):'Socio'}</p>
+        <div className="flex gap-1">
+          <button onClick={()=>iniciarEdicion(e)} className="text-xs text-blue-500 bg-blue-50 px-2 py-1 rounded-lg">✏️</button>
+          <button onClick={()=>setConfirmDelEmp(e)} className="text-xs text-red-400 bg-red-50 px-2 py-1 rounded-lg">✕</button>
+        </div></div>))}
+      <div className="mt-3 border-t pt-3 flex justify-between">
+        <span className="font-bold text-sm">Total nomina/jornada</span>
+        <span className="font-black text-orange-600">{fmt(state.empleados.reduce((s,e)=>s+e.sueldo,0))}</span></div>
+      <div className="mt-2 bg-blue-50 rounded-xl p-2 text-[10px] text-blue-600">
+        💡 La nomina se registra automaticamente como gasto al abrir cada jornada.</div>
+    </div>
+
+    <Modal open={showAddEmp} onClose={()=>{setShowAddEmp(false);setEditEmp(null);}} title={editEmp?'✏️ Editar empleado':'👤 Agregar empleado'}>
+      <div className="space-y-4">
+        <Input label="Nombre completo" value={empNombre} onChange={setEmpNombre} placeholder="Nombre del empleado"/>
+        <Input label="Rol / Puesto" value={empRol} onChange={setEmpRol} placeholder="Ej: Linea de Produccion"/>
+        <Input label="Sueldo por jornada" type="number" prefix="$" value={empSueldo} onChange={setEmpSueldo} placeholder="0 = Socio"/>
+        <Btn full color="green" onClick={guardarEmpleado} disabled={!empNombre}>{editEmp?'💾 Guardar cambios':'👤 Agregar empleado'}</Btn>
+      </div>
+    </Modal>
+
+    <Modal open={!!confirmDelEmp} onClose={()=>setConfirmDelEmp(null)} title="⚠️ Eliminar empleado">
+      {confirmDelEmp&&(<div className="space-y-4">
+        <p className="text-sm text-center">Eliminar a <b>{confirmDelEmp.nombre}</b> del equipo?</p>
+        <div className="flex gap-3"><Btn full color="gray" onClick={()=>setConfirmDelEmp(null)}>Cancelar</Btn>
+          <Btn full color="red" onClick={()=>{onEliminarEmpleado(confirmDelEmp.id);setConfirmDelEmp(null);}}>Eliminar</Btn></div>
+      </div>)}
+    </Modal>
+
+    <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-black text-gray-800 text-sm">📌 Gastos fijos (mensuales)</h3>
+      </div>
+      {state.gastosFijos.map(g=>(<div key={g.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+        <span className="text-sm text-gray-700 flex-1">{g.nombre}</span>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center border-2 border-gray-200 rounded-xl overflow-hidden">
+            <span className="px-2 text-gray-400 text-sm">$</span>
+            <input type="number" value={g.monto} onChange={e=>onActualizarGastoFijo(g.id,e.target.value)}
+              className="w-20 py-1.5 text-sm font-bold text-right outline-none pr-2"/></div>
+          <button onClick={()=>setConfirmDelGF(g)} className="text-red-300 text-sm">✕</button>
+        </div></div>))}
+      <div className="mt-3 flex gap-2">
+        <input value={nuevoGF} onChange={e=>setNuevoGF(e.target.value)} placeholder="Agregar gasto fijo..."
+          className="flex-1 px-3 py-2 text-sm border-2 border-gray-200 rounded-xl outline-none focus:border-orange-400"/>
+        <button onClick={()=>{if(nuevoGF.trim()){onAgregarGastoFijo(nuevoGF.trim());setNuevoGF('');}}}
+          disabled={!nuevoGF.trim()} className="px-3 py-2 bg-orange-500 text-white text-xs font-bold rounded-xl disabled:opacity-40">+ Agregar</button>
+      </div>
+      <div className="mt-3 border-t pt-3 flex justify-between">
+        <span className="font-bold text-sm">Total fijos/mes</span>
+        <span className="font-black text-red-500">{fmt(state.gastosFijos.reduce((s,g)=>s+g.monto,0))}</span></div>
+      <div className="mt-2 bg-purple-50 rounded-xl p-2 text-[10px] text-purple-600">
+        📌 Estos gastos son mensuales. Se prorratean por jornada en los reportes para calcular utilidad neta real.</div>
+    </div>
+
+    <Modal open={!!confirmDelGF} onClose={()=>setConfirmDelGF(null)} title="⚠️ Eliminar gasto fijo">
+      {confirmDelGF&&(<div className="space-y-4">
+        <p className="text-sm text-center">Eliminar "<b>{confirmDelGF.nombre}</b>" de gastos fijos?</p>
+        <div className="flex gap-3"><Btn full color="gray" onClick={()=>setConfirmDelGF(null)}>Cancelar</Btn>
+          <Btn full color="red" onClick={()=>{onEliminarGastoFijo(confirmDelGF.id);setConfirmDelGF(null);}}>Eliminar</Btn></div>
+      </div>)}
+    </Modal>
+
+    <div className="bg-gray-50 rounded-2xl p-4 text-xs text-gray-500 text-center">
+      <p className="font-bold text-sm">K'apul'Its v{APP_VERSION}</p>
+      <p>{NEGOCIO.direccion}</p>
+      <p>Tel.: {NEGOCIO.telefono}</p></div>
+    <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl p-5 text-white text-center">
+      <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-2">Desarrollado por</p>
+      <p className="font-black text-base">Aurelio Ocampo Cortez</p>
+      <p className="text-gray-400 text-xs mt-1">Desarrollo de software & soluciones digitales para negocios</p>
+      <p className="text-gray-400 text-xs mt-0.5">Apps PWA · Automatizacion · Inteligencia de datos · IA aplicada</p>
+      <div className="mt-3 pt-3 border-t border-gray-700 space-y-1">
+        <p className="text-xs">📱 <a href="https://wa.me/529821057758" className="text-orange-400 font-bold">982 105 77 58</a></p>
+        <p className="text-[10px] text-gray-500">Convierte tu idea en una app. Preguntame como.</p>
+      </div>
+    </div>
   </div>);
 }
 
@@ -1824,8 +1910,8 @@ let _showTicketPreview=null;
 function App(){
   const [page,setPage]=useState('dashboard');
   const {state,syncStatus,remoteUpdate,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
-    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,
-    actualizarImpresora,importarProductos,importarCostos}=useStore();
+    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
+    actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado}=useStore();
   const hasJornada=!!state.jornadaActiva;
   const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
   const [toast,setToast]=useState(null);
@@ -1849,9 +1935,14 @@ function App(){
       onEliminar={eliminarGasto}/>}
     {page==='reportes'&&<ReportesPage state={state}/>}
     {page==='admin'&&<AdminPage state={state} onActualizarProducto={actualizarProducto}
-      onActualizarGastoFijo={actualizarGastoFijo} onActualizarImpresora={actualizarImpresora}
+      onActualizarGastoFijo={actualizarGastoFijo} onAgregarGastoFijo={n=>{agregarGastoFijo(n);showToast('✅ Gasto fijo agregado');}}
+      onEliminarGastoFijo={id=>{eliminarGastoFijo(id);showToast('🗑️ Gasto fijo eliminado','red');}}
+      onActualizarImpresora={actualizarImpresora}
       onImportarProductos={p=>{importarProductos(p);showToast('✅ Productos actualizados');}}
-      onImportarCostos={c=>{importarCostos(c);showToast('✅ Costos actualizados');}}/>}
+      onImportarCostos={c=>{importarCostos(c);showToast('✅ Costos actualizados');}}
+      onAgregarEmpleado={(n,r,s)=>{agregarEmpleado(n,r,s);showToast('✅ Empleado agregado');}}
+      onEditarEmpleado={(id,d)=>{editarEmpleado(id,d);showToast('✅ Empleado actualizado');}}
+      onEliminarEmpleado={id=>{eliminarEmpleado(id);showToast('🗑️ Empleado eliminado','red');}}/>}
     <BottomNav page={page} setPage={setPage} hasJornada={hasJornada} pedidosNuevos={pedidosNuevos}/>
     {toast&&(<div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl text-white font-bold text-sm shadow-xl slide-up
       ${toast.color==='green'?'bg-green-500':toast.color==='red'?'bg-red-500':toast.color==='orange'?'bg-orange-500':'bg-gray-700'}`}>{toast.msg}</div>)}
