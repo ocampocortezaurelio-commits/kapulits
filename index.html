@@ -412,20 +412,54 @@ function getRecomendaciones(proj,stats){
 
 // ─── PRINTER ────────────────────────────────────────────────────────
 let printerCharacteristic=null;
+let _btDevice=null;
+const BT_SERVICES=['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455'];
+
+async function _findCharacteristic(server){
+  let service;
+  for(const sid of BT_SERVICES){try{service=await server.getPrimaryService(sid);break;}catch(e){}}
+  if(!service){const svcs=await server.getPrimaryServices();if(svcs.length)service=svcs[0];}
+  if(service){const chars=await service.getCharacteristics();
+    return chars.find(c=>c.properties.write||c.properties.writeWithoutResponse)||chars[0];}
+  return null;
+}
 
 async function connectBluetooth(){
   try{
-    const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,
-      optionalServices:['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455']});
+    const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:BT_SERVICES});
+    _btDevice=device;
+    device.addEventListener('gattserverdisconnected',()=>{printerCharacteristic=null;});
     const server=await device.gatt.connect();
-    let service;
-    for(const sid of['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455']){
-      try{service=await server.getPrimaryService(sid);break;}catch(e){}}
-    if(!service){const svcs=await server.getPrimaryServices();if(svcs.length)service=svcs[0];}
-    if(service){const chars=await service.getCharacteristics();
-      printerCharacteristic=chars.find(c=>c.properties.write||c.properties.writeWithoutResponse)||chars[0];}
+    printerCharacteristic=await _findCharacteristic(server);
     return{success:true,name:device.name||'Impresora BT'};
   }catch(e){return{success:false,error:e.message};}
+}
+
+async function reconnectBluetooth(){
+  // Intento 1: reconectar dispositivo guardado en memoria
+  if(_btDevice&&!_btDevice.gatt.connected){
+    try{
+      const server=await _btDevice.gatt.connect();
+      printerCharacteristic=await _findCharacteristic(server);
+      if(printerCharacteristic)return true;
+    }catch(e){}
+  }
+  // Intento 2: buscar dispositivos previamente pareados (Chrome 85+)
+  if(navigator.bluetooth?.getDevices){
+    try{
+      const devices=await navigator.bluetooth.getDevices();
+      for(const dev of devices){
+        try{
+          const server=await dev.gatt.connect();
+          _btDevice=dev;
+          dev.addEventListener('gattserverdisconnected',()=>{printerCharacteristic=null;});
+          printerCharacteristic=await _findCharacteristic(server);
+          if(printerCharacteristic)return true;
+        }catch(e){}
+      }
+    }catch(e){}
+  }
+  return false;
 }
 
 function buildTicketHTML(pedido){
@@ -458,32 +492,55 @@ function buildTicketHTML(pedido){
   return h;
 }
 
+function _buildBTText(pedido){
+  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+  const sep='-'.repeat(32);
+  let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
+  t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}\n  ${pedido.fecha}  ${pedido.hora}\n`;
+  if(pedido.cliente)t+=`  Cliente: ${pedido.cliente}\n`;
+  const tipoTxt=pedido.tipoEntrega==='recoger'?'REC':'ENV';
+  t+=`  ${tipoTxt} ${tarifa.label}\n`;
+  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')t+=`  Dir: ${pedido.direccion}\n`;
+  t+=sep+'\n';
+  pedido.items.forEach(i=>{
+    const nom=i.nombre.substring(0,18).padEnd(18);
+    t+=` ${String(i.cantidad).padStart(2)}x ${nom} ${fmt(i.subtotal).padStart(7)}\n`;
+  });
+  t+=sep+'\n';
+  if(pedido.costoEnvio>0)t+=`  Envio:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
+  t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
+  t+=`  ${NEGOCIO.direccion}\n  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
+  return sanitize(t);
+}
+
+async function _sendToBT(text){
+  const data=new Uint8Array([...text].map(c=>c.charCodeAt(0)&0x7F));
+  for(let i=0;i<data.length;i+=100){await printerCharacteristic.writeValue(data.slice(i,i+100));}
+}
+
 async function printTicket(pedido){
+  // Si no hay conexion BT activa, intentar reconectar silenciosamente
+  if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
+    await reconnectBluetooth();
+  }
+  // Imprimir por Bluetooth si hay conexion
   if(printerCharacteristic){
     try{
-      const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
-      const sep='-'.repeat(32);
-      let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
-      t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}\n  ${pedido.fecha}  ${pedido.hora}\n`;
-      if(pedido.cliente)t+=`  Cliente: ${pedido.cliente}\n`;
-      const tipoTxt=pedido.tipoEntrega==='recoger'?'REC':'ENV';
-      t+=`  ${tipoTxt} ${tarifa.label}\n`;
-      if(pedido.direccion&&pedido.tipoEntrega!=='recoger')t+=`  Dir: ${pedido.direccion}\n`;
-      t+=sep+'\n';
-      pedido.items.forEach(i=>{
-        const nom=i.nombre.substring(0,18).padEnd(18);
-        t+=` ${String(i.cantidad).padStart(2)}x ${nom} ${fmt(i.subtotal).padStart(7)}\n`;
-      });
-      t+=sep+'\n';
-      if(pedido.costoEnvio>0)t+=`  Envio:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
-      t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
-      t+=`  ${NEGOCIO.direccion}\n  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
-      const clean=sanitize(t);
-      const data=new Uint8Array([...clean].map(c=>c.charCodeAt(0)&0x7F));
-      for(let i=0;i<data.length;i+=100){await printerCharacteristic.writeValue(data.slice(i,i+100));}
+      await _sendToBT(_buildBTText(pedido));
       return{success:true,method:'bluetooth'};
-    }catch(e){}
+    }catch(e){
+      // Si fallo, la conexion murio — intentar reconectar una vez mas
+      printerCharacteristic=null;
+      const ok=await reconnectBluetooth();
+      if(ok){
+        try{
+          await _sendToBT(_buildBTText(pedido));
+          return{success:true,method:'bluetooth'};
+        }catch(e2){}
+      }
+    }
   }
+  // Fallback: ventana HTML con auto-print
   const w=window.open('','','width=320,height=600');
   if(w){w.document.write(buildTicketHTML(pedido));w.document.close();setTimeout(()=>w.print(),300);
     return{success:true,method:'window'};}
