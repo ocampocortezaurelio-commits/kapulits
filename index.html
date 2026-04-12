@@ -181,6 +181,10 @@ function useStore(){
               localStorage.setItem('kapulits_ts',cloud.updated_at);}catch(e){}
           setState(ns);
         }
+      }else{
+        // Nube vacia = reset total. Limpiar localStorage para arrancar desde cero
+        try{localStorage.removeItem('kapulits_v2');localStorage.removeItem('kapulits_ts');}catch(e){}
+        setState(INITIAL_STATE);
       }
       setSyncStatus('synced');
     }).catch(()=>setSyncStatus('offline'));
