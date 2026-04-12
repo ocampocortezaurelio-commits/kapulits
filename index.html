@@ -37,6 +37,17 @@
 </style>
 </head>
 <body>
+<div id="splash" style="position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:linear-gradient(135deg,#ea580c 0%,#f59e0b 100%);transition:opacity .5s ease">
+  <div style="width:120px;height:120px;background:white;border-radius:28px;display:flex;align-items:center;justify-content:center;box-shadow:0 20px 60px rgba(0,0,0,.2);margin-bottom:24px">
+    <img src="data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPHN2ZyBpZD0iQ2FwYV8xIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZlcnNpb249IjEuMSIgdmlld0JveD0iMCAwIDYxMiA3OTIiPgogIDwhLS0gR2VuZXJhdG9yOiBBZG9iZSBJbGx1c3RyYXRvciAzMC4zLjAsIFNWRyBFeHBvcnQgUGx1Zy1JbiAuIFNWRyBWZXJzaW9uOiAyLjEuMyBCdWlsZCAxODIpICAtLT4KICA8ZGVmcz4KICAgIDxzdHlsZT4KICAgICAgLnN0MCB7CiAgICAgICAgZmlsbDogI2ViNWMxMDsKICAgICAgfQogICAgPC9zdHlsZT4KICA8L2RlZnM+CiAgPHBhdGggY2xhc3M9InN0MCIgZD0iTTI1NS41OCw1NDguNGMtOS4xMi0yMS41LTcuNDktNjAuMDctNy45OS0xMzUuNDRzMS4zOS0xMTMuNDUsNS4zOC0xMjAuMDEuMDEtNS4zMy4wMS01LjMzbC03Ni4yNC41N3MxMC4wMSw2Ljc2LDkuMTIsMzkuOTktMS44MywxOTMuMDUtMS44MywxOTMuMDVjMCwwLS43MSwxNi44OC02LjQxLDI2LjQ5czc3Ljk2LjY4LDc3Ljk2LjY4WiIvPgogIDxwYXRoIGNsYXNzPSJzdDAiIGQ9Ik0yOTguMTQsMjg4LjI5bDYxLjctLjI4czQzLjI5LDY2LjE3LTQyLjksMTM4LjA0YzAsMCwyMC43OCw2Ni44Myw0OS4yNSwxMTYuMTgsMCwwLDE1LjcyLDguMDMsNi4wOCw4LjEzLTkuNjQuMS04MS40Mi0xLjEzLTgxLjQyLTEuMTMsMCwwLTguMzYsMS4zNi0xLjk2LTEwLjQxbC00MS4yOS0xMjUuODdzOTMuMzctNDAuMTcsNTAuNTQtMTI0LjY2WiIvPgogIDxwYXRoIGNsYXNzPSJzdDAiIGQ9Ik00MTEuNjQsMzE5LjU0cy0xMi43Niw4LjE2LTI2Ljc2LDIuMzQtMS4wNS0yLjYyLTEuMDUtMi42MmMwLDAsMTAuNTUsMy41NywxNy44My0xLjQ2czExLjE0LTE1LjYsNy4yMi0xOS4xMS0xMC4xLTQuNjUtMTQuMjItNy43Ni0xNy4yOS0xMS42NC0xMS4yNi0zMi42MiwzMi43Mi0yMy42Myw0Mi4yNS0xMy41OCwxNC40MywxNi4yLDkuMDksNDMuMDhjLTQuNTEsMTcuODEtMTUuMDQsMjcuMjMtMjMuMSwzMS43M1oiLz4KPC9zdmc+" style="width:70px;height:auto"/>
+  </div>
+  <p style="color:white;font-family:-apple-system,sans-serif;font-weight:900;font-size:24px;letter-spacing:-0.5px;margin:0">K'apul'Its</p>
+  <p style="color:rgba(255,255,255,.7);font-family:-apple-system,sans-serif;font-size:12px;margin:4px 0 0">Birria y algo mas</p>
+  <div style="margin-top:32px;width:40px;height:4px;background:rgba(255,255,255,.3);border-radius:4px;overflow:hidden">
+    <div style="width:100%;height:100%;background:white;border-radius:4px;animation:splashLoad 2s ease infinite"></div>
+  </div>
+</div>
+<style>@keyframes splashLoad{0%{transform:translateX(-100%)}50%{transform:translateX(0)}100%{transform:translateX(100%)}}</style>
 <div id="root"></div>
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
@@ -1956,6 +1967,8 @@ function App(){
   </div>);
 }
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+// Hide splash after render
+setTimeout(()=>{const s=document.getElementById('splash');if(s){s.style.opacity='0';setTimeout(()=>s.remove(),500);}},800);
 </script>
 <script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{});}</script>
 </body>
