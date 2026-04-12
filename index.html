@@ -100,7 +100,8 @@ const EMPLEADOS_DEFAULT = [
   {id:'aurelio',nombre:'Aurelio Ocampo',rol:'Envíos / Marketing',sueldo:300},
 ];
 
-const CATS_GASTO = [
+const CATS_GASTO_DEFAULT = [
+  {id:'guiso_principal',label:'Guiso Principal',emoji:'🍖'},
   {id:'ingredientes',label:'Ingredientes',emoji:'🥩'},
   {id:'empaque',label:'Empaque',emoji:'📦'},
   {id:'combustible',label:'Gas / Leña',emoji:'🔥'},
@@ -1285,35 +1286,98 @@ function TicketPreviewModal({open,pedido,onClose}){
 
 // ─── GASTOS ─────────────────────────────────────────────────────────
 function GastosPage({state,onRegistrar,onEliminar}){
-  const [catSel,setCatSel]=useState('ingredientes');const [desc,setDesc]=useState('');const [monto,setMonto]=useState('');
+  const [catSel,setCatSel]=useState('guiso_principal');const [desc,setDesc]=useState('');const [monto,setMonto]=useState('');
   const [enEfectivo,setEnEfectivo]=useState(true);const [confirmDel,setConfirmDel]=useState(null);
+  const [showConfirmAdd,setShowConfirmAdd]=useState(false);const [nuevaCat,setNuevaCat]=useState('');
   const ja=state.jornadaActiva;
   if(!ja)return(<div className="safe-bottom"><TopBar title="Gastos 💸"/>
     <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada"/></div>);
   const totalG=calcGastosTotal(ja.gastos);
-  const registrar=()=>{if(!monto||!desc)return;onRegistrar(catSel,desc,monto,enEfectivo);setDesc('');setMonto('');};
+
+  // Categorias dinamicas: las default + cualquiera que haya sido usada en gastos historicos
+  const catsUsadas=useMemo(()=>{
+    const custom=new Set();
+    state.jornadas.forEach(j=>j.gastos.forEach(g=>{
+      if(!CATS_GASTO_DEFAULT.find(c=>c.id===g.categoria))custom.add(g.categoria);
+    }));
+    if(ja)ja.gastos.forEach(g=>{
+      if(!CATS_GASTO_DEFAULT.find(c=>c.id===g.categoria))custom.add(g.categoria);
+    });
+    return[...CATS_GASTO_DEFAULT,...[...custom].map(c=>({id:c,label:c.charAt(0).toUpperCase()+c.slice(1),emoji:'🏷️'}))];
+  },[state.jornadas,ja]);
+
+  const agregarCategoria=()=>{
+    if(!nuevaCat.trim())return;
+    const id=nuevaCat.trim().toLowerCase().replace(/\s+/g,'_');
+    if(!catsUsadas.find(c=>c.id===id)){
+      setCatSel(id);
+    }else{setCatSel(id);}
+    setNuevaCat('');
+  };
+
+  const intentarRegistrar=()=>{
+    if(!monto||!desc)return;
+    // Si la categoria no existe aun, crearla al vuelo
+    const catId=nuevaCat.trim()?nuevaCat.trim().toLowerCase().replace(/\s+/g,'_'):catSel;
+    setShowConfirmAdd({cat:catId,desc,monto:Number(monto),enEfectivo});
+  };
+
+  const confirmarRegistro=()=>{
+    if(!showConfirmAdd)return;
+    onRegistrar(showConfirmAdd.cat,showConfirmAdd.desc,showConfirmAdd.monto,showConfirmAdd.enEfectivo);
+    setDesc('');setMonto('');setShowConfirmAdd(false);
+  };
+
+  const catActual=catsUsadas.find(c=>c.id===catSel)||{emoji:'🏷️',label:catSel};
+
   return(<div className="safe-bottom"><TopBar title="Gastos 💸" subtitle={`Total: ${fmt(totalG)}`}/>
     <div className="px-4 py-4 space-y-4">
       <div><p className="text-xs font-bold text-gray-500 mb-2 uppercase tracking-wider">Categoria</p>
-        <div className="flex gap-2 overflow-x-auto pb-1">{CATS_GASTO.map(c=>(
-          <button key={c.id} onClick={()=>setCatSel(c.id)}
+        <div className="flex gap-2 overflow-x-auto pb-1">{catsUsadas.map(c=>(
+          <button key={c.id} onClick={()=>{setCatSel(c.id);setNuevaCat('');}}
             className={`flex-shrink-0 flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border-2
-              ${catSel===c.id?'border-orange-500 bg-orange-50 text-orange-700':'border-gray-200 text-gray-500'}`}>{c.emoji} {c.label}</button>))}</div></div>
-      <Input label="Descripcion" value={desc} onChange={setDesc} placeholder="Ej: Carne 5kg"/>
-      <Input label="Monto" type="number" value={monto} onChange={setMonto} prefix="$" placeholder="0"/>
+              ${catSel===c.id?'border-orange-500 bg-orange-50 text-orange-700':'border-gray-200 text-gray-500'}`}>{c.emoji} {c.label}</button>))}
+          <button onClick={()=>setNuevaCat(' ')}
+            className="flex-shrink-0 flex items-center gap-1 px-3 py-2 rounded-xl text-xs font-bold border-2 border-dashed border-gray-300 text-gray-400">+ Nueva</button>
+        </div>
+        {nuevaCat!==''&&(
+          <div className="mt-2 flex gap-2">
+            <input value={nuevaCat.trim()} onChange={e=>setNuevaCat(e.target.value)} placeholder="Nombre de categoria..."
+              className="flex-1 px-3 py-2 text-sm border-2 border-orange-300 rounded-xl outline-none"/>
+            <button onClick={agregarCategoria} className="px-3 py-2 bg-orange-500 text-white text-xs font-bold rounded-xl">Agregar</button>
+          </div>)}</div>
+      <Input label="Descripcion del gasto" value={desc} onChange={setDesc} placeholder="Ej: Carne 5kg, Especias varias..."/>
+      <Input label="Monto total" type="number" value={monto} onChange={setMonto} prefix="$" placeholder="0"/>
       <div className="flex items-center gap-3">
         <button onClick={()=>setEnEfectivo(!enEfectivo)} className={`w-12 h-6 rounded-full transition-colors ${enEfectivo?'bg-green-500':'bg-gray-300'} relative`}>
           <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${enEfectivo?'right-0.5':'left-0.5'}`}/></button>
         <span className="text-sm text-gray-600">{enEfectivo?'💵 Efectivo':'📱 Otro'}</span></div>
-      <Btn full size="lg" onClick={registrar} disabled={!desc||!monto}>+ Registrar Gasto</Btn>
+      <Btn full size="lg" onClick={intentarRegistrar} disabled={!desc||!monto}>+ Registrar Gasto</Btn>
+
+      <Modal open={!!showConfirmAdd} onClose={()=>setShowConfirmAdd(false)} title="✅ Confirmar gasto">
+        {showConfirmAdd&&(<div className="space-y-4">
+          <div className="bg-orange-50 rounded-2xl p-4 space-y-2">
+            <div className="flex justify-between text-sm"><span className="text-gray-500">Categoria</span><span className="font-bold">{catActual.emoji} {showConfirmAdd.cat}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-gray-500">Descripcion</span><span className="font-bold">{showConfirmAdd.desc}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-gray-500">Monto</span><span className="font-black text-red-500 text-lg">{fmt(showConfirmAdd.monto)}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-gray-500">Pago</span><span className="font-bold">{showConfirmAdd.enEfectivo?'💵 Efectivo':'📱 Otro'}</span></div>
+          </div>
+          <p className="text-sm text-gray-500 text-center">Verifica que la informacion sea correcta antes de registrar.</p>
+          <div className="flex gap-3">
+            <Btn full color="gray" onClick={()=>setShowConfirmAdd(false)}>Corregir</Btn>
+            <Btn full color="green" onClick={confirmarRegistro}>✅ Confirmar</Btn>
+          </div>
+        </div>)}
+      </Modal>
+
       {ja.gastos.length>0&&(
         <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
           <h3 className="font-black text-gray-800 mb-3 text-sm">Gastos del dia</h3>
-          {[...ja.gastos].reverse().map(g=>{const cat=CATS_GASTO.find(c=>c.id===g.categoria);
+          {[...ja.gastos].reverse().map(g=>{const cat=catsUsadas.find(c=>c.id===g.categoria);
             return(<div key={g.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
               <div className="flex items-center gap-2"><span className="text-lg">{cat?.emoji||'💸'}</span>
                 <div><p className="text-sm font-bold text-gray-700">{g.descripcion}</p>
-                  <p className="text-xs text-gray-400">{g.hora} · {cat?.label}</p></div></div>
+                  <p className="text-xs text-gray-400">{g.hora} · {cat?.label||g.categoria}</p></div></div>
               <div className="flex items-center gap-2"><span className="font-black text-red-500 text-sm">{fmt(g.monto)}</span>
                 <button onClick={()=>setConfirmDel(g)} className="text-gray-300 text-lg" aria-label="Eliminar gasto">✕</button></div></div>);})}
           {confirmDel&&<div className="mt-3 bg-red-50 rounded-xl p-3 flex items-center justify-between">
@@ -1614,9 +1678,19 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onActualiza
               <input type="number" value={g.monto} onChange={e=>onActualizarGastoFijo(g.id,e.target.value)}
                 className="w-20 py-1.5 text-sm font-bold text-right outline-none pr-2"/></div></div>))}</div>
         <div className="bg-gray-50 rounded-2xl p-4 text-xs text-gray-500 text-center">
-          <p className="font-bold">K'apul'Its v{APP_VERSION}</p>
+          <p className="font-bold text-sm">K'apul'Its v{APP_VERSION}</p>
           <p>{NEGOCIO.direccion}</p>
           <p>Tel.: {NEGOCIO.telefono}</p></div>
+        <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl p-5 text-white text-center mt-4">
+          <p className="text-[10px] uppercase tracking-widest text-gray-400 mb-2">Desarrollado por</p>
+          <p className="font-black text-base">Aurelio Ocampo Cortez</p>
+          <p className="text-gray-400 text-xs mt-1">Desarrollo de software & soluciones digitales para negocios</p>
+          <p className="text-gray-400 text-xs mt-0.5">Apps PWA · Automatizacion · Inteligencia de datos · IA aplicada</p>
+          <div className="mt-3 pt-3 border-t border-gray-700 space-y-1">
+            <p className="text-xs">📱 <a href="https://wa.me/529821057758" className="text-orange-400 font-bold">982 105 77 58</a></p>
+            <p className="text-[10px] text-gray-500">Convierte tu idea en una app. Preguntame como.</p>
+          </div>
+        </div>
       </div>)}
     </div>
 
