@@ -540,11 +540,9 @@ async function printTicket(pedido){
       }
     }
   }
-  // Fallback: ventana HTML con auto-print
-  const w=window.open('','','width=320,height=600');
-  if(w){w.document.write(buildTicketHTML(pedido));w.document.close();setTimeout(()=>w.print(),300);
-    return{success:true,method:'window'};}
-  return{success:false};
+  // Fallback: mostrar preview en-app (sin ventana ni dialogo de impresion)
+  if(_showTicketPreview)_showTicketPreview(pedido);
+  return{success:true,method:'preview'};
 }
 
 // ─── CHARTS ─────────────────────────────────────────────────────────
@@ -1036,6 +1034,37 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
     </div></Modal>);
 }
 
+function TicketPreviewModal({open,pedido,onClose}){
+  if(!open||!pedido)return null;
+  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+  return(<Modal open={open} onClose={onClose} title={`🧾 Ticket #${String(pedido.numero).padStart(3,'0')}`}>
+    <div className="bg-white border-2 border-dashed border-gray-300 rounded-2xl p-4 font-mono text-xs space-y-2">
+      <div className="text-center font-black text-base">K'apul'Its</div>
+      <div className="text-center text-gray-500 text-[10px]">Birria y algo mas</div>
+      <div className="border-t border-dashed border-gray-300"/>
+      <div className="text-center font-black">PEDIDO #{String(pedido.numero).padStart(3,'0')}</div>
+      <div className="text-center text-gray-400">{pedido.fecha} · {pedido.hora}</div>
+      {pedido.cliente&&<div className="font-bold">Cliente: {pedido.cliente}</div>}
+      <div>{tarifa.emoji} {tarifa.label}</div>
+      {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<div className="text-gray-500">📍 {pedido.direccion}</div>}
+      <div className="border-t border-dashed border-gray-300"/>
+      {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between"><span>{i.cantidad}x {i.nombre}</span><span className="font-bold">{fmt(i.subtotal)}</span></div>))}
+      <div className="border-t border-dashed border-gray-300"/>
+      {pedido.costoEnvio>0&&<div className="flex justify-between text-purple-600"><span>Envio</span><span className="font-bold">{fmt(pedido.costoEnvio)}</span></div>}
+      <div className="flex justify-between font-black text-base"><span>TOTAL</span><span>{fmt(pedido.total)}</span></div>
+      <div className="border-t border-dashed border-gray-300"/>
+      {pedido.notas&&<div className="text-orange-500 italic">📝 {pedido.notas}</div>}
+      <div className="text-center text-gray-400 text-[10px] pt-2">{NEGOCIO.direccion}<br/>Tel.: {NEGOCIO.telefono}</div>
+      <div className="text-center font-bold pt-1">Gracias por tu compra!</div>
+    </div>
+    <div className="mt-4 bg-blue-50 rounded-xl p-3 text-xs text-blue-700">
+      <p className="font-bold">📱 Impresion desde iPhone</p>
+      <p className="mt-1 opacity-70">La impresora Bluetooth solo funciona desde Android. Para imprimir este ticket, usa el boton 🖨️ desde el telefono Android conectado a la impresora.</p>
+    </div>
+    <div className="mt-3"><Btn full color="gray" onClick={onClose}>Cerrar</Btn></div>
+  </Modal>);
+}
+
 // ─── GASTOS ─────────────────────────────────────────────────────────
 function GastosPage({state,onRegistrar,onEliminar}){
   const [catSel,setCatSel]=useState('ingredientes');const [desc,setDesc]=useState('');const [monto,setMonto]=useState('');
@@ -1392,6 +1421,9 @@ function EditProductoForm({producto,onSave}){
 }
 
 // ─── APP ────────────────────────────────────────────────────────────
+// Global callback for preview fallback
+let _showTicketPreview=null;
+
 function App(){
   const [page,setPage]=useState('dashboard');
   const {state,syncStatus,remoteUpdate,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
@@ -1400,7 +1432,10 @@ function App(){
   const hasJornada=!!state.jornadaActiva;
   const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
   const [toast,setToast]=useState(null);
+  const [previewPedido,setPreviewPedido]=useState(null);
   const showToast=(msg,color='green')=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
+  // Register global preview callback
+  useEffect(()=>{_showTicketPreview=(pedido)=>setPreviewPedido(pedido);return()=>{_showTicketPreview=null;};},[]);
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
       onAbrir={(f,d)=>{abrirJornada(f,d);showToast('🟢 Jornada abierta');}}
@@ -1425,6 +1460,7 @@ function App(){
       ${toast.color==='green'?'bg-green-500':toast.color==='red'?'bg-red-500':toast.color==='orange'?'bg-orange-500':'bg-gray-700'}`}>{toast.msg}</div>)}
     {remoteUpdate&&(<div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-blue-500 text-white font-bold text-sm shadow-xl slide-up">
       🔄 Datos actualizados desde otro dispositivo</div>)}
+    <TicketPreviewModal open={!!previewPedido} pedido={previewPedido} onClose={()=>setPreviewPedido(null)}/>
   </div>);
 }
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
