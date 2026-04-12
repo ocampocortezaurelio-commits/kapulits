@@ -15,6 +15,7 @@
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
   body{margin:0;padding:0;background:#fdf8f3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overscroll-behavior:none}
@@ -348,6 +349,182 @@ const pct=(a,b)=>b>0?((a/b)*100).toFixed(1)+'%':'0%';
 const calcVentasTotal=(ventas=[])=>ventas.reduce((s,v)=>s+v.total,0);
 const calcGastosTotal=(gastos=[])=>gastos.reduce((s,g)=>s+g.monto,0);
 const calcMandaditosTotal=(mandaditos=[])=>mandaditos.reduce((s,m)=>s+m.tarifa,0);
+
+// ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
+function analyzeHistorico(jornadas,productos){
+  const cerradas=jornadas.filter(j=>j.estado==='cerrada');
+  if(!cerradas.length)return null;
+
+  // Analisis por dia de la semana
+  const porDia={};
+  cerradas.forEach(j=>{
+    const d=new Date(j.fecha+'T12:00:00');
+    const dia=d.toLocaleDateString('es-MX',{weekday:'long'});
+    if(!porDia[dia])porDia[dia]={ventas:0,pedidos:0,count:0};
+    porDia[dia].ventas+=calcVentasTotal(j.ventas);
+    porDia[dia].pedidos+=(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
+    porDia[dia].count++;
+  });
+
+  // Mejor y peor dia
+  const dias=Object.entries(porDia).map(([d,v])=>({dia:d,promVentas:v.ventas/v.count,promPedidos:v.pedidos/v.count,count:v.count}));
+  dias.sort((a,b)=>b.promVentas-a.promVentas);
+  const mejorDia=dias[0]||null;
+  const peorDia=dias[dias.length-1]||null;
+
+  // Tendencia (ultimas 3 vs anteriores)
+  const ultimas3=cerradas.slice(-3);
+  const anteriores=cerradas.slice(0,-3);
+  const promUlt=ultimas3.length?ultimas3.reduce((s,j)=>s+calcVentasTotal(j.ventas),0)/ultimas3.length:0;
+  const promAnt=anteriores.length?anteriores.reduce((s,j)=>s+calcVentasTotal(j.ventas),0)/anteriores.length:0;
+  const tendencia=promAnt>0?((promUlt-promAnt)/promAnt*100):0;
+
+  // Productos top por volumen y por rentabilidad
+  const stats=getProductoStats(jornadas,productos);
+  const topVolumen=stats.filter(s=>s.cantidad>0).sort((a,b)=>b.cantidad-a.cantidad).slice(0,5);
+  const topRentable=stats.filter(s=>s.cantidad>0&&s.precio>0).map(s=>({...s,margen:((s.precio-s.costo)/s.precio*100)})).sort((a,b)=>b.margen-a.margen).slice(0,5);
+  const topRevenue=stats.filter(s=>s.cantidad>0).sort((a,b)=>b.revenue-a.revenue).slice(0,5);
+
+  // Hora pico (basado en hora de pedidos)
+  const horaCounts={};
+  cerradas.forEach(j=>(j.pedidos||[]).forEach(p=>{
+    if(p.estado!=='cancelado'&&p.hora){
+      const h=p.hora.split(':')[0];
+      horaCounts[h]=(horaCounts[h]||0)+1;
+    }
+  }));
+  const horaPico=Object.entries(horaCounts).sort((a,b)=>b[1]-a[1])[0];
+
+  // Tasa de envio vs recoger
+  const totalPedidos=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length,0);
+  const totalEnvios=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length,0);
+  const tasaEnvio=totalPedidos>0?(totalEnvios/totalPedidos*100):0;
+
+  // Ticket promedio
+  const allVentas=cerradas.flatMap(j=>j.ventas);
+  const ticketProm=allVentas.length?allVentas.reduce((s,v)=>s+v.total,0)/allVentas.length:0;
+
+  // Generar insights inteligentes
+  const insights=[];
+  if(mejorDia)insights.push({icon:'📅',type:'info',text:`Tu mejor dia es ${mejorDia.dia} con promedio de ${fmt(mejorDia.promVentas)} en ventas.`});
+  if(peorDia&&peorDia.dia!==mejorDia?.dia)insights.push({icon:'📉',type:'warn',text:`${peorDia.dia} es tu dia mas bajo (${fmt(peorDia.promVentas)} prom). Considera promociones especiales.`});
+  if(tendencia>10)insights.push({icon:'🚀',type:'ok',text:`Tendencia positiva: ventas subieron ${tendencia.toFixed(0)}% vs jornadas anteriores.`});
+  else if(tendencia<-10)insights.push({icon:'⚠️',type:'warn',text:`Alerta: ventas bajaron ${Math.abs(tendencia).toFixed(0)}% en las ultimas jornadas.`});
+  if(topVolumen[0])insights.push({icon:'⭐',type:'info',text:`${topVolumen[0].emoji} ${topVolumen[0].nombre} es el mas pedido (${topVolumen[0].cantidad} pz). Nunca te quedes sin stock.`});
+  if(topRentable[0])insights.push({icon:'💎',type:'ok',text:`${topRentable[0].emoji} ${topRentable[0].nombre} tiene el mejor margen (${topRentable[0].margen.toFixed(0)}%). Promocionalo mas.`});
+  if(tasaEnvio>50)insights.push({icon:'🛵',type:'info',text:`${tasaEnvio.toFixed(0)}% de pedidos son envios. Evalua ajustar tarifas o agregar repartidor.`});
+  if(horaPico)insights.push({icon:'⏰',type:'info',text:`Hora pico: ${horaPico[0]}:00 hrs (${horaPico[1]} pedidos). Asegura personal suficiente.`});
+  if(ticketProm>0)insights.push({icon:'🧾',type:'info',text:`Ticket promedio: ${fmt(ticketProm)}. Considera combos para subirlo.`});
+
+  return{porDia:dias,mejorDia,peorDia,tendencia,topVolumen,topRentable,topRevenue,horaPico,tasaEnvio,ticketProm,insights,totalJornadas:cerradas.length};
+}
+
+// ─── PDF GENERATOR ──────────────────────────────────────────────────
+function generarPDF(tipo,jornadas,productos){
+  const{jsPDF}=window.jspdf;
+  const doc=new jsPDF({unit:'mm',format:'letter'});
+  const W=doc.internal.pageSize.getWidth();
+  const now=new Date();
+  let y=15;
+
+  const addHeader=()=>{
+    doc.setFontSize(18);doc.setFont('helvetica','bold');
+    doc.text("K'apul'Its",W/2,y,{align:'center'});y+=6;
+    doc.setFontSize(9);doc.setFont('helvetica','normal');
+    doc.text('Birria y algo mas - Reporte '+tipo.toUpperCase(),W/2,y,{align:'center'});y+=4;
+    doc.text('Generado: '+now.toLocaleDateString('es-MX',{day:'numeric',month:'long',year:'numeric'}),W/2,y,{align:'center'});y+=8;
+    doc.setDrawColor(234,88,12);doc.setLineWidth(0.5);doc.line(15,y,W-15,y);y+=6;
+  };
+
+  const addSection=(title)=>{
+    if(y>250){doc.addPage();y=15;}
+    doc.setFontSize(12);doc.setFont('helvetica','bold');doc.setTextColor(234,88,12);
+    doc.text(title,15,y);y+=6;doc.setTextColor(0,0,0);doc.setFont('helvetica','normal');doc.setFontSize(9);
+  };
+
+  const addRow=(label,value,bold=false)=>{
+    if(y>270){doc.addPage();y=15;}
+    doc.setFont('helvetica',bold?'bold':'normal');
+    doc.text(label,18,y);doc.text(String(value),W-18,y,{align:'right'});y+=5;
+  };
+
+  // Filtrar jornadas por periodo
+  let cerradas=jornadas.filter(j=>j.estado==='cerrada');
+  let periodoLabel='';
+  if(tipo==='mensual'){
+    const mes=now.getMonth(),anio=now.getFullYear();
+    cerradas=cerradas.filter(j=>{const d=new Date(j.fecha+'T12:00:00');return d.getMonth()===mes&&d.getFullYear()===anio;});
+    periodoLabel=now.toLocaleDateString('es-MX',{month:'long',year:'numeric'});
+  }else{
+    const trimestre=Math.floor(now.getMonth()/3);
+    const mesInicio=trimestre*3;
+    cerradas=cerradas.filter(j=>{const d=new Date(j.fecha+'T12:00:00');return d.getMonth()>=mesInicio&&d.getMonth()<mesInicio+3&&d.getFullYear()===now.getFullYear();});
+    periodoLabel=`Q${trimestre+1} ${now.getFullYear()} (${['Ene-Mar','Abr-Jun','Jul-Sep','Oct-Dic'][trimestre]})`;
+  }
+
+  addHeader();
+
+  // Periodo
+  addSection('Periodo: '+periodoLabel);
+  addRow('Jornadas registradas',cerradas.length);y+=3;
+
+  if(!cerradas.length){
+    doc.setFontSize(11);doc.text('Sin jornadas cerradas en este periodo.',W/2,y+10,{align:'center'});
+    doc.save(`kapulits_${tipo}_${now.toISOString().slice(0,10)}.pdf`);return;
+  }
+
+  // Resumen financiero
+  const tv=cerradas.reduce((s,j)=>s+calcVentasTotal(j.ventas),0);
+  const tg=cerradas.reduce((s,j)=>s+calcGastosTotal(j.gastos),0);
+  const tu=tv-tg;
+  const tm=cerradas.reduce((s,j)=>s+calcMandaditosTotal(j.mandaditos||[]),0);
+  const margen=tv>0?((tu/tv)*100).toFixed(1):'0';
+
+  addSection('Resumen Financiero');
+  addRow('Total Ventas (productos)',fmt(tv),true);
+  addRow('Total Gastos',fmt(tg));
+  addRow('Utilidad Bruta',fmt(tu),true);
+  addRow('Margen de Utilidad',margen+'%');
+  addRow('Mandaditos (ingreso aparte)',fmt(tm));
+  addRow('Promedio por jornada',fmt(tv/cerradas.length));y+=3;
+
+  // Desglose por jornada
+  addSection('Desglose por Jornada');
+  cerradas.forEach(j=>{
+    const v=calcVentasTotal(j.ventas);const g=calcGastosTotal(j.gastos);
+    addRow(`${j.fecha} (${(j.pedidos||[]).length} pedidos)`,`${fmt(v)} | Util: ${fmt(v-g)}`);
+  });y+=3;
+
+  // Top productos
+  const stats=getProductoStats(cerradas.map(j=>({...j})),productos);
+  const topProds=stats.filter(s=>s.cantidad>0).slice(0,10);
+  if(topProds.length){
+    addSection('Top Productos');
+    topProds.forEach((s,i)=>{
+      const m=s.precio>0?((s.precio-s.costo)/s.precio*100).toFixed(0):'0';
+      addRow(`#${i+1} ${s.nombre} (${s.cantidad} pz, margen ${m}%)`,fmt(s.revenue));
+    });y+=3;
+  }
+
+  // Inteligencia
+  const intel=analyzeHistorico(cerradas,productos);
+  if(intel?.insights.length){
+    addSection('Recomendaciones Inteligentes');
+    intel.insights.forEach(r=>{
+      if(y>270){doc.addPage();y=15;}
+      const lines=doc.splitTextToSize('- '+r.text,W-36);
+      doc.text(lines,18,y);y+=lines.length*4+2;
+    });
+  }
+
+  // Footer
+  y+=5;if(y>260){doc.addPage();y=15;}
+  doc.setDrawColor(234,88,12);doc.setLineWidth(0.3);doc.line(15,y,W-15,y);y+=5;
+  doc.setFontSize(8);doc.setTextColor(150);
+  doc.text("K'apul'Its - "+NEGOCIO.direccion+' - Tel: '+NEGOCIO.telefono,W/2,y,{align:'center'});
+
+  doc.save(`kapulits_${tipo}_${now.toISOString().slice(0,10)}.pdf`);
+}
 
 // ─── PRINTER SANITIZER (ASCII for 58mm thermal) ────────────────────
 const ACCENT_MAP={'á':'a','é':'e','í':'i','ó':'o','ú':'u','ñ':'n','Á':'A','É':'E','Í':'I','Ó':'O','Ú':'U','Ñ':'N',
@@ -1163,10 +1340,10 @@ function ReportesPage({state}){
     return Object.entries(m).sort((a,b)=>b[1]-a[1]);},[jActual]);
   return(<div className="safe-bottom"><TopBar title="Reportes 📊"/>
     <div className="px-4 py-4">
-      <div className="flex bg-gray-100 rounded-2xl p-1 mb-5">
-        {[{id:'diario',l:'Diario'},{id:'mensual',l:'Mensual'},{id:'mandaditos',l:'🛵 Mandaditos'}].map(t=>(
+      <div className="flex bg-gray-100 rounded-2xl p-1 mb-5 overflow-x-auto gap-0.5">
+        {[{id:'diario',l:'Diario'},{id:'mensual',l:'Mensual'},{id:'mandaditos',l:'🛵'},{id:'inteligencia',l:'🧠'},{id:'pdf',l:'📄 PDF'}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
-            className={`flex-1 py-2.5 text-xs font-black rounded-xl transition-all ${tab===t.id?'bg-white text-orange-600 shadow-sm':'text-gray-500'}`}>{t.l}</button>))}</div>
+            className={`flex-shrink-0 flex-1 py-2.5 text-xs font-black rounded-xl transition-all ${tab===t.id?'bg-white text-orange-600 shadow-sm':'text-gray-500'}`}>{t.l}</button>))}</div>
 
       {tab==='diario'&&(<div className="space-y-5">
         {state.jornadas.length===0&&<EmptyState emoji="📊" title="Sin jornadas aun" sub="Abre tu primera jornada"/>}
@@ -1236,6 +1413,104 @@ function ReportesPage({state}){
       </div>)}
 
       {tab==='mandaditos'&&(<MandaditosReport jornadas={state.jornadas} jornadaActiva={state.jornadaActiva}/>)}
+
+      {tab==='inteligencia'&&(()=>{
+        const intel=analyzeHistorico(state.jornadas,state.productos);
+        if(!intel)return<EmptyState emoji="🧠" title="Sin datos suficientes" sub="Cierra al menos 1 jornada para activar la inteligencia"/>;
+        return(<div className="space-y-5 fade-in">
+          <div className="bg-gradient-to-br from-purple-500 to-indigo-600 rounded-3xl p-5 text-white shadow-lg">
+            <h3 className="font-black text-lg mb-1">🧠 Inteligencia K'apul'Its</h3>
+            <p className="text-purple-200 text-xs">{intel.totalJornadas} jornadas analizadas</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <MetricCard icon="🧾" label="Ticket Promedio" value={fmt(intel.ticketProm)} color="orange"/>
+            <MetricCard icon="🛵" label="Tasa de Envio" value={`${intel.tasaEnvio.toFixed(0)}%`} color="purple"/>
+            {intel.mejorDia&&<MetricCard icon="📅" label="Mejor Dia" value={intel.mejorDia.dia} sub={fmt(intel.mejorDia.promVentas)+' prom'} color="green"/>}
+            {intel.horaPico&&<MetricCard icon="⏰" label="Hora Pico" value={`${intel.horaPico[0]}:00`} sub={`${intel.horaPico[1]} pedidos`} color="blue"/>}
+          </div>
+
+          {intel.tendencia!==0&&(
+            <div className={`rounded-2xl p-4 border ${intel.tendencia>0?'bg-green-50 border-green-200':'bg-red-50 border-red-200'}`}>
+              <p className="font-black text-sm">{intel.tendencia>0?'📈 Tendencia positiva':'📉 Tendencia a la baja'}</p>
+              <p className="text-xs mt-1 opacity-70">Ventas {intel.tendencia>0?'subieron':'bajaron'} {Math.abs(intel.tendencia).toFixed(0)}% en las ultimas 3 jornadas vs anteriores.</p>
+            </div>)}
+
+          {intel.topVolumen.length>0&&(
+            <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+              <h3 className="font-black text-sm mb-3">🏆 Mas Pedidos (volumen)</h3>
+              {intel.topVolumen.map((s,i)=>(
+                <div key={s.id} className="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
+                  <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span>
+                  <span>{s.emoji}</span>
+                  <span className="flex-1 text-xs font-bold">{s.nombre}</span>
+                  <span className="text-xs font-black text-orange-600">{s.cantidad} pz</span>
+                </div>))}
+            </div>)}
+
+          {intel.topRentable.length>0&&(
+            <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+              <h3 className="font-black text-sm mb-3">💎 Mas Rentables (margen)</h3>
+              {intel.topRentable.map((s,i)=>(
+                <div key={s.id} className="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
+                  <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span>
+                  <span>{s.emoji}</span>
+                  <span className="flex-1 text-xs font-bold">{s.nombre}</span>
+                  <span className={`text-xs font-black ${s.margen>=40?'text-green-600':'text-yellow-600'}`}>{s.margen.toFixed(0)}%</span>
+                </div>))}
+            </div>)}
+
+          {intel.insights.length>0&&(
+            <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+              <h3 className="font-black text-sm mb-3">💡 Recomendaciones</h3>
+              <div className="space-y-2">{intel.insights.map((r,i)=>(
+                <div key={i} className={`rounded-xl p-3 text-xs ${r.type==='warn'?'bg-yellow-50 border border-yellow-200':r.type==='ok'?'bg-green-50 border border-green-200':'bg-blue-50 border border-blue-200'}`}>
+                  <span className="mr-1">{r.icon}</span>{r.text}
+                </div>))}</div>
+            </div>)}
+
+          {intel.porDia.length>1&&(
+            <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+              <h3 className="font-black text-sm mb-3">📊 Ventas por Dia de la Semana</h3>
+              <BarChart labels={intel.porDia.map(d=>d.dia.substring(0,3))} values={intel.porDia.map(d=>d.promVentas)} color="#8b5cf6"/>
+            </div>)}
+        </div>);
+      })()}
+
+      {tab==='pdf'&&(
+        <div className="space-y-5 fade-in">
+          <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-3xl p-5 text-white shadow-lg">
+            <h3 className="font-black text-lg mb-1">📄 Reportes PDF</h3>
+            <p className="text-blue-200 text-xs">Genera reportes profesionales para descargar o compartir</p>
+          </div>
+
+          <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-12 h-12 bg-orange-100 rounded-2xl flex items-center justify-center text-2xl">📅</div>
+              <div><h4 className="font-black text-sm">Reporte Mensual</h4>
+                <p className="text-xs text-gray-400">Ventas, gastos, productos y recomendaciones del mes actual</p></div>
+            </div>
+            <Btn full onClick={()=>generarPDF('mensual',state.jornadas,state.productos)}>📄 Generar PDF Mensual</Btn>
+          </div>
+
+          <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="w-12 h-12 bg-purple-100 rounded-2xl flex items-center justify-center text-2xl">📊</div>
+              <div><h4 className="font-black text-sm">Reporte Trimestral</h4>
+                <p className="text-xs text-gray-400">Analisis del trimestre actual con tendencias y proyecciones</p></div>
+            </div>
+            <Btn full color="green" onClick={()=>generarPDF('trimestral',state.jornadas,state.productos)}>📄 Generar PDF Trimestral</Btn>
+          </div>
+
+          <div className="bg-gray-50 rounded-2xl p-4 text-xs text-gray-500">
+            <p className="font-bold mb-1">💡 Como usar</p>
+            <ul className="space-y-1 list-disc pl-4">
+              <li>Los PDF se descargan automaticamente</li>
+              <li>Incluyen recomendaciones inteligentes basadas en tu historico</li>
+              <li>Compartelos por WhatsApp, email o guardalos para tu contabilidad</li>
+            </ul>
+          </div>
+        </div>)}
     </div></div>);
 }
 
