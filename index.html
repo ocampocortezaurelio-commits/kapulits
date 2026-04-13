@@ -18,8 +18,10 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <style>
   *{-webkit-tap-highlight-color:transparent;box-sizing:border-box}
-  body{margin:0;padding:0;background:#fdf8f3;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overscroll-behavior:none}
-  #root{max-width:430px;margin:0 auto;min-height:100vh;position:relative;background:#fdf8f3;box-shadow:0 0 60px rgba(0,0,0,.1)}
+  body{margin:0;padding:0;background:#ea580c;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overscroll-behavior:none;transition:background .4s ease}
+  body.loaded{background:#fdf8f3}
+  #root{max-width:430px;margin:0 auto;min-height:100vh;position:relative;background:transparent;box-shadow:0 0 60px rgba(0,0,0,.1);transition:background .4s ease}
+  #root.loaded{background:#fdf8f3}
   .safe-top{padding-top:env(safe-area-inset-top,0px)}
   .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom,0px) + 80px)}
   .bottom-nav{padding-bottom:env(safe-area-inset-bottom,0px)}
@@ -1967,8 +1969,13 @@ function App(){
   </div>);
 }
 ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
-// Hide splash after render
-setTimeout(()=>{const s=document.getElementById('splash');if(s){s.style.opacity='0';setTimeout(()=>s.remove(),500);}},800);
+// Hide splash after render — smooth transition from orange to app
+setTimeout(()=>{
+  const s=document.getElementById('splash');
+  if(s){s.style.opacity='0';setTimeout(()=>s.remove(),500);}
+  document.body.classList.add('loaded');
+  document.getElementById('root')?.classList.add('loaded');
+},600);
 </script>
 <script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{});}</script>
 </body>
