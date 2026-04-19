@@ -688,7 +688,11 @@ function buildTicketHTML(pedido){
   if(pedido.costoEnvio>0)h+=`<div class="r"><span>Costo envío</span><span>${fmt(pedido.costoEnvio)}</span></div>`;
   h+=`<div class="r b" style="font-size:14px"><span>TOTAL</span><span>${fmt(pedido.total)}</span></div>`;
   h+=`<div class="s"></div>`;
-  if(pedido.notas)h+=`<div class="sm">📝 ${pedido.notas}</div>`;
+  if(pedido.notas){
+    h+=`<div class="b" style="margin-top:4px">📝 Notas:</div>`;
+    h+=`<div>${pedido.notas}</div>`;
+    h+=`<div class="s"></div>`;
+  }
   h+=`<div class="s"></div>`;
   h+=`<div class="c sm" style="margin-top:6px">${NEGOCIO.direccion}</div>`;
   h+=`<div class="c sm">Tel.: ${NEGOCIO.telefono}</div>`;
@@ -712,6 +716,21 @@ function _buildBTText(pedido){
     t+=` ${String(i.cantidad).padStart(2)}x ${nom} ${fmt(i.subtotal).padStart(7)}\n`;
   });
   t+=sep+'\n';
+  if(pedido.notas){
+    t+=`  Notas:\n`;
+    const words=String(pedido.notas).split(/\s+/);
+    let line='';
+    for(const w of words){
+      if((line+' '+w).trim().length>30){
+        t+=`  ${line.trim()}\n`;
+        line=w;
+      } else {
+        line=(line?line+' ':'')+w;
+      }
+    }
+    if(line)t+=`  ${line.trim()}\n`;
+    t+=sep+'\n';
+  }
   if(pedido.costoEnvio>0)t+=`  Envio:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
   t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
   t+=`  ${NEGOCIO.direccion}\n  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
@@ -1977,6 +1996,24 @@ setTimeout(()=>{
   document.getElementById('root')?.classList.add('loaded');
 },600);
 </script>
-<script>if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{});}</script>
+<script>
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').then(reg=>{
+    reg.addEventListener('updatefound',()=>{
+      const nw=reg.installing;if(!nw)return;
+      nw.addEventListener('statechange',()=>{
+        if(nw.state==='activated'&&navigator.serviceWorker.controller){
+          window.location.reload();
+        }
+      });
+    });
+    setInterval(()=>{reg.update().catch(()=>{});},60000);
+  }).catch(()=>{});
+  let reloaded=false;
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{
+    if(reloaded)return;reloaded=true;window.location.reload();
+  });
+}
+</script>
 </body>
 </html>

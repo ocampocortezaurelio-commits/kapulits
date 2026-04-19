@@ -1,15 +1,10 @@
-const CACHE_NAME = 'kapulits-v11';
+const CACHE_NAME = 'kapulits-v12';
 const BASE = '/kapulits/';
 const ASSETS = [
-  BASE,
-  BASE + 'index.html',
-  BASE + 'manifest.json',
   BASE + 'icon-192.png',
   BASE + 'icon-512.png',
-  'https://cdn.tailwindcss.com',
-  'https://unpkg.com/react@18/umd/react.production.min.js',
-  'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js',
-  'https://unpkg.com/@babel/standalone/babel.min.js'
+  BASE + 'manifest.json',
+  BASE + 'logo.svg'
 ];
 
 self.addEventListener('install', event => {
@@ -29,17 +24,33 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
+  const req = event.request;
+  if (req.method !== 'GET') return;
+
+  const url = new URL(req.url);
+  const isStaticAsset = /\.(png|jpg|jpeg|svg|ico|webp|woff2?)$/i.test(url.pathname)
+    || url.pathname.endsWith('manifest.json');
+
+  if (isStaticAsset) {
+    event.respondWith(
+      caches.match(req).then(cached => cached || fetch(req).then(res => {
+        if (res.status === 200) {
+          const clone = res.clone();
+          caches.open(CACHE_NAME).then(c => c.put(req, clone));
+        }
+        return res;
+      }))
+    );
+    return;
+  }
+
   event.respondWith(
-    caches.match(event.request)
-      .then(cached => cached || fetch(event.request)
-        .then(response => {
-          if (response.status === 200) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-          }
-          return response;
-        })
-      )
-      .catch(() => caches.match(BASE + 'index.html'))
+    fetch(req).then(res => {
+      if (res.status === 200) {
+        const clone = res.clone();
+        caches.open(CACHE_NAME).then(c => c.put(req, clone));
+      }
+      return res;
+    }).catch(() => caches.match(req).then(cached => cached || caches.match(BASE + 'index.html')))
   );
 });
