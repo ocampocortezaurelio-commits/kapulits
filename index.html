@@ -618,6 +618,10 @@ function getRecomendaciones(proj,stats){
 // ─── PRINTER ────────────────────────────────────────────────────────
 let printerCharacteristic=null;
 let _btDevice=null;
+let _keepaliveTimer=null;
+let _reconnectTimer=null;
+let _reconnectAttempt=0;
+let _onPrinterStateChange=null;
 const BT_SERVICES=['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455'];
 
 async function _findCharacteristic(server){
@@ -629,13 +633,54 @@ async function _findCharacteristic(server){
   return null;
 }
 
+// Keepalive: NULL byte que las impresoras ESC/POS descartan silenciosamente.
+// Mantiene el canal GATT vivo y evita que Android duerma la conexion.
+function _startKeepalive(){
+  _stopKeepalive();
+  _keepaliveTimer=setInterval(async()=>{
+    if(!printerCharacteristic)return;
+    try{await printerCharacteristic.writeValue(new Uint8Array([0x00]));}
+    catch(e){/* si falla, el evento disconnect dispara reconexion */}
+  },25000);
+}
+function _stopKeepalive(){if(_keepaliveTimer){clearInterval(_keepaliveTimer);_keepaliveTimer=null;}}
+
+function _handleDisconnect(){
+  printerCharacteristic=null;
+  _stopKeepalive();
+  if(_onPrinterStateChange)_onPrinterStateChange({conectada:false,reconectando:true});
+  _reconnectAttempt=0;
+  _scheduleReconnect();
+}
+
+function _scheduleReconnect(){
+  if(_reconnectTimer)clearTimeout(_reconnectTimer);
+  _reconnectAttempt++;
+  if(_reconnectAttempt>8){
+    if(_onPrinterStateChange)_onPrinterStateChange({conectada:false,reconectando:false});
+    return;
+  }
+  const delay=Math.min(1000*Math.pow(2,_reconnectAttempt-1),20000);
+  _reconnectTimer=setTimeout(async()=>{
+    const ok=await reconnectBluetooth();
+    if(ok){
+      _reconnectAttempt=0;
+      _startKeepalive();
+      if(_onPrinterStateChange)_onPrinterStateChange({conectada:true,reconectando:false});
+    } else {
+      _scheduleReconnect();
+    }
+  },delay);
+}
+
 async function connectBluetooth(){
   try{
     const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:BT_SERVICES});
     _btDevice=device;
-    device.addEventListener('gattserverdisconnected',()=>{printerCharacteristic=null;});
+    device.addEventListener('gattserverdisconnected',_handleDisconnect);
     const server=await device.gatt.connect();
     printerCharacteristic=await _findCharacteristic(server);
+    if(printerCharacteristic)_startKeepalive();
     return{success:true,name:device.name||'Impresora BT'};
   }catch(e){return{success:false,error:e.message};}
 }
@@ -646,7 +691,7 @@ async function reconnectBluetooth(){
     try{
       const server=await _btDevice.gatt.connect();
       printerCharacteristic=await _findCharacteristic(server);
-      if(printerCharacteristic)return true;
+      if(printerCharacteristic){_startKeepalive();return true;}
     }catch(e){}
   }
   // Intento 2: buscar dispositivos previamente pareados (Chrome 85+)
@@ -657,14 +702,24 @@ async function reconnectBluetooth(){
         try{
           const server=await dev.gatt.connect();
           _btDevice=dev;
-          dev.addEventListener('gattserverdisconnected',()=>{printerCharacteristic=null;});
+          dev.addEventListener('gattserverdisconnected',_handleDisconnect);
           printerCharacteristic=await _findCharacteristic(server);
-          if(printerCharacteristic)return true;
+          if(printerCharacteristic){_startKeepalive();return true;}
         }catch(e){}
       }
     }catch(e){}
   }
   return false;
+}
+
+// Auto-conectar al arrancar la app sin mostrar prompt (usa dispositivos ya autorizados)
+async function tryAutoConnectPrinter(){
+  if(!navigator.bluetooth?.getDevices)return false;
+  try{
+    const devices=await navigator.bluetooth.getDevices();
+    if(!devices.length)return false;
+    return await reconnectBluetooth();
+  }catch(e){return false;}
 }
 
 function buildTicketHTML(pedido){
@@ -1909,10 +1964,10 @@ function ImpresoraTab({impresora,onActualizar}){
     <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
       <h3 className="font-black text-gray-800 mb-4 text-sm">🖨️ Impresora de tickets</h3>
       <div className="space-y-4">
-        <div className={`rounded-2xl p-4 border-2 ${impresora.conectada?'border-green-300 bg-green-50':'border-gray-200 bg-gray-50'}`}>
-          <div className="flex items-center gap-3"><span className="text-3xl">{impresora.conectada?'🟢':'⚪'}</span>
-            <div><p className="font-bold text-sm">{impresora.conectada?impresora.nombre:'Sin impresora'}</p>
-              <p className="text-xs text-gray-500">{impresora.conectada?impresora.tipo:'Conecta una para imprimir tickets'}</p></div></div></div>
+        <div className={`rounded-2xl p-4 border-2 ${impresora.conectada?'border-green-300 bg-green-50':impresora.reconectando?'border-yellow-300 bg-yellow-50':'border-gray-200 bg-gray-50'}`}>
+          <div className="flex items-center gap-3"><span className="text-3xl">{impresora.conectada?'🟢':impresora.reconectando?'🟡':'⚪'}</span>
+            <div><p className="font-bold text-sm">{impresora.conectada?impresora.nombre:impresora.reconectando?'Reconectando...':'Sin impresora'}</p>
+              <p className="text-xs text-gray-500">{impresora.conectada?`${impresora.tipo} · Se mantiene activa`:impresora.reconectando?'Intentando recuperar la impresora':'Conecta una para imprimir tickets'}</p></div></div></div>
         {hasBT&&<Btn full onClick={conectar}>📡 Conectar Bluetooth</Btn>}
         {!hasBT&&<div className="bg-yellow-50 rounded-xl p-3 text-sm text-yellow-700">
           <p className="font-bold">⚠️ Bluetooth no disponible</p>
@@ -1955,6 +2010,16 @@ function App(){
   const showToast=(msg,color='green')=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
   // Register global preview callback
   useEffect(()=>{_showTicketPreview=(pedido)=>setPreviewPedido(pedido);return()=>{_showTicketPreview=null;};},[]);
+  // Auto-conectar impresora BT al arrancar + mantener estado sincronizado
+  useEffect(()=>{
+    _onPrinterStateChange=(s)=>{actualizarImpresora({conectada:!!s.conectada,reconectando:!!s.reconectando});};
+    if(state.impresora?.tipo==='bluetooth'&&state.impresora?.nombre){
+      tryAutoConnectPrinter().then(ok=>{
+        if(ok)actualizarImpresora({conectada:true,reconectando:false});
+      });
+    }
+    return()=>{_onPrinterStateChange=null;};
+  },[]);
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
       onAbrir={(f,d)=>{abrirJornada(f,d);showToast('🟢 Jornada abierta');}}

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-v12';
+const CACHE_NAME = 'kapulits-v13';
 const BASE = '/kapulits/';
 const ASSETS = [
   BASE + 'icon-192.png',
