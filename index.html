@@ -157,11 +157,63 @@ async function cloudLoad(){
   }catch(e){return null;}
 }
 let _saveTimer=null;
+// cloudSave con proteccion anti-sobreescritura: lee la nube antes de escribir,
+// y aborta si vamos a subir un estado con MENOS pedidos/jornadas que el remoto.
 async function cloudSave(state){
   if(!_sb)throw new Error('no client');
+  // 1. Auto-backup local antes de cualquier operacion
+  try{_autoBackup(state);}catch(e){}
+  // 2. Re-leer nube y comparar
+  try{
+    const cloud=await cloudLoad();
+    if(cloud?.data){
+      const cd=cloud.data;
+      const cJa=cd.jornadaActiva, lJa=state.jornadaActiva;
+      // Si la nube tiene mas pedidos en la jornada activa de hoy, no sobrescribir
+      if(cJa&&lJa&&cJa.fecha===lJa.fecha){
+        const cPeds=(cJa.pedidos||[]).length, lPeds=(lJa.pedidos||[]).length;
+        if(cPeds>lPeds){
+          const e=new Error(`Conflicto: nube tiene ${cPeds} pedidos, local ${lPeds}. Recarga la app.`);
+          e.conflict=true;throw e;
+        }
+      }
+      // Si la nube tiene mas jornadas cerradas, no sobrescribir
+      if((cd.jornadas||[]).length>(state.jornadas||[]).length){
+        const e=new Error('Conflicto: hay mas jornadas en la nube. Recarga la app.');
+        e.conflict=true;throw e;
+      }
+    }
+  }catch(e){if(e.conflict)throw e;/* errores de red se ignoran y siguen con upsert */}
   const{error}=await _sb.from('kapulits_state').upsert({id:'main',data:state,updated_at:new Date().toISOString()},{onConflict:'id'});
   if(error)throw error;
 }
+
+// Mantiene hasta 12 snapshots en localStorage (uno cada save).
+// Si algun dia se borra la nube, se puede recuperar el ultimo desde aqui.
+function _autoBackup(state){
+  try{
+    const ts=new Date().toISOString();
+    localStorage.setItem(`kapulits_backup_${ts}`,JSON.stringify({ts,state}));
+    const keys=Object.keys(localStorage).filter(k=>k.startsWith('kapulits_backup_')).sort();
+    while(keys.length>12){localStorage.removeItem(keys.shift());}
+  }catch(e){}
+}
+// Expuesto para que el usuario pueda recuperar manualmente desde DevTools si hace falta
+window.kapulitsBackups=()=>{
+  return Object.keys(localStorage).filter(k=>k.startsWith('kapulits_backup_')).sort()
+    .map(k=>{try{return{key:k,...JSON.parse(localStorage.getItem(k))};}catch(e){return{key:k,error:'corrupt'};}});
+};
+window.kapulitsRestore=(ts)=>{
+  const k=`kapulits_backup_${ts}`;
+  const raw=localStorage.getItem(k);
+  if(!raw){console.error('No existe backup:',k);return false;}
+  const {state}=JSON.parse(raw);
+  localStorage.setItem('kapulits_v2',JSON.stringify(state));
+  localStorage.setItem('kapulits_ts',new Date().toISOString());
+  console.log('Backup restaurado. Recargando...');
+  setTimeout(()=>location.reload(),500);
+  return true;
+};
 
 function migrateProducts(prods){
   const ids=prods.map(p=>p.id);
@@ -196,11 +248,10 @@ function useStore(){
               localStorage.setItem('kapulits_ts',cloud.updated_at);}catch(e){}
           setState(ns);
         }
-      }else{
-        // Nube vacia = reset total. Limpiar localStorage para arrancar desde cero
-        try{localStorage.removeItem('kapulits_v2');localStorage.removeItem('kapulits_ts');}catch(e){}
-        setState(INITIAL_STATE);
       }
+      // IMPORTANTE: si la nube viene vacia o falla, NUNCA borrar localStorage.
+      // El estado local es la fuente de verdad si la nube no responde.
+      // El reset solo se hace explicitamente desde Admin -> Reset.
       setSyncStatus('synced');
     }).catch(()=>setSyncStatus('offline'));
   },[]);
@@ -242,7 +293,28 @@ function useStore(){
     setSyncStatus('syncing');
     if(_saveTimer)clearTimeout(_saveTimer);
     _saveTimer=setTimeout(()=>{
-      cloudSave(ns).then(()=>setSyncStatus('synced')).catch(()=>setSyncStatus('offline'));
+      cloudSave(ns).then(()=>setSyncStatus('synced')).catch(err=>{
+        if(err&&err.conflict){
+          // Otro dispositivo tiene mas pedidos. NO sobrescribir, recargar desde nube.
+          setSyncStatus('conflict');
+          cloudLoad().then(cloud=>{
+            if(cloud?.data){
+              const p=cloud.data;
+              const merged={...INITIAL_STATE,...p,
+                productos:migrateProducts(p.productos||PRODUCTOS_DEFAULT),
+                costos:p.costos||COSTOS_DEFAULT,
+                empleados:p.empleados||EMPLEADOS_DEFAULT,
+                impresora:p.impresora||INITIAL_STATE.impresora};
+              try{localStorage.setItem('kapulits_v2',JSON.stringify(merged));
+                  localStorage.setItem('kapulits_ts',cloud.updated_at);}catch(e){}
+              setState(merged);
+              setSyncStatus('synced');
+            }
+          });
+        } else {
+          setSyncStatus('offline');
+        }
+      });
     },800);
   },[]);
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
