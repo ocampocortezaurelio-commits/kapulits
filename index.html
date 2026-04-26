@@ -157,35 +157,91 @@ async function cloudLoad(){
   }catch(e){return null;}
 }
 let _saveTimer=null;
-// cloudSave con proteccion anti-sobreescritura: lee la nube antes de escribir,
-// y aborta si vamos a subir un estado con MENOS pedidos/jornadas que el remoto.
+
+// ─── MERGE HELPERS ──────────────────────────────────────────────────
+// Permite que multiples dispositivos creen/editen pedidos al mismo tiempo
+// sin que nadie pierda datos. Estrategia: union por id, renumerar colisiones.
+function _mergeById(a,b){
+  const m=new Map();
+  for(const x of(a||[]))if(x&&x.id)m.set(x.id,x);
+  for(const x of(b||[]))if(x&&x.id)m.set(x.id,x); // local pisa si hay duplicado
+  return Array.from(m.values());
+}
+function _mergePedidos(cloud,local){
+  const list=_mergeById(cloud,local);
+  // Detectar duplicados de numero (dos dispositivos crearon pedidos al mismo tiempo
+  // y ambos asignaron el mismo numero secuencial). Renumeramos los duplicados.
+  const byNum=new Map();
+  for(const p of list){
+    const k=p.numero;
+    if(!byNum.has(k))byNum.set(k,[]);
+    byNum.get(k).push(p);
+  }
+  let maxNum=Math.max(0,...list.map(p=>p.numero||0));
+  for(const peds of byNum.values()){
+    if(peds.length>1){
+      // Conservar el primero por hora; renumerar los demas
+      peds.sort((a,b)=>String(a.hora||'').localeCompare(String(b.hora||'')));
+      for(let i=1;i<peds.length;i++){maxNum++;peds[i].numero=maxNum;}
+    }
+  }
+  return list.sort((a,b)=>(a.numero||0)-(b.numero||0));
+}
+function _mergeJornada(cloud,local){
+  if(!cloud)return local;
+  if(!local)return cloud;
+  return {
+    ...cloud,...local,
+    pedidos:_mergePedidos(cloud.pedidos||[],local.pedidos||[]),
+    mandaditos:_mergeById(cloud.mandaditos||[],local.mandaditos||[]),
+    gastos:_mergeById(cloud.gastos||[],local.gastos||[]),
+    ventas:_mergeById(cloud.ventas||[],local.ventas||[]),
+    contadorPedido:Math.max(cloud.contadorPedido||0,local.contadorPedido||0)
+  };
+}
+function _mergeJornadaActiva(cloud,local){
+  if(!cloud)return local;
+  if(!local)return cloud;
+  // Si ambas dispositivos tienen jornada activa pero de fechas distintas,
+  // se queda la mas reciente (caso raro: alguien no cerró antes de cambio de dia)
+  if(cloud.fecha!==local.fecha)return(cloud.fecha>local.fecha)?cloud:local;
+  return _mergeJornada(cloud,local);
+}
+function _mergeJornadas(cloud,local){
+  const m=new Map();
+  for(const j of(cloud||[]))if(j&&j.id)m.set(j.id,j);
+  for(const j of(local||[])){
+    if(!j||!j.id)continue;
+    const ex=m.get(j.id);
+    m.set(j.id,ex?_mergeJornada(ex,j):j);
+  }
+  return Array.from(m.values());
+}
+function _mergeStates(cloud,local){
+  if(!cloud)return local;
+  if(!local)return cloud;
+  return {
+    ...cloud,...local,
+    jornadas:_mergeJornadas(cloud.jornadas||[],local.jornadas||[]),
+    jornadaActiva:_mergeJornadaActiva(cloud.jornadaActiva,local.jornadaActiva)
+    // productos, costos, empleados, gastosFijos, impresora: last-write-wins
+    // del spread de arriba (cambios de configuracion son raros)
+  };
+}
+
+// cloudSave hace MERGE entre nube y local antes de subir. Asi multiples
+// dispositivos pueden agregar/editar pedidos al mismo tiempo sin perder nada.
 async function cloudSave(state){
   if(!_sb)throw new Error('no client');
-  // 1. Auto-backup local antes de cualquier operacion
   try{_autoBackup(state);}catch(e){}
-  // 2. Re-leer nube y comparar
+  let merged=state;
   try{
     const cloud=await cloudLoad();
-    if(cloud?.data){
-      const cd=cloud.data;
-      const cJa=cd.jornadaActiva, lJa=state.jornadaActiva;
-      // Si la nube tiene mas pedidos en la jornada activa de hoy, no sobrescribir
-      if(cJa&&lJa&&cJa.fecha===lJa.fecha){
-        const cPeds=(cJa.pedidos||[]).length, lPeds=(lJa.pedidos||[]).length;
-        if(cPeds>lPeds){
-          const e=new Error(`Conflicto: nube tiene ${cPeds} pedidos, local ${lPeds}. Recarga la app.`);
-          e.conflict=true;throw e;
-        }
-      }
-      // Si la nube tiene mas jornadas cerradas, no sobrescribir
-      if((cd.jornadas||[]).length>(state.jornadas||[]).length){
-        const e=new Error('Conflicto: hay mas jornadas en la nube. Recarga la app.');
-        e.conflict=true;throw e;
-      }
-    }
-  }catch(e){if(e.conflict)throw e;/* errores de red se ignoran y siguen con upsert */}
-  const{error}=await _sb.from('kapulits_state').upsert({id:'main',data:state,updated_at:new Date().toISOString()},{onConflict:'id'});
+    if(cloud?.data)merged=_mergeStates(cloud.data,state);
+  }catch(e){/* sin red, subir state local como esta */}
+  const{error}=await _sb.from('kapulits_state').upsert({id:'main',data:merged,updated_at:new Date().toISOString()},{onConflict:'id'});
   if(error)throw error;
+  return merged; // devolver el merge para que el cliente refleje pedidos de otros dispositivos
 }
 
 // Mantiene hasta 12 snapshots en localStorage (uno cada save).
@@ -293,28 +349,20 @@ function useStore(){
     setSyncStatus('syncing');
     if(_saveTimer)clearTimeout(_saveTimer);
     _saveTimer=setTimeout(()=>{
-      cloudSave(ns).then(()=>setSyncStatus('synced')).catch(err=>{
-        if(err&&err.conflict){
-          // Otro dispositivo tiene mas pedidos. NO sobrescribir, recargar desde nube.
-          setSyncStatus('conflict');
-          cloudLoad().then(cloud=>{
-            if(cloud?.data){
-              const p=cloud.data;
-              const merged={...INITIAL_STATE,...p,
-                productos:migrateProducts(p.productos||PRODUCTOS_DEFAULT),
-                costos:p.costos||COSTOS_DEFAULT,
-                empleados:p.empleados||EMPLEADOS_DEFAULT,
-                impresora:p.impresora||INITIAL_STATE.impresora};
-              try{localStorage.setItem('kapulits_v2',JSON.stringify(merged));
-                  localStorage.setItem('kapulits_ts',cloud.updated_at);}catch(e){}
-              setState(merged);
-              setSyncStatus('synced');
-            }
-          });
-        } else {
-          setSyncStatus('offline');
+      cloudSave(ns).then(merged=>{
+        // Si el merge incorporó pedidos de otros dispositivos, refrescar local
+        if(merged&&merged!==ns){
+          const refreshed={...INITIAL_STATE,...merged,
+            productos:migrateProducts(merged.productos||PRODUCTOS_DEFAULT),
+            costos:merged.costos||COSTOS_DEFAULT,
+            empleados:merged.empleados||EMPLEADOS_DEFAULT,
+            impresora:merged.impresora||INITIAL_STATE.impresora};
+          try{localStorage.setItem('kapulits_v2',JSON.stringify(refreshed));
+              localStorage.setItem('kapulits_ts',new Date().toISOString());}catch(e){}
+          setState(refreshed);
         }
-      });
+        setSyncStatus('synced');
+      }).catch(()=>setSyncStatus('offline'));
     },800);
   },[]);
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
