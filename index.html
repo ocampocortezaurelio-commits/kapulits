@@ -376,7 +376,7 @@ function useStore(){
     }));
     const j={id:uid(),fecha:fecha||today(),estado:'abierta',fondoInicial:Number(fondoInicial)||0,
       ventas:[],gastos:gastosNomina,pedidos:[],mandaditos:[],contadorPedido:1,
-      horaApertura:now(),horaCierre:null,totalEfectivo:null,diferencia:null,observaciones:''};
+      horaApertura:now(),timestampApertura:Date.now(),horaCierre:null,totalEfectivo:null,diferencia:null,observaciones:''};
     save({...state,jornadas:[...state.jornadas,j],jornadaActiva:j});
   },[state,save]);
 
@@ -391,6 +391,29 @@ function useStore(){
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:null});
   },[state,save]);
+
+  // Auto-cierre: si la jornada lleva >24h abierta, cerrarla automaticamente
+  useEffect(()=>{
+    if(!state.jornadaActiva)return;
+    const ja=state.jornadaActiva;
+    const MS_24H=24*60*60*1000;
+    let aperturaMs=ja.timestampApertura;
+    if(!aperturaMs){
+      // Fallback para jornadas sin timestamp: usar fecha + horaApertura
+      const [h,m]=(ja.horaApertura||'00:00').split(':').map(Number);
+      const d=new Date(ja.fecha+'T00:00:00');d.setHours(h||0,m||0,0,0);
+      aperturaMs=d.getTime();
+    }
+    if(Date.now()-aperturaMs>=MS_24H){
+      const ventasEf=ja.ventas.filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+v.total,0);
+      const gastosEf=ja.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+      const esperado=ja.fondoInicial+ventasEf-gastosEf;
+      const jaCerrada={...ja,estado:'cerrada',horaCierre:'auto',totalEfectivo:esperado,
+        diferencia:0,observaciones:'Cierre automatico (24h)'};
+      const js=state.jornadas.map(j=>j.id===jaCerrada.id?jaCerrada:j);
+      save({...state,jornadas:js,jornadaActiva:null});
+    }
+  },[state.jornadaActiva]);
 
   const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas)=>{
     if(!state.jornadaActiva)return null;
