@@ -277,12 +277,32 @@ function migrateProducts(prods){
   return missing.length?[...prods,...missing]:prods;
 }
 
+function _autoCloseExpired(s){
+  if(!s||!s.jornadaActiva)return s;
+  const ja=s.jornadaActiva;
+  const MS_24H=24*60*60*1000;
+  let aperturaMs=ja.timestampApertura;
+  if(!aperturaMs){
+    const [h,m]=(ja.horaApertura||'00:00').split(':').map(Number);
+    const d=new Date(ja.fecha+'T00:00:00');d.setHours(h||0,m||0,0,0);
+    aperturaMs=d.getTime();
+  }
+  if(Date.now()-aperturaMs<MS_24H)return s;
+  const ventasEf=ja.ventas.filter(v=>v.metodoPago==='efectivo').reduce((a,v)=>a+v.total,0);
+  const gastosEf=ja.gastos.filter(g=>g.enEfectivo!==false).reduce((a,g)=>a+g.monto,0);
+  const esperado=ja.fondoInicial+ventasEf-gastosEf;
+  const jaCerrada={...ja,estado:'cerrada',horaCierre:'auto',totalEfectivo:esperado,
+    diferencia:0,observaciones:'Cierre automatico (24h)'};
+  const js=s.jornadas.map(j=>j.id===jaCerrada.id?jaCerrada:j);
+  return{...s,jornadas:js,jornadaActiva:null};
+}
+
 // ─── STORE ──────────────────────────────────────────────────────────
 function useStore(){
   const [state,setState]=useState(()=>{
     try{const s=localStorage.getItem('kapulits_v2');if(s){const p=JSON.parse(s);
-      return{...INITIAL_STATE,...p,productos:migrateProducts(p.productos||PRODUCTOS_DEFAULT),costos:p.costos||COSTOS_DEFAULT,
-        empleados:p.empleados||EMPLEADOS_DEFAULT,impresora:p.impresora||INITIAL_STATE.impresora};}}catch(e){}
+      return _autoCloseExpired({...INITIAL_STATE,...p,productos:migrateProducts(p.productos||PRODUCTOS_DEFAULT),costos:p.costos||COSTOS_DEFAULT,
+        empleados:p.empleados||EMPLEADOS_DEFAULT,impresora:p.impresora||INITIAL_STATE.impresora});}}catch(e){}
     return INITIAL_STATE;
   });
   const [syncStatus,setSyncStatus]=useState('idle');
@@ -295,11 +315,11 @@ function useStore(){
         const localTs=localStorage.getItem('kapulits_ts')||'';
         if(!localTs||cloud.updated_at>localTs){
           const p=cloud.data;
-          const ns={...INITIAL_STATE,...p,
+          const ns=_autoCloseExpired({...INITIAL_STATE,...p,
             productos:migrateProducts(p.productos||PRODUCTOS_DEFAULT),
             costos:p.costos||COSTOS_DEFAULT,
             empleados:p.empleados||EMPLEADOS_DEFAULT,
-            impresora:p.impresora||INITIAL_STATE.impresora};
+            impresora:p.impresora||INITIAL_STATE.impresora});
           try{localStorage.setItem('kapulits_v2',JSON.stringify(ns));
               localStorage.setItem('kapulits_ts',cloud.updated_at);}catch(e){}
           setState(ns);
@@ -323,11 +343,11 @@ function useStore(){
           const localTs=localStorage.getItem('kapulits_ts')||'';
           if(cloudTs&&cloudTs>localTs){
             const p=payload.new.data;
-            const ns={...INITIAL_STATE,...p,
+            const ns=_autoCloseExpired({...INITIAL_STATE,...p,
               productos:migrateProducts(p.productos||PRODUCTOS_DEFAULT),
               costos:p.costos||COSTOS_DEFAULT,
               empleados:p.empleados||EMPLEADOS_DEFAULT,
-              impresora:p.impresora||INITIAL_STATE.impresora};
+              impresora:p.impresora||INITIAL_STATE.impresora});
             try{localStorage.setItem('kapulits_v2',JSON.stringify(ns));
                 localStorage.setItem('kapulits_ts',cloudTs);}catch(e){}
             setState(ns);
@@ -352,11 +372,11 @@ function useStore(){
       cloudSave(ns).then(merged=>{
         // Si el merge incorporó pedidos de otros dispositivos, refrescar local
         if(merged&&merged!==ns){
-          const refreshed={...INITIAL_STATE,...merged,
+          const refreshed=_autoCloseExpired({...INITIAL_STATE,...merged,
             productos:migrateProducts(merged.productos||PRODUCTOS_DEFAULT),
             costos:merged.costos||COSTOS_DEFAULT,
             empleados:merged.empleados||EMPLEADOS_DEFAULT,
-            impresora:merged.impresora||INITIAL_STATE.impresora};
+            impresora:merged.impresora||INITIAL_STATE.impresora});
           try{localStorage.setItem('kapulits_v2',JSON.stringify(refreshed));
               localStorage.setItem('kapulits_ts',new Date().toISOString());}catch(e){}
           setState(refreshed);
@@ -391,29 +411,6 @@ function useStore(){
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:null});
   },[state,save]);
-
-  // Auto-cierre: si la jornada lleva >24h abierta, cerrarla automaticamente
-  useEffect(()=>{
-    if(!state.jornadaActiva)return;
-    const ja=state.jornadaActiva;
-    const MS_24H=24*60*60*1000;
-    let aperturaMs=ja.timestampApertura;
-    if(!aperturaMs){
-      // Fallback para jornadas sin timestamp: usar fecha + horaApertura
-      const [h,m]=(ja.horaApertura||'00:00').split(':').map(Number);
-      const d=new Date(ja.fecha+'T00:00:00');d.setHours(h||0,m||0,0,0);
-      aperturaMs=d.getTime();
-    }
-    if(Date.now()-aperturaMs>=MS_24H){
-      const ventasEf=ja.ventas.filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+v.total,0);
-      const gastosEf=ja.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-      const esperado=ja.fondoInicial+ventasEf-gastosEf;
-      const jaCerrada={...ja,estado:'cerrada',horaCierre:'auto',totalEfectivo:esperado,
-        diferencia:0,observaciones:'Cierre automatico (24h)'};
-      const js=state.jornadas.map(j=>j.id===jaCerrada.id?jaCerrada:j);
-      save({...state,jornadas:js,jornadaActiva:null});
-    }
-  },[state.jornadaActiva]);
 
   const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas)=>{
     if(!state.jornadaActiva)return null;
