@@ -2696,29 +2696,8 @@ setTimeout(()=>{
 <script>
 if('serviceWorker' in navigator){
   navigator.serviceWorker.register('sw.js').then(reg=>{
-    reg.addEventListener('updatefound',()=>{
-      const nw=reg.installing;if(!nw)return;
-      nw.addEventListener('statechange',()=>{
-        if(nw.state==='activated'&&navigator.serviceWorker.controller){
-          const last=sessionStorage.getItem('sw-reload');
-          const now=Date.now();
-          if(last&&(now-Number(last))<15000)return;
-          sessionStorage.setItem('sw-reload',String(now));
-          window.location.reload();
-        }
-      });
-    });
     setInterval(()=>{reg.update().catch(()=>{});},60000);
   }).catch(()=>{});
-  let reloaded=false;
-  navigator.serviceWorker.addEventListener('controllerchange',()=>{
-    if(reloaded)return;reloaded=true;
-    const last=sessionStorage.getItem('sw-reload');
-    const now=Date.now();
-    if(last&&(now-Number(last))<15000)return;
-    sessionStorage.setItem('sw-reload',String(now));
-    window.location.reload();
-  });
 }
 </script>
 </body>

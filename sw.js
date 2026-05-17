@@ -1,18 +1,14 @@
-const CACHE_NAME = 'kapulits-v18';
-const BASE = './';
-const ASSETS = [
-  BASE,
-  BASE + 'index.html',
-  BASE + 'icon-192.png',
-  BASE + 'icon-512.png',
-  BASE + 'manifest.json',
-  BASE + 'logo.svg'
+const CACHE_NAME = 'kapulits-assets';
+const STATIC_ASSETS = [
+  './icon-192.png',
+  './icon-512.png',
+  './logo.svg'
 ];
 
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => cache.addAll(ASSETS))
+      .then(cache => cache.addAll(STATIC_ASSETS))
       .then(() => self.skipWaiting())
   );
 });
@@ -30,10 +26,10 @@ self.addEventListener('fetch', event => {
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
-  const isStaticAsset = /\.(png|jpg|jpeg|svg|ico|webp|woff2?)$/i.test(url.pathname)
-    || url.pathname.endsWith('manifest.json');
 
-  if (isStaticAsset) {
+  const isStatic = /\.(png|jpg|jpeg|svg|ico|webp|woff2?)$/i.test(url.pathname);
+
+  if (isStatic) {
     event.respondWith(
       caches.match(req).then(cached => cached || fetch(req).then(res => {
         if (res.status === 200) {
@@ -53,6 +49,6 @@ self.addEventListener('fetch', event => {
         caches.open(CACHE_NAME).then(c => c.put(req, clone));
       }
       return res;
-    }).catch(() => caches.match(req).then(cached => cached || caches.match(BASE + 'index.html')))
+    }).catch(() => caches.match(req).then(cached => cached || caches.match('./index.html')))
   );
 });
