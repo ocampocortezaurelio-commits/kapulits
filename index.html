@@ -296,7 +296,16 @@ let _saveTimer=null;
 function _mergeById(a,b){
   const m=new Map();
   for(const x of(a||[]))if(x&&x.id)m.set(x.id,x);
-  for(const x of(b||[]))if(x&&x.id)m.set(x.id,x); // local pisa si hay duplicado
+  for(const x of(b||[])){
+    if(!x||!x.id)continue;
+    const ex=m.get(x.id);
+    if(!ex){m.set(x.id,x);continue;}
+    const exTs=ex._ts||ex.hora||'';
+    const xTs=x._ts||x.hora||'';
+    const exState=ex.estado||ex.cobrado?1:0;
+    const xState=x.estado||x.cobrado?1:0;
+    if(xState>exState||xTs>exTs)m.set(x.id,x);
+  }
   return Array.from(m.values());
 }
 function _mergePedidos(cloud,local){
@@ -543,15 +552,18 @@ function useStore(){
           const writerId=payload.new.data?.__sync?.writerId||'';
           setLastCloudAt(cloudTs||'');
           if(!cloudTs||cloudTs<=localTs||writerId===deviceInfo.id)return;
+          const cloudData=payload.new.data;
+          const localRaw=localStorage.getItem('kapulits_v2');
+          const localData=localRaw?JSON.parse(localRaw):null;
+          const merged=localData?_mergeStates(cloudData,localData):cloudData;
+          const ns=hydrateState(merged);
+          persistLocal(ns,cloudTs,false);
+          setState(ns);
+          setSyncStatus('synced');
           if(deviceInfo.role==='mirror'){
-            const ns=hydrateState(payload.new.data);
-            persistLocal(ns,cloudTs,false);
-            setState(ns);
-            setSyncStatus('synced');
-            showRemoteNotice('Datos actualizados desde la PC');
+            showRemoteNotice('Datos sincronizados');
           }else{
-            setSyncStatus(isDirtyFlagSet()?'local':'remote');
-            showRemoteNotice('Hay cambios remotos pendientes por revisar');
+            showRemoteNotice('Pedidos actualizados desde otro dispositivo');
           }
         })
       .subscribe();
@@ -618,14 +630,13 @@ function useStore(){
   const save=useCallback(ns=>{
     persistLocal(ns,new Date().toISOString(),true);
     setState(ns);
-    setSyncStatus(deviceInfo.role==='primary'?'syncing':'local');
+    setSyncStatus('syncing');
     if(_saveTimer)clearTimeout(_saveTimer);
-    if(deviceInfo.role!=='primary')return;
     _saveTimer=setTimeout(async()=>{
-      const r=await syncNow('replace',ns);
+      const r=await syncNow('merge',ns);
       if(!r.ok)setSyncStatus('offline');
     },1200);
-  },[deviceInfo.role,persistLocal,syncNow]);
+  },[persistLocal,syncNow]);
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   const now=()=>new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
   const today=()=>localISODate();
@@ -659,7 +670,7 @@ function useStore(){
     const totalProductos=items.reduce((s,i)=>s+i.subtotal,0);
     const tarifa=TARIFAS_ENVIO[tipoEntrega]||TARIFAS_ENVIO.recoger;
     const costoEnvio=tarifa.precio;
-    const pedido={id:uid(),numero:ja.contadorPedido,fecha:ja.fecha,hora:now(),
+    const pedido={id:uid(),numero:ja.contadorPedido,fecha:ja.fecha,hora:now(),_ts:new Date().toISOString(),
       items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
       tipoEntrega,cliente:cliente||'',direccion:direccion||'',notas:notas||'',
       estado:'nuevo',cobrado:false,metodoPago:null};
@@ -703,7 +714,7 @@ function useStore(){
       }
     }
 
-    const mergedCambios={...cambios,totalProductos:newTotalProd,costoEnvio:newCostoEnvio,total:newTotal};
+    const mergedCambios={...cambios,totalProductos:newTotalProd,costoEnvio:newCostoEnvio,total:newTotal,_ts:new Date().toISOString()};
     ja.pedidos=ja.pedidos.map(p=>p.id===pedidoId?{...p,...mergedCambios}:p);
 
     // Si se cobra, crear venta y marcar mandadito
