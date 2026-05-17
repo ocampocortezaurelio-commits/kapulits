@@ -134,6 +134,17 @@
   </div>
 </div>
 <style>@keyframes splashLoad{0%{transform:translateX(-100%)}50%{transform:translateX(0)}100%{transform:translateX(100%)}}</style>
+<script>
+setTimeout(function(){
+  var s=document.getElementById('splash');
+  if(s&&s.style.opacity!=='0'){
+    s.style.opacity='0';
+    setTimeout(function(){s.remove();},500);
+    document.body.classList.add('loaded');
+    var r=document.getElementById('root');if(r)r.classList.add('loaded');
+  }
+},10000);
+</script>
 <div id="root"></div>
 <script type="text/babel">
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
@@ -2689,6 +2700,10 @@ if('serviceWorker' in navigator){
       const nw=reg.installing;if(!nw)return;
       nw.addEventListener('statechange',()=>{
         if(nw.state==='activated'&&navigator.serviceWorker.controller){
+          const last=sessionStorage.getItem('sw-reload');
+          const now=Date.now();
+          if(last&&(now-Number(last))<15000)return;
+          sessionStorage.setItem('sw-reload',String(now));
           window.location.reload();
         }
       });
@@ -2697,7 +2712,12 @@ if('serviceWorker' in navigator){
   }).catch(()=>{});
   let reloaded=false;
   navigator.serviceWorker.addEventListener('controllerchange',()=>{
-    if(reloaded)return;reloaded=true;window.location.reload();
+    if(reloaded)return;reloaded=true;
+    const last=sessionStorage.getItem('sw-reload');
+    const now=Date.now();
+    if(last&&(now-Number(last))<15000)return;
+    sessionStorage.setItem('sw-reload',String(now));
+    window.location.reload();
   });
 }
 </script>
