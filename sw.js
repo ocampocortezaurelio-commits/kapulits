@@ -1,6 +1,8 @@
-const CACHE_NAME = 'kapulits-v16';
-const BASE = '/kapulits/';
+const CACHE_NAME = 'kapulits-v17';
+const BASE = './';
 const ASSETS = [
+  BASE,
+  BASE + 'index.html',
   BASE + 'icon-192.png',
   BASE + 'icon-512.png',
   BASE + 'manifest.json',
