@@ -75,6 +75,18 @@
   .skeleton{animation:shimmer 1.5s infinite;background:linear-gradient(90deg,#f5ede3 25%,#eadfce 50%,#f5ede3 75%);background-size:200% 100%}
   @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
   .app-shell{padding:14px 14px 0}
+  @media(min-width:768px){
+    #root{max-width:100%}
+    .app-shell{padding:20px 32px 0;max-width:960px;margin:0 auto}
+    .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom,0px) + 90px)}
+    .desktop-grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+    .desktop-grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+    .desktop-wide{max-width:1100px;margin:0 auto}
+  }
+  @media(min-width:1024px){
+    .app-shell{padding:24px 48px 0;max-width:1100px}
+    .desktop-grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  }
   .surface-card{
     background:linear-gradient(180deg, rgba(255,250,244,.98), rgba(255,247,238,.96));
     border:1px solid rgba(221,192,161,.58);
@@ -303,8 +315,8 @@ function _mergeById(a,b){
     if(!ex){m.set(x.id,x);continue;}
     const exTs=ex._ts||ex.hora||'';
     const xTs=x._ts||x.hora||'';
-    const exState=ex.estado||ex.cobrado?1:0;
-    const xState=x.estado||x.cobrado?1:0;
+    const exState=(ex.estado==='entregado'||ex.estado==='cancelado'||ex.cobrado)?1:0;
+    const xState=(x.estado==='entregado'||x.estado==='cancelado'||x.cobrado)?1:0;
     if(xState>exState||xTs>exTs)m.set(x.id,x);
   }
   return Array.from(m.values());
@@ -329,6 +341,120 @@ function _mergePedidos(cloud,local){
   }
   return list.sort((a,b)=>(a.numero||0)-(b.numero||0));
 }
+function _repairVentas(ventas){
+  // Invariant: max 1 active reversal per ventaOrigId.
+  // If multi-device merge created duplicates, keep newest, anular the rest.
+  const activeByOrig=new Map();
+  for(const v of ventas){
+    if(!v.esReversa||v.anulada)continue;
+    const key=v.ventaOrigId;
+    if(!key)continue;
+    if(!activeByOrig.has(key))activeByOrig.set(key,[]);
+    activeByOrig.get(key).push(v);
+  }
+  const toAnular=new Set();
+  for(const [,arr] of activeByOrig){
+    if(arr.length<=1)continue;
+    arr.sort((a,b)=>String(b._ts||b.hora||'').localeCompare(String(a._ts||a.hora||'')));
+    for(let i=1;i<arr.length;i++)toAnular.add(arr[i].id);
+  }
+  if(!toAnular.size)return ventas;
+  return ventas.map(v=>toAnular.has(v.id)?{...v,anulada:true}:v);
+}
+function _pickNewestByTs(items=[]){
+  return [...items].sort((a,b)=>String(b?._ts||b?.hora||'').localeCompare(String(a?._ts||a?.hora||'')))[0]||null;
+}
+function _repairHistoricalVentas(ventas=[]){
+  let repaired=_repairVentas(ventas.map(v=>({...v})));
+  const originalsByPedido=new Map();
+  for(const v of repaired){
+    if(v?.esReversa||v?.anulada||!v?.pedidoId)continue;
+    if(!originalsByPedido.has(v.pedidoId))originalsByPedido.set(v.pedidoId,[]);
+    originalsByPedido.get(v.pedidoId).push(v);
+  }
+  const duplicateOriginalIds=new Set();
+  for(const [,arr] of originalsByPedido){
+    if(arr.length<=1)continue;
+    const keep=_pickNewestByTs(arr);
+    arr.forEach(v=>{if(v.id!==keep?.id)duplicateOriginalIds.add(v.id);});
+  }
+  if(duplicateOriginalIds.size){
+    const stamp=new Date().toISOString();
+    repaired=repaired.map(v=>duplicateOriginalIds.has(v.id)?{...v,anulada:true,observacionRepair:'Venta original duplicada anulada en reparación histórica',_ts:stamp}:v);
+  }
+  return repaired;
+}
+function _calcEsperadoCaja(jornada){
+  const ventasEf=calcVentasEfectivo(jornada?.ventas||[]);
+  const gastosEf=(jornada?.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+  return Number(jornada?.fondoInicial||0)+ventasEf-gastosEf;
+}
+function _auditHistoricalState(state){
+  const jornadas=[...(state?.jornadas||[]),state?.jornadaActiva].filter(Boolean);
+  const issues=[];
+  const summary={jornadas: jornadas.length, duplicateOriginalVentas:0, duplicateActiveReversals:0, orphanReversals:0, mismatchDiferencias:0};
+  jornadas.forEach(j=>{
+    const ventas=j.ventas||[];
+    const byPedido=new Map();
+    ventas.filter(v=>!v.esReversa&&!v.anulada&&v.pedidoId).forEach(v=>{
+      if(!byPedido.has(v.pedidoId))byPedido.set(v.pedidoId,[]);
+      byPedido.get(v.pedidoId).push(v);
+    });
+    for(const [pedidoId,arr] of byPedido){
+      if(arr.length>1){
+        summary.duplicateOriginalVentas++;
+        issues.push({type:'duplicate_original',fecha:j.fecha,pedidoId,count:arr.length,ids:arr.map(v=>v.id)});
+      }
+    }
+    const byOrig=new Map();
+    ventas.filter(v=>v.esReversa&&!v.anulada&&v.ventaOrigId).forEach(v=>{
+      if(!byOrig.has(v.ventaOrigId))byOrig.set(v.ventaOrigId,[]);
+      byOrig.get(v.ventaOrigId).push(v);
+    });
+    for(const [ventaOrigId,arr] of byOrig){
+      if(arr.length>1){
+        summary.duplicateActiveReversals++;
+        issues.push({type:'duplicate_reversal',fecha:j.fecha,ventaOrigId,count:arr.length,ids:arr.map(v=>v.id)});
+      }
+    }
+    ventas.filter(v=>v.esReversa&&!v.anulada).forEach(v=>{
+      if(!ventas.find(o=>o.id===v.ventaOrigId&&!o.esReversa)){
+        summary.orphanReversals++;
+        issues.push({type:'orphan_reversal',fecha:j.fecha,reversalId:v.id,ventaOrigId:v.ventaOrigId});
+      }
+    });
+    if(j.estado==='cerrada'&&j.totalEfectivo!=null){
+      const recalculated=Number(j.totalEfectivo)-_calcEsperadoCaja(j);
+      if(Math.abs(Number(j.diferencia||0)-recalculated)>0.01){
+        summary.mismatchDiferencias++;
+        issues.push({type:'diferencia_mismatch',fecha:j.fecha,stored:j.diferencia,recalculated:Number(recalculated.toFixed(2))});
+      }
+    }
+  });
+  return{ok:issues.length===0,summary,issues};
+}
+function _repairHistoricalState(state){
+  let changed=false;
+  const stamp=new Date().toISOString();
+  const repairJornada=j=>{
+    if(!j)return j;
+    let jornadaChanged=false;
+    let next={...j,ventas:_repairHistoricalVentas(j.ventas||[])};
+    if(JSON.stringify(next.ventas)!==JSON.stringify(j.ventas||[])){changed=true;jornadaChanged=true;}
+    if(next.estado==='cerrada'&&next.totalEfectivo!=null){
+      const newDiff=Number((Number(next.totalEfectivo)-_calcEsperadoCaja(next)).toFixed(2));
+      if(Math.abs(Number(next.diferencia||0)-newDiff)>0.01){
+        next={...next,diferencia:newDiff,observaciones:[next.observaciones,'Reparación histórica: diferencia recalculada.'].filter(Boolean).join(' | ')};
+        changed=true;
+        jornadaChanged=true;
+      }
+    }
+    return jornadaChanged?{...next,_ts:stamp}:next;
+  };
+  const jornadas=(state.jornadas||[]).map(repairJornada);
+  const jornadaActiva=state.jornadaActiva?repairJornada(state.jornadaActiva):null;
+  return{changed,state:{...state,jornadas,jornadaActiva},report:_auditHistoricalState({...state,jornadas,jornadaActiva})};
+}
 function _mergeJornada(cloud,local){
   if(!cloud)return local;
   if(!local)return cloud;
@@ -337,7 +463,7 @@ function _mergeJornada(cloud,local){
     pedidos:_mergePedidos(cloud.pedidos||[],local.pedidos||[]),
     mandaditos:_mergeById(cloud.mandaditos||[],local.mandaditos||[]),
     gastos:_mergeById(cloud.gastos||[],local.gastos||[]),
-    ventas:_mergeById(cloud.ventas||[],local.ventas||[]),
+    ventas:_repairVentas(_mergeById(cloud.ventas||[],local.ventas||[])),
     contadorPedido:Math.max(cloud.contadorPedido||0,local.contadorPedido||0)
   };
 }
@@ -442,6 +568,70 @@ window.kapulitsRestore=(ts)=>{
   return true;
 };
 
+// Sanity check: validate accounting invariants on current state.
+// Run from browser console: kapulitsSanityCheck()
+window.kapulitsSanityCheck=()=>{
+  const raw=localStorage.getItem('kapulits_v2');
+  if(!raw)return{ok:false,errors:['No state in localStorage']};
+  const state=JSON.parse(raw);
+  const errors=[];
+  const allJornadas=[...(state.jornadas||[]),state.jornadaActiva].filter(Boolean);
+  allJornadas.forEach(j=>{
+    const ventas=j.ventas||[];
+    // INV1: max 1 venta original per pedidoId
+    const origByPed=new Map();
+    ventas.filter(v=>!v.esReversa).forEach(v=>{
+      const k=v.pedidoId;if(!k)return;
+      if(!origByPed.has(k))origByPed.set(k,0);
+      origByPed.set(k,origByPed.get(k)+1);
+    });
+    for(const [pid,count] of origByPed){
+      if(count>1)errors.push(`J:${j.fecha} pedido ${pid}: ${count} ventas originales (expected max 1)`);
+    }
+    // INV2: max 1 active reversal per ventaOrigId
+    const activeRevByOrig=new Map();
+    ventas.filter(v=>v.esReversa&&!v.anulada).forEach(v=>{
+      const k=v.ventaOrigId;if(!k)return;
+      if(!activeRevByOrig.has(k))activeRevByOrig.set(k,0);
+      activeRevByOrig.set(k,activeRevByOrig.get(k)+1);
+    });
+    for(const [vid,count] of activeRevByOrig){
+      if(count>1)errors.push(`J:${j.fecha} ventaOrig ${vid}: ${count} active reversals (expected max 1)`);
+    }
+    // INV3: every active reversal must have a matching venta original
+    ventas.filter(v=>v.esReversa&&!v.anulada).forEach(v=>{
+      if(!ventas.find(o=>o.id===v.ventaOrigId&&!o.esReversa))
+        errors.push(`J:${j.fecha} reversal ${v.id}: orphan (no matching venta original ${v.ventaOrigId})`);
+    });
+    // INV4: cash formula consistency check
+    const vEf=ventas.filter(v=>!v.anulada&&v.metodoPago==='efectivo').reduce((s,v)=>s+Number(v.totalCobrado??v.total??0),0);
+    const gEf=(j.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+    const esperado=j.fondoInicial+vEf-gEf;
+    if(j.estado==='cerrada'&&j.totalEfectivo!=null){
+      const difCalc=j.totalEfectivo-esperado;
+      if(Math.abs(difCalc-j.diferencia)>0.01)
+        errors.push(`J:${j.fecha} diferencia stored=${j.diferencia} but recalc=${difCalc.toFixed(2)}`);
+    }
+  });
+  const result={ok:errors.length===0,checked:allJornadas.length+' jornadas',errors};
+  console.table(errors.length?errors:['All invariants OK']);
+  return result;
+};
+window.kapulitsHistoricalAudit=()=>{
+  const raw=localStorage.getItem('kapulits_v2');
+  if(!raw)return{ok:false,error:'No state in localStorage'};
+  return _auditHistoricalState(JSON.parse(raw));
+};
+window.kapulitsRepairHistoricalData=()=>{
+  const raw=localStorage.getItem('kapulits_v2');
+  if(!raw)return{ok:false,error:'No state in localStorage'};
+  const parsed=JSON.parse(raw);
+  const repaired=_repairHistoricalState(parsed);
+  localStorage.setItem('kapulits_v2',JSON.stringify(repaired.state));
+  localStorage.setItem('kapulits_ts',new Date().toISOString());
+  return repaired;
+};
+
 function migrateProducts(prods){
   const ids=prods.map(p=>p.id);
   const missing=PRODUCTOS_DEFAULT.filter(d=>!ids.includes(d.id));
@@ -456,11 +646,14 @@ function localISODate(d=new Date()){
 function calcVentaCobrada(v){
   return Number(v?.totalCobrado??v?.total??0);
 }
+function ventasActivas(ventas=[]){
+  return ventas.filter(v=>!v.anulada);
+}
 function calcVentasEfectivo(ventas=[]){
-  return ventas.filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+calcVentaCobrada(v),0);
+  return ventasActivas(ventas).filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+calcVentaCobrada(v),0);
 }
 function calcVentasTransferencia(ventas=[]){
-  return ventas.filter(v=>v.metodoPago==='transferencia').reduce((s,v)=>s+calcVentaCobrada(v),0);
+  return ventasActivas(ventas).filter(v=>v.metodoPago==='transferencia').reduce((s,v)=>s+calcVentaCobrada(v),0);
 }
 function hydrateState(p){
   return _autoCloseExpired({...INITIAL_STATE,...p,
@@ -477,19 +670,16 @@ function readBackups(){
 function _autoCloseExpired(s){
   if(!s||!s.jornadaActiva)return s;
   const ja=s.jornadaActiva;
-  const MS_24H=24*60*60*1000;
+  const MS_48H=48*60*60*1000;
   let aperturaMs=ja.timestampApertura;
   if(!aperturaMs){
     const [h,m]=(ja.horaApertura||'00:00').split(':').map(Number);
     const d=new Date(ja.fecha+'T00:00:00');d.setHours(h||0,m||0,0,0);
     aperturaMs=d.getTime();
   }
-  if(Date.now()-aperturaMs<MS_24H)return s;
-  const ventasEf=calcVentasEfectivo(ja.ventas);
-  const gastosEf=ja.gastos.filter(g=>g.enEfectivo!==false).reduce((a,g)=>a+g.monto,0);
-  const esperado=ja.fondoInicial+ventasEf-gastosEf;
-  const jaCerrada={...ja,estado:'cerrada',horaCierre:'auto',totalEfectivo:esperado,
-    diferencia:0,observaciones:'Cierre automatico (24h)'};
+  if(Date.now()-aperturaMs<MS_48H)return s;
+  const jaCerrada={...ja,estado:'cerrada',horaCierre:'auto-expirada',totalEfectivo:null,
+    diferencia:null,observaciones:'Jornada expirada (48h sin cerrar). Requiere cierre manual para cuadrar caja.'};
   const js=s.jornadas.map(j=>j.id===jaCerrada.id?jaCerrada:j);
   return{...s,jornadas:js,jornadaActiva:null};
 }
@@ -509,12 +699,16 @@ function useStore(){
     setRemoteNotice(msg);
     setTimeout(()=>setRemoteNotice(''),3500);
   },[]);
+  const [saveError,setSaveError]=useState(null);
   const persistLocal=useCallback((ns,ts=new Date().toISOString(),markDirty=true)=>{
     try{
       localStorage.setItem('kapulits_v2',JSON.stringify(ns));
       localStorage.setItem('kapulits_ts',ts);
       setDirtyFlag(markDirty);
-    }catch(e){}
+      setSaveError(null);
+    }catch(e){
+      setSaveError('No se pudo guardar localmente. Libera espacio en el dispositivo.');
+    }
   },[]);
 
   useEffect(()=>{
@@ -627,7 +821,6 @@ function useStore(){
     setSyncStatus('local');
     return true;
   },[persistLocal]);
-
   const save=useCallback(ns=>{
     persistLocal(ns,new Date().toISOString(),true);
     setState(ns);
@@ -638,6 +831,16 @@ function useStore(){
       if(!r.ok)setSyncStatus('offline');
     },1200);
   },[persistLocal,syncNow]);
+  const auditHistoricalData=useCallback(()=>{
+    return _auditHistoricalState(state);
+  },[state]);
+  const repairHistoricalData=useCallback(()=>{
+    const repaired=_repairHistoricalState(state);
+    if(repaired.changed){
+      save(repaired.state);
+    }
+    return repaired;
+  },[state,save]);
   const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
   const now=()=>new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
   const today=()=>localISODate();
@@ -714,10 +917,41 @@ function useStore(){
     const mergedCambios={...cambios,totalProductos:newTotalProd,costoEnvio:newCostoEnvio,total:newTotal,_ts:new Date().toISOString()};
     ja.pedidos=ja.pedidos.map(p=>p.id===pedidoId?{...p,...mergedCambios}:p);
 
-    // Si se cobra, crear venta y marcar mandadito
+    // Cancel cobrado: reactivate existing anulada reversal, or create new one
+    if(cambios.estado==='cancelado'&&pedOld.cobrado){
+      const ventaOrig=ja.ventas.find(v=>v.pedidoId===pedidoId&&!v.esReversa);
+      if(ventaOrig){
+        const reversaExistente=ja.ventas.find(v=>v.pedidoId===pedidoId&&v.esReversa&&v.ventaOrigId===ventaOrig.id);
+        if(reversaExistente){
+          ja.ventas=ja.ventas.map(v=>v.id===reversaExistente.id?{...v,anulada:false,total:-ventaOrig.total,totalCobrado:-ventaOrig.totalCobrado,costoEnvio:-(ventaOrig.costoEnvio||0),_ts:new Date().toISOString()}:v);
+        }else{
+          const reversa={id:uid(),hora:now(),_ts:new Date().toISOString(),items:[],total:-ventaOrig.total,totalCobrado:-ventaOrig.totalCobrado,
+            costoEnvio:-(ventaOrig.costoEnvio||0),metodoPago:ventaOrig.metodoPago,pedidoId,esReversa:true,ventaOrigId:ventaOrig.id};
+          ja.ventas=[...ja.ventas,reversa];
+        }
+      }
+      ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:false,metodoPago:null}:m);
+    }
+
+    // Restore cobrado-cancelled: anular reversa, restore mandadito
+    if(cambios.estado==='nuevo'&&pedOld.estado==='cancelado'&&pedOld.cobrado){
+      const ventaOrig=ja.ventas.find(v=>v.pedidoId===pedidoId&&!v.esReversa);
+      if(ventaOrig){
+        ja.ventas=ja.ventas.map(v=>(v.pedidoId===pedidoId&&v.esReversa&&v.ventaOrigId===ventaOrig.id&&!v.anulada)?{...v,anulada:true,_ts:new Date().toISOString()}:v);
+      }
+      ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:ventaOrig?.metodoPago||null}:m);
+    }
+
+    // Edit-sync: only update original venta, never reversals
+    if(pedOld.cobrado&&!cambios.estado&&(cambios.items||cambios.tipoEntrega)){
+      ja.ventas=ja.ventas.map(v=>(v.pedidoId===pedidoId&&!v.esReversa)?{...v,items:newItems,total:newTotalProd,totalCobrado:newTotal,costoEnvio:newCostoEnvio}:v);
+    }
+
+    // Si se cobra, crear venta y marcar mandadito (guard: no duplicates)
     if(cambios.cobrado&&cambios.metodoPago){
       const ped=ja.pedidos.find(p=>p.id===pedidoId);
-      if(ped){
+      const alreadySold=ja.ventas.some(v=>v.pedidoId===pedidoId);
+      if(ped&&!alreadySold){
         const venta={id:uid(),hora:now(),items:ped.items,total:ped.totalProductos,totalCobrado:ped.total,
           costoEnvio:ped.costoEnvio||0,metodoPago:cambios.metodoPago,pedidoId:ped.id};
         ja.ventas=[...ja.ventas,venta];
@@ -755,10 +989,10 @@ function useStore(){
   const editarEmpleado=useCallback((eid,datos)=>{save({...state,empleados:state.empleados.map(e=>e.id===eid?{...e,...datos,sueldo:Number(datos.sueldo)||0}:e)});},[state,save]);
   const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
 
-  return{state,syncStatus,remoteNotice,lastCloudAt,deviceInfo,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+  return{state,syncStatus,remoteNotice,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
-    syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup};
+    syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
 }
 
 // ─── UTILS ──────────────────────────────────────────────────────────
@@ -767,7 +1001,7 @@ const fmtDate=iso=>{if(!iso)return'';const d=new Date(iso+'T12:00:00');return d.
 const fmtDateShort=iso=>{if(!iso)return'';const d=new Date(iso+'T12:00:00');return d.toLocaleDateString('es-MX',{day:'numeric',month:'short'});};
 const fmtDateTime=iso=>{if(!iso)return'Sin registro';const d=new Date(iso);return d.toLocaleString('es-MX',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});};
 const pct=(a,b)=>b>0?((a/b)*100).toFixed(1)+'%':'0%';
-const calcVentasTotal=(ventas=[])=>ventas.reduce((s,v)=>s+v.total,0);
+const calcVentasTotal=(ventas=[])=>ventasActivas(ventas).reduce((s,v)=>s+calcVentaCobrada(v),0);
 const calcGastosTotal=(gastos=[])=>gastos.reduce((s,g)=>s+g.monto,0);
 const calcMandaditosTotal=(mandaditos=[])=>mandaditos.reduce((s,m)=>s+m.tarifa,0);
 
@@ -821,9 +1055,9 @@ function analyzeHistorico(jornadas,productos){
   const totalEnvios=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length,0);
   const tasaEnvio=totalPedidos>0?(totalEnvios/totalPedidos*100):0;
 
-  // Ticket promedio
-  const allVentas=cerradas.flatMap(j=>j.ventas);
-  const ticketProm=allVentas.length?allVentas.reduce((s,v)=>s+v.total,0)/allVentas.length:0;
+  // Ticket promedio (solo ventas reales, sin reversas ni anuladas)
+  const allVentas=cerradas.flatMap(j=>ventasActivas(j.ventas).filter(v=>!v.esReversa));
+  const ticketProm=allVentas.length?allVentas.reduce((s,v)=>s+calcVentaCobrada(v),0)/allVentas.length:0;
 
   // Generar insights inteligentes
   const insights=[];
@@ -845,31 +1079,50 @@ function generarPDF(tipo,jornadas,productos){
   const{jsPDF}=window.jspdf;
   const doc=new jsPDF({unit:'mm',format:'letter'});
   const W=doc.internal.pageSize.getWidth();
+  const H=doc.internal.pageSize.getHeight();
   const now=new Date();
+  const ML=18,MR=W-18;
   let y=15;
+  let pageNum=1;
+
+  const checkPage=(need=12)=>{if(y>H-25-need){addPageFooter();doc.addPage();pageNum++;y=15;}};
+  const addPageFooter=()=>{
+    doc.setFontSize(7);doc.setTextColor(160);
+    doc.text(`Pagina ${pageNum}`,W/2,H-8,{align:'center'});
+    doc.text("K'apul'Its - "+NEGOCIO.telefono,W/2,H-4,{align:'center'});
+    doc.setTextColor(0);
+  };
 
   const addHeader=()=>{
-    doc.setFontSize(18);doc.setFont('helvetica','bold');
-    doc.text("K'apul'Its",W/2,y,{align:'center'});y+=6;
+    doc.setFillColor(234,88,12);doc.rect(0,0,W,28,  'F');
+    doc.setFontSize(20);doc.setFont('helvetica','bold');doc.setTextColor(255);
+    doc.text("K'apul'Its",W/2,12,{align:'center'});
     doc.setFontSize(9);doc.setFont('helvetica','normal');
-    doc.text('Birria y algo mas - Reporte '+tipo.toUpperCase(),W/2,y,{align:'center'});y+=4;
-    doc.text('Generado: '+now.toLocaleDateString('es-MX',{day:'numeric',month:'long',year:'numeric'}),W/2,y,{align:'center'});y+=8;
-    doc.setDrawColor(234,88,12);doc.setLineWidth(0.5);doc.line(15,y,W-15,y);y+=6;
+    doc.text('Birria y algo mas',W/2,18,{align:'center'});
+    doc.setFontSize(8);
+    doc.text('Reporte '+tipo.charAt(0).toUpperCase()+tipo.slice(1)+' | '+now.toLocaleDateString('es-MX',{day:'numeric',month:'long',year:'numeric'}),W/2,24,{align:'center'});
+    doc.setTextColor(0);y=35;
   };
 
   const addSection=(title)=>{
-    if(y>250){doc.addPage();y=15;}
-    doc.setFontSize(12);doc.setFont('helvetica','bold');doc.setTextColor(234,88,12);
-    doc.text(title,15,y);y+=6;doc.setTextColor(0,0,0);doc.setFont('helvetica','normal');doc.setFontSize(9);
+    checkPage(14);
+    doc.setFillColor(255,243,230);doc.roundedRect(ML-3,y-4,MR-ML+6,9,2,2,'F');
+    doc.setFontSize(11);doc.setFont('helvetica','bold');doc.setTextColor(185,76,14);
+    doc.text(title,ML,y+2);y+=10;doc.setTextColor(0);doc.setFont('helvetica','normal');doc.setFontSize(9);
   };
 
-  const addRow=(label,value,bold=false)=>{
-    if(y>270){doc.addPage();y=15;}
-    doc.setFont('helvetica',bold?'bold':'normal');
-    doc.text(label,18,y);doc.text(String(value),W-18,y,{align:'right'});y+=5;
+  const addRow=(label,value,opts={})=>{
+    checkPage();
+    doc.setFont('helvetica',opts.bold?'bold':'normal');
+    if(opts.color){const c=opts.color;doc.setTextColor(c[0],c[1],c[2]);}
+    doc.text(label,opts.indent||ML,y);
+    doc.text(String(value),MR,y,{align:'right'});
+    doc.setTextColor(0);doc.setFont('helvetica','normal');
+    y+=opts.spacing||5;
   };
 
-  // Filtrar jornadas por periodo
+  const addDivider=()=>{checkPage(4);doc.setDrawColor(230,210,190);doc.setLineWidth(0.2);doc.line(ML,y,MR,y);y+=4;};
+
   let cerradas=jornadas.filter(j=>j.estado==='cerrada');
   let periodoLabel='';
   if(tipo==='mensual'){
@@ -886,64 +1139,98 @@ function generarPDF(tipo,jornadas,productos){
   addHeader();
 
   // Periodo
-  addSection('Periodo: '+periodoLabel);
-  addRow('Jornadas registradas',cerradas.length);y+=3;
+  doc.setFontSize(10);doc.setFont('helvetica','bold');
+  doc.text('Periodo: '+periodoLabel,ML,y);
+  doc.setFont('helvetica','normal');doc.setFontSize(9);
+  doc.text(cerradas.length+' jornadas cerradas',MR,y,{align:'right'});y+=8;
 
   if(!cerradas.length){
     doc.setFontSize(11);doc.text('Sin jornadas cerradas en este periodo.',W/2,y+10,{align:'center'});
-    doc.save(`kapulits_${tipo}_${localISODate(now)}.pdf`);return;
+    addPageFooter();doc.save(`kapulits_${tipo}_${localISODate(now)}.pdf`);return;
   }
 
-  // Resumen financiero
+  // Financial summary
   const tv=cerradas.reduce((s,j)=>s+calcVentasTotal(j.ventas),0);
   const tg=cerradas.reduce((s,j)=>s+calcGastosTotal(j.gastos),0);
   const tu=tv-tg;
+  const tvEf=cerradas.reduce((s,j)=>s+calcVentasEfectivo(j.ventas),0);
+  const tvTr=cerradas.reduce((s,j)=>s+calcVentasTransferencia(j.ventas),0);
   const tm=cerradas.reduce((s,j)=>s+calcMandaditosTotal(j.mandaditos||[]),0);
   const margen=tv>0?((tu/tv)*100).toFixed(1):'0';
+  const totalPedidos=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length,0);
 
   addSection('Resumen Financiero');
-  addRow('Total Ventas (productos)',fmt(tv),true);
-  addRow('Total Gastos',fmt(tg));
-  addRow('Utilidad Bruta',fmt(tu),true);
-  addRow('Margen de Utilidad',margen+'%');
-  addRow('Mandaditos (ingreso aparte)',fmt(tm));
-  addRow('Promedio por jornada',fmt(tv/cerradas.length));y+=3;
+  addRow('Ventas cobradas (total)',fmt(tv),{bold:true});
+  addRow('  Cobrado en efectivo',fmt(tvEf),{indent:ML+4});
+  addRow('  Cobrado por transferencia',fmt(tvTr),{indent:ML+4});
+  addDivider();
+  addRow('Total gastos del periodo',fmt(tg),{bold:true,color:[202,77,44]});
+  addDivider();
+  addRow('Utilidad bruta',fmt(tu),{bold:true,color:tu>=0?[45,139,87]:[202,77,44]});
+  addRow('Margen de utilidad',margen+'%');
+  addDivider();
+  addRow('Envios / mandaditos',fmt(tm),{color:[112,63,186]});
+  addRow('Promedio ventas por jornada',fmt(tv/cerradas.length));
+  addRow('Total pedidos completados',String(totalPedidos));
+  y+=3;
 
-  // Desglose por jornada
-  addSection('Desglose por Jornada');
+  // Per-jornada detail
+  addSection('Detalle por Jornada');
   cerradas.forEach(j=>{
-    const v=calcVentasTotal(j.ventas);const g=calcGastosTotal(j.gastos);
-    addRow(`${j.fecha} (${(j.pedidos||[]).length} pedidos)`,`${fmt(v)} | Util: ${fmt(v-g)}`);
+    checkPage(20);
+    const v=calcVentasTotal(j.ventas);const g=calcGastosTotal(j.gastos);const u=v-g;
+    const vEf=calcVentasEfectivo(j.ventas);const vTr=calcVentasTransferencia(j.ventas);
+    const peds=(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
+    const manda=calcMandaditosTotal(j.mandaditos||[]);
+    doc.setFillColor(248,244,238);doc.roundedRect(ML-1,y-3,MR-ML+2,18,1.5,1.5,'F');
+    doc.setFont('helvetica','bold');doc.setFontSize(9);
+    doc.text(j.fecha+' ('+j.horaApertura+' - '+(j.horaCierre||'?')+')',ML+1,y+1);
+    doc.text(fmt(v),MR-1,y+1,{align:'right'});
+    doc.setFont('helvetica','normal');doc.setFontSize(8);
+    const row2=y+6;
+    doc.text(`${peds} ped | Ef:${fmt(vEf)} Tr:${fmt(vTr)}`,ML+1,row2);
+    doc.setTextColor(u>=0?45:202,u>=0?139:77,u>=0?87:44);
+    doc.text('Util: '+fmt(u),MR-1,row2,{align:'right'});doc.setTextColor(0);
+    const row3=y+11;
+    let detail=`Gastos: ${fmt(g)}`;
+    if(manda>0)detail+=` | Mandaditos: ${fmt(manda)}`;
+    if(j.diferencia!=null&&j.totalEfectivo!=null)detail+=` | Dif.caja: ${fmt(j.diferencia)}`;
+    doc.text(detail,ML+1,row3);
+    doc.setFontSize(9);y+=20;
   });y+=3;
 
-  // Top productos
+  // Top products
   const stats=getProductoStats(cerradas.map(j=>({...j})),productos);
   const topProds=stats.filter(s=>s.cantidad>0).slice(0,10);
   if(topProds.length){
-    addSection('Top Productos');
+    addSection('Productos con Mayor Ingreso');
+    doc.setFontSize(8);doc.setFont('helvetica','bold');doc.setTextColor(130);
+    doc.text('#',ML,y);doc.text('Producto',ML+6,y);doc.text('Cant.',ML+70,y);doc.text('Margen',ML+90,y);doc.text('Ingreso',MR,y,{align:'right'});
+    doc.setTextColor(0);doc.setFont('helvetica','normal');y+=5;
     topProds.forEach((s,i)=>{
+      checkPage();
       const m=s.precio>0?((s.precio-s.costo)/s.precio*100).toFixed(0):'0';
-      addRow(`#${i+1} ${s.nombre} (${s.cantidad} pz, margen ${m}%)`,fmt(s.revenue));
+      doc.setFontSize(8);
+      doc.text(String(i+1),ML,y);doc.text(s.nombre,ML+6,y);doc.text(s.cantidad+' pz',ML+70,y);doc.text(m+'%',ML+90,y);
+      doc.setFont('helvetica','bold');doc.text(fmt(s.revenue),MR,y,{align:'right'});doc.setFont('helvetica','normal');
+      y+=4.5;
     });y+=3;
   }
 
-  // Inteligencia
+  // Intelligence insights
   const intel=analyzeHistorico(cerradas,productos);
   if(intel?.insights.length){
-    addSection('Recomendaciones Inteligentes');
+    addSection('Recomendaciones');
     intel.insights.forEach(r=>{
-      if(y>270){doc.addPage();y=15;}
-      const lines=doc.splitTextToSize('- '+r.text,W-36);
-      doc.text(lines,18,y);y+=lines.length*4+2;
+      checkPage(10);
+      const lines=doc.splitTextToSize(r.text,MR-ML-6);
+      doc.setFillColor(r.type==='warn'?255:r.type==='ok'?240:240,r.type==='warn'?249:r.type==='ok'?253:247,r.type==='warn'?235:r.type==='ok'?240:255);
+      doc.roundedRect(ML-1,y-3,MR-ML+2,lines.length*4+4,1.5,1.5,'F');
+      doc.setFontSize(8);doc.text(lines,ML+2,y);y+=lines.length*4+4;
     });
   }
 
-  // Footer
-  y+=5;if(y>260){doc.addPage();y=15;}
-  doc.setDrawColor(234,88,12);doc.setLineWidth(0.3);doc.line(15,y,W-15,y);y+=5;
-  doc.setFontSize(8);doc.setTextColor(150);
-  doc.text("K'apul'Its - "+NEGOCIO.direccion+' - Tel: '+NEGOCIO.telefono,W/2,y,{align:'center'});
-
+  addPageFooter();
   doc.save(`kapulits_${tipo}_${localISODate(now)}.pdf`);
 }
 
@@ -967,7 +1254,7 @@ function sanitize(text){
 function getProductoStats(jornadas,productos){
   const stats={};
   productos.forEach(p=>{stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cantidad:0,revenue:0};});
-  jornadas.forEach(j=>{j.ventas.forEach(v=>{v.items.forEach(item=>{
+  jornadas.forEach(j=>{ventasActivas(j.ventas).filter(v=>!v.esReversa).forEach(v=>{v.items.forEach(item=>{
     if(stats[item.productoId]){stats[item.productoId].cantidad+=item.cantidad;stats[item.productoId].revenue+=item.subtotal;}
   });});});
   return Object.values(stats).sort((a,b)=>b.revenue-a.revenue);
@@ -1272,6 +1559,135 @@ async function printTicket(pedido){
   return{success:true,method:'preview'};
 }
 
+// ─── CIERRE DE CAJA PRINT ───────────────────────────────────────────
+function _buildCierreText(jornada){
+  const sep='-'.repeat(32);
+  const vEf=calcVentasEfectivo(jornada.ventas);
+  const vTr=calcVentasTransferencia(jornada.ventas);
+  const totalV=calcVentasTotal(jornada.ventas);
+  const totalG=calcGastosTotal(jornada.gastos);
+  const gEf=jornada.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+  const esperado=jornada.fondoInicial+vEf-gEf;
+  const totalManda=calcMandaditosTotal(jornada.mandaditos||[]);
+  const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
+  const pedidosCan=(jornada.pedidos||[]).filter(p=>p.estado==='cancelado').length;
+  const util=totalV-totalG;
+  let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
+  t+=`    CORTE DE CAJA\n${sep}\n`;
+  t+=`  Fecha:    ${jornada.fecha}\n`;
+  t+=`  Apertura: ${jornada.horaApertura||'--'}\n`;
+  t+=`  Cierre:   ${jornada.horaCierre||'--'}\n`;
+  t+=sep+'\n';
+  t+=`  Fondo inicial:    ${fmt(jornada.fondoInicial).padStart(10)}\n`;
+  t+=sep+'\n';
+  t+=`  VENTAS\n`;
+  t+=`  Efectivo:         ${fmt(vEf).padStart(10)}\n`;
+  t+=`  Transferencia:    ${fmt(vTr).padStart(10)}\n`;
+  t+=`  Total cobrado:    ${fmt(totalV).padStart(10)}\n`;
+  t+=sep+'\n';
+  t+=`  GASTOS\n`;
+  t+=`  Gastos efectivo:  ${fmt(gEf).padStart(10)}\n`;
+  t+=`  Total gastos:     ${fmt(totalG).padStart(10)}\n`;
+  t+=sep+'\n';
+  t+=`  CAJA\n`;
+  t+=`  Efectivo esperado:${fmt(esperado).padStart(10)}\n`;
+  if(jornada.totalEfectivo!=null){
+    t+=`  Efectivo contado: ${fmt(jornada.totalEfectivo).padStart(10)}\n`;
+    const dif=(jornada.totalEfectivo||0)-esperado;
+    t+=`  Diferencia:       ${fmt(dif).padStart(10)}\n`;
+  }
+  t+=sep+'\n';
+  t+=`  Utilidad bruta:   ${fmt(util).padStart(10)}\n`;
+  if(totalManda>0)t+=`  Mandaditos:       ${fmt(totalManda).padStart(10)}\n`;
+  t+=`  Pedidos: ${pedidosOk} ok`;
+  if(pedidosCan>0)t+=` / ${pedidosCan} cancel`;
+  t+='\n';
+  t+=sep+'\n';
+  if(jornada.observaciones)t+=`  Obs: ${jornada.observaciones}\n${sep}\n`;
+  t+=`  ${NEGOCIO.nombre}\n`;
+  t+=`  ${NEGOCIO.direccion}\n`;
+  t+=`  Tel: ${NEGOCIO.telefono}\n\n\n`;
+  return sanitize(t);
+}
+
+function buildCierreHTML(jornada){
+  const vEf=calcVentasEfectivo(jornada.ventas);
+  const vTr=calcVentasTransferencia(jornada.ventas);
+  const totalV=calcVentasTotal(jornada.ventas);
+  const totalG=calcGastosTotal(jornada.gastos);
+  const gEf=jornada.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
+  const esperado=jornada.fondoInicial+vEf-gEf;
+  const totalManda=calcMandaditosTotal(jornada.mandaditos||[]);
+  const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
+  const util=totalV-totalG;
+  const dif=jornada.totalEfectivo!=null?(jornada.totalEfectivo-esperado):null;
+  let h=`<html><head><title>Corte</title><style>
+    *{margin:0;padding:0}body{font-family:monospace;font-size:12px;width:80mm;padding:5mm}
+    .c{text-align:center}.b{font-weight:bold}.s{border-top:1px dashed #000;margin:4px 0}
+    .r{display:flex;justify-content:space-between}.sm{font-size:10px;color:#555}
+    @media print{@page{size:80mm auto;margin:0}}</style></head><body>`;
+  h+=`<div class="c b" style="font-size:16px">K'apul'Its</div>`;
+  h+=`<div class="c sm">Birria y algo mas</div><div class="s"></div>`;
+  h+=`<div class="c b" style="font-size:14px">CORTE DE CAJA</div>`;
+  h+=`<div class="c sm">${jornada.fecha}</div>`;
+  h+=`<div class="r"><span>Apertura</span><span>${jornada.horaApertura||'--'}</span></div>`;
+  h+=`<div class="r"><span>Cierre</span><span>${jornada.horaCierre||'--'}</span></div>`;
+  h+=`<div class="s"></div>`;
+  h+=`<div class="r"><span>Fondo inicial</span><span class="b">${fmt(jornada.fondoInicial)}</span></div>`;
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">VENTAS</div>`;
+  h+=`<div class="r"><span>Efectivo</span><span>${fmt(vEf)}</span></div>`;
+  h+=`<div class="r"><span>Transferencia</span><span>${fmt(vTr)}</span></div>`;
+  h+=`<div class="r b"><span>Total cobrado</span><span>${fmt(totalV)}</span></div>`;
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">GASTOS</div>`;
+  h+=`<div class="r"><span>En efectivo</span><span>${fmt(gEf)}</span></div>`;
+  h+=`<div class="r b"><span>Total gastos</span><span>${fmt(totalG)}</span></div>`;
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">CAJA</div>`;
+  h+=`<div class="r"><span>Efectivo esperado</span><span class="b">${fmt(esperado)}</span></div>`;
+  if(jornada.totalEfectivo!=null){
+    h+=`<div class="r"><span>Efectivo contado</span><span class="b">${fmt(jornada.totalEfectivo)}</span></div>`;
+    h+=`<div class="r b" style="color:${dif===0?'#000':dif>0?'green':'red'}"><span>Diferencia</span><span>${fmt(dif)}</span></div>`;
+  }
+  h+=`<div class="s"></div>`;
+  h+=`<div class="r b"><span>Utilidad bruta</span><span style="color:${util>=0?'green':'red'}">${fmt(util)}</span></div>`;
+  if(totalManda>0)h+=`<div class="r"><span>Mandaditos</span><span>${fmt(totalManda)}</span></div>`;
+  h+=`<div class="r"><span>Pedidos completados</span><span>${pedidosOk}</span></div>`;
+  h+=`<div class="s"></div>`;
+  if(jornada.observaciones)h+=`<div class="sm" style="margin:4px 0">Obs: ${jornada.observaciones}</div><div class="s"></div>`;
+  h+=`<div class="c sm" style="margin-top:6px">${NEGOCIO.direccion}</div>`;
+  h+=`<div class="c sm">Tel.: ${NEGOCIO.telefono}</div>`;
+  h+=`</body></html>`;
+  return h;
+}
+
+async function printCierreCaja(jornada){
+  const ticket=_buildCierreText(jornada);
+  if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
+    await reconnectBluetooth();
+  }
+  if(printerCharacteristic){
+    try{await _sendToBT(ticket);return{success:true,method:'bluetooth'};}
+    catch(e){
+      printerCharacteristic=null;
+      const ok=await reconnectBluetooth();
+      if(ok){try{await _sendToBT(ticket);return{success:true,method:'bluetooth'};}catch(e2){}}
+    }
+  }
+  if(_usbDevice){
+    try{await _sendToUSB(ticket);return{success:true,method:'usb'};}
+    catch(e){_usbDevice=null;_usbEndpoint=null;}
+  }
+  if(!_usbDevice&&navigator.usb?.getDevices){
+    const ok=await tryAutoConnectUSB();
+    if(ok){try{await _sendToUSB(ticket);return{success:true,method:'usb'};}catch(e){}}
+  }
+  const w=window.open('','_blank','width=350,height=600');
+  if(w){w.document.write(buildCierreHTML(jornada));w.document.close();w.focus();w.print();}
+  return{success:true,method:'preview'};
+}
+
 // ─── CHARTS ─────────────────────────────────────────────────────────
 function BarChart({labels=[],values=[],color='#f97316',height=140}){
   if(!values.length)return null;const max=Math.max(...values,1);const W=Math.max(labels.length*56,300);const bw=36;
@@ -1309,12 +1725,12 @@ function SyncDot({status}){
   return(<span title={c.title} className={`inline-block w-2.5 h-2.5 rounded-full ${c.color} ${c.pulse?'pulse-dot':''} ml-1.5 ring-2 ring-white/20`}/>);
 }
 function TopBar({title,subtitle,right,syncStatus}){
-  return(<div className="safe-top sticky top-0 z-30 px-4 pt-3">
-    <div className="surface-card border px-4 py-3">
+  return(<div className="safe-top sticky top-0 z-30 px-4 md:px-8 pt-3">
+    <div className="surface-card border px-4 py-3 md:max-w-[1100px] md:mx-auto">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <h1 className="text-[18px] font-black leading-tight tracking-tight text-[var(--text)]">{title}</h1>
+            <h1 className="text-[18px] md:text-[22px] font-black leading-tight tracking-tight text-[var(--text)]">{title}</h1>
             {syncStatus&&<SyncDot status={syncStatus}/>}
           </div>
           {subtitle&&<p className="mt-1 text-[12px] leading-tight text-[var(--text-soft)]">{subtitle}</p>}
@@ -1360,12 +1776,12 @@ function Modal({open,onClose,title,children,fullScreen=false}){
     return()=>window.removeEventListener('keydown',onKey);
   },[onClose]);
   if(!open)return null;
-  return(<div className="fixed inset-0 z-50 flex items-end justify-center" style={{maxWidth:430,margin:'0 auto'}}>
+  return(<div className="fixed inset-0 z-50 flex items-end md:items-center justify-center" style={{margin:'0 auto'}}>
     <div className="absolute inset-0 bg-[rgba(43,22,12,.38)] backdrop-blur-[3px]" onClick={onClose}/>
     <div role="dialog" aria-modal="true" aria-label={title}
-      className={`relative bg-[var(--surface)] rounded-t-[30px] w-full shadow-[0_-16px_48px_rgba(71,31,9,.22)] slide-up ${fullScreen?'h-[95vh]':'max-h-[90vh]'} overflow-y-auto border border-b-0 border-[rgba(221,192,161,.55)]`}>
+      className={`relative bg-[var(--surface)] w-full shadow-[0_-16px_48px_rgba(71,31,9,.22)] slide-up ${fullScreen?'h-[95vh]':'max-h-[90vh]'} overflow-y-auto border border-[rgba(221,192,161,.55)] rounded-t-[30px] md:rounded-[30px] md:max-w-[560px] md:border-b`}>
       <div className="sticky top-0 bg-[rgba(255,250,244,.94)] backdrop-blur-md px-5 pt-4 pb-3 border-b border-[rgba(221,192,161,.5)] z-10">
-        <div className="w-10 h-1 bg-[rgba(165,129,107,.34)] rounded-full mx-auto mb-3"/>
+        <div className="w-10 h-1 bg-[rgba(165,129,107,.34)] rounded-full mx-auto mb-3 md:hidden"/>
         <div className="flex items-center justify-between">
           <h2 className="text-[20px] font-black text-[var(--text)] tracking-tight">{title}</h2>
           <button className="text-[var(--text-muted)] text-2xl leading-none hover:text-[var(--text)]" onClick={onClose} aria-label="Cerrar modal">✕</button></div></div>
@@ -1404,7 +1820,7 @@ function BottomNav({page,setPage,hasJornada,pedidosNuevos=0}){
     {id:'reportes',emoji:'📊',label:'Reportes'},
     {id:'admin',emoji:'⚙️',label:'Admin'},
   ];
-  return(<div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] z-40 bottom-nav px-4 pb-2">
+  return(<div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] md:max-w-[600px] z-40 bottom-nav px-4 pb-2">
     <div className="surface-card border px-2 py-2 shadow-[0_18px_40px_rgba(88,42,10,.16)]">
       <div className="flex">{tabs.map(t=>{const active=page===t.id;
       return(<button key={t.id} onClick={()=>setPage(t.id)}
@@ -1412,7 +1828,7 @@ function BottomNav({page,setPage,hasJornada,pedidosNuevos=0}){
         <span className="text-xl relative">{t.emoji}
           {t.id==='pedidos'&&pedidosNuevos>0&&<span className="absolute -top-1 -right-2 bg-[var(--danger)] text-white text-[9px] font-black min-w-[16px] h-4 rounded-full flex items-center justify-center">{pedidosNuevos}</span>}
         </span>
-        <span className={`text-[10px] font-bold ${active?'text-[var(--brand-strong)]':'text-[var(--text-muted)]'}`}>{t.label}</span>
+        <span className={`text-[10px] md:text-[12px] font-bold ${active?'text-[var(--brand-strong)]':'text-[var(--text-muted)]'}`}>{t.label}</span>
       </button>);})}</div>
     </div>
   </div>);
@@ -1447,7 +1863,7 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
     <div className="flex flex-col gap-4">
       <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
         <h3 className="font-bold text-gray-700 text-sm mb-3">Resumen del dia</h3>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas (productos)</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas (total cobrado)</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Cobrado en efectivo</span><span>{fmt(vEf)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Cobrado por transferencia</span><span>{fmt(vTr)}</span></div>
         <div className="border-t my-2"/>
@@ -1466,6 +1882,11 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
         {dif===0?'✅ Caja cuadrada':dif>0?`📈 Sobrante: ${fmt(dif)}`:`📉 Faltante: ${fmt(Math.abs(dif))}`}</div>}
       <Input label="Observaciones (opcional)" value={obs} onChange={setObs} placeholder="Notas del dia..."/>
       <Btn full color="red" size="lg" disabled={efectivo===''} onClick={()=>{onCerrar(efectivo,obs);onClose();}}>🔴 Cerrar y Guardar Jornada</Btn>
+      <Btn full color="gray" size="sm" disabled={efectivo===''} onClick={()=>{
+        const snap={...jornada,estado:'cerrada',horaCierre:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),
+          totalEfectivo:Number(efectivo)||0,diferencia:(Number(efectivo)||0)-esperado,observaciones:obs||''};
+        printCierreCaja(snap);
+      }}>🖨️ Previsualizar impresion de cierre</Btn>
     </div></Modal>);
 }
 
@@ -1589,20 +2010,18 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
                 <p className="text-[22px] font-black">{margen}%</p>
               </div>
             </div>
-            <div className="grid grid-cols-3 gap-3 mt-5">
+            <div className="grid grid-cols-3 md:grid-cols-5 gap-3 mt-5">
               <div className="rounded-[22px] bg-[rgba(255,248,236,.12)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[24px] font-black">{fmt(totalV)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Ventas</p></div>
               <div className="rounded-[22px] bg-[rgba(255,248,236,.12)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[24px] font-black">{fmt(totalG)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Gastos</p></div>
               <div className={`rounded-[22px] border p-3 text-center ${util>=0?'bg-[rgba(95,194,131,.16)] border-[rgba(170,236,189,.18)]':'bg-[rgba(202,77,44,.18)] border-[rgba(246,189,171,.18)]'}`}>
                 <p className="text-[24px] font-black">{fmt(util)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Utilidad</p></div>
-            </div>
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] px-4 py-3">
+              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.68)]">Pedidos activos</p>
                 <p className="mt-1 text-[22px] font-black">{pedidosActivos}</p>
               </div>
-              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] px-4 py-3">
+              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.68)]">Mandaditos</p>
                 <p className="mt-1 text-[22px] font-black">{fmt(totalManda)}</p>
               </div>
@@ -1610,16 +2029,17 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
           </div>
         </div>
       )}
+      <div className="md:grid md:grid-cols-2 md:gap-5 space-y-5 md:space-y-0">
       {ja&&ja.ventas.length>0&&(
         <div className="surface-card p-4">
           <div className="mb-3">
             <p className="section-kicker">Movimiento reciente</p>
-            <h3 className="section-title">Últimas ventas</h3>
+            <h3 className="section-title">Ultimas ventas</h3>
           </div>
           {[...ja.ventas].reverse().slice(0,5).map(v=>(
             <div key={v.id} className="flex items-center justify-between py-3 border-b divider-warm last:border-0">
-              <p className="text-[13px] text-[var(--text-soft)] flex-1 pr-3">{v.hora} · {v.items.map(i=>i.nombre).join(', ').substring(0,40)}</p>
-              <div className="flex items-center gap-2"><p className="font-black text-[15px] text-[var(--text)]">{fmt(v.total)}</p>
+              <p className="text-[13px] text-[var(--text-soft)] flex-1 pr-3 truncate">{v.hora} · {v.items.map(i=>i.nombre).join(', ').substring(0,40)}</p>
+              <div className="flex items-center gap-2 shrink-0"><p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentaCobrada(v))}</p>
                 <Badge color={v.metodoPago==='efectivo'?'green':'blue'}>{v.metodoPago==='efectivo'?'💵':'📱'}</Badge></div>
             </div>))}
         </div>)}
@@ -1631,11 +2051,15 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
           </div>
           {ultimasJ.map(j=>{const u=calcVentasTotal(j.ventas)-calcGastosTotal(j.gastos);
             return(<div key={j.id} className="flex items-center justify-between py-3 border-b divider-warm last:border-0">
-              <div><p className="text-[13px] font-black text-[var(--text)]">{fmtDate(j.fecha)}</p>
+              <div className="min-w-0 flex-1"><p className="text-[13px] font-black text-[var(--text)] truncate">{fmtDate(j.fecha)}</p>
                 <p className="text-[12px] text-[var(--text-muted)]">{j.ventas.length} ventas · {(j.pedidos||[]).length} pedidos</p></div>
-              <div className="text-right"><p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentasTotal(j.ventas))}</p>
-                <span className={`text-[12px] font-bold ${u>=0?'text-[var(--success)]':'text-[var(--danger)]'}`}>{u>=0?'+':''}{fmt(u)}</span></div>
+              <div className="flex items-center gap-2 shrink-0 ml-3">
+                <div className="text-right"><p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentasTotal(j.ventas))}</p>
+                  <span className={`text-[12px] font-bold ${u>=0?'text-[var(--success)]':'text-[var(--danger)]'}`}>{u>=0?'+':''}{fmt(u)}</span></div>
+                {j.estado==='cerrada'&&<button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Imprimir cierre" aria-label="Imprimir cierre de caja">🖨️</button>}
+              </div>
             </div>);})}</div>)}
+      </div>
       {!ja&&!state.jornadas.length&&(
         <div className="surface-card p-5 text-center">
           <div className="w-16 h-16 bg-[rgba(72,118,168,.10)] rounded-full flex items-center justify-center mx-auto mb-3"><span className="text-3xl">📊</span></div>
@@ -1665,7 +2089,7 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
       <Btn full size="lg" onClick={()=>setShowCrear(true)}>+ Nuevo pedido</Btn>
       {nuevos.length>0&&(<div className="fade-in">
         <p className="section-kicker mb-2 text-[rgb(136,97,23)]">Nuevos ({nuevos.length})</p>
-        <div className="space-y-3">{nuevos.map(p=>(
+        <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{nuevos.map(p=>(
           <PedidoCard key={p.id} pedido={p}
             onEntregar={()=>onActualizarPedido(p.id,{estado:'entregado'})}
             onCobrar={()=>setShowCobrar(p)}
@@ -1680,7 +2104,7 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
             onWhatsApp={()=>shareWhatsApp(p)} showEntregar={false}/>))}</div></div>)}
       {cobrados.length>0&&(<div>
         <p className="section-kicker mb-2 text-[var(--info)]">Cobrados ({cobrados.length})</p>
-        <div className="space-y-2">{cobrados.map(p=>(
+        <div className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">{cobrados.map(p=>(
           <PedidoCard key={p.id} pedido={p}
             onEditar={()=>setShowEditar(p)}
             onCancelar={()=>setConfirmCancel(p)}
@@ -1942,7 +2366,7 @@ function GastosPage({state,onRegistrar,onEliminar}){
   const catActual=catsUsadas.find(c=>c.id===catSel)||{emoji:'🏷️',label:catSel};
 
   return(<div className="safe-bottom"><TopBar title="Gastos" subtitle={`Total del día ${fmt(totalG)}`}/>
-    <div className="app-shell space-y-5">
+    <div className="app-shell space-y-5"><div className="md:grid md:grid-cols-2 md:gap-6 md:items-start space-y-5 md:space-y-0">
       <div className="surface-card-strong space-y-4">
         <div>
           <p className="section-kicker mb-2">Registro rápido</p>
@@ -1971,6 +2395,29 @@ function GastosPage({state,onRegistrar,onEliminar}){
       <Btn full size="lg" onClick={intentarRegistrar} disabled={!desc||!monto}>+ Registrar Gasto</Btn>
       </div>
 
+      {ja.gastos.length>0&&(
+        <div className="surface-card">
+          <p className="section-kicker mb-2">Historial</p>
+          <h3 className="section-title mb-4">Gastos del día</h3>
+          {[...ja.gastos].reverse().map(g=>{const cat=catsUsadas.find(c=>c.id===g.categoria);
+            return(<div key={g.id} className="flex items-center justify-between py-2.5 border-b border-[rgba(104,74,56,0.08)] last:border-0">
+              <div className="flex items-center gap-2 min-w-0"><span className="text-lg shrink-0">{cat?.emoji||'💸'}</span>
+                <div className="min-w-0"><p className="text-sm font-bold text-[#2f1d17] truncate">{g.descripcion}</p>
+                  <p className="text-xs text-[#8c7265]">{g.hora} · {cat?.label||g.categoria}</p></div></div>
+              <div className="flex items-center gap-2 shrink-0"><span className="font-black text-[#b24518] text-sm">{fmt(g.monto)}</span>
+                <button onClick={()=>setConfirmDel(g)} className="text-[#c6a79a] text-lg" aria-label="Eliminar gasto">✕</button></div></div>);})}
+          {confirmDel&&<div className="mt-3 bg-[rgba(255,239,236,0.95)] rounded-2xl p-3 flex items-center justify-between gap-3">
+            <span className="text-xs text-[#a33f26]">Eliminar "{confirmDel.descripcion}" ({fmt(confirmDel.monto)})?</span>
+            <div className="flex gap-2">
+              <button onClick={()=>setConfirmDel(null)} className="text-xs font-bold text-[#86695c] px-2 py-1">No</button>
+              <button onClick={()=>{onEliminar(confirmDel.id);setConfirmDel(null);}} className="text-xs font-bold text-[#9f331c] bg-[rgba(255,219,212,0.95)] px-3 py-1 rounded-xl">Eliminar</button>
+            </div></div>}
+          <div className="divider-warm mt-4"/>
+          <div className="pt-3 flex justify-between">
+            <span className="font-bold text-sm text-[#5e483d]">Total</span><span className="font-black text-[#b24518]">{fmt(totalG)}</span></div>
+        </div>)}
+      </div>{/* close md:grid */}
+
       <Modal open={!!showConfirmAdd} onClose={()=>setShowConfirmAdd(false)} title="✅ Confirmar gasto">
         {showConfirmAdd&&(<div className="space-y-4">
           <div className="surface-card-strong space-y-2">
@@ -1986,28 +2433,6 @@ function GastosPage({state,onRegistrar,onEliminar}){
           </div>
         </div>)}
       </Modal>
-
-      {ja.gastos.length>0&&(
-        <div className="surface-card">
-          <p className="section-kicker mb-2">Historial</p>
-          <h3 className="section-title mb-4">Gastos del día</h3>
-          {[...ja.gastos].reverse().map(g=>{const cat=catsUsadas.find(c=>c.id===g.categoria);
-            return(<div key={g.id} className="flex items-center justify-between py-2.5 border-b border-[rgba(104,74,56,0.08)] last:border-0">
-              <div className="flex items-center gap-2"><span className="text-lg">{cat?.emoji||'💸'}</span>
-                <div><p className="text-sm font-bold text-[#2f1d17]">{g.descripcion}</p>
-                  <p className="text-xs text-[#8c7265]">{g.hora} · {cat?.label||g.categoria}</p></div></div>
-              <div className="flex items-center gap-2"><span className="font-black text-[#b24518] text-sm">{fmt(g.monto)}</span>
-                <button onClick={()=>setConfirmDel(g)} className="text-[#c6a79a] text-lg" aria-label="Eliminar gasto">✕</button></div></div>);})}
-          {confirmDel&&<div className="mt-3 bg-[rgba(255,239,236,0.95)] rounded-2xl p-3 flex items-center justify-between gap-3">
-            <span className="text-xs text-[#a33f26]">Eliminar "{confirmDel.descripcion}" ({fmt(confirmDel.monto)})?</span>
-            <div className="flex gap-2">
-              <button onClick={()=>setConfirmDel(null)} className="text-xs font-bold text-[#86695c] px-2 py-1">No</button>
-              <button onClick={()=>{onEliminar(confirmDel.id);setConfirmDel(null);}} className="text-xs font-bold text-[#9f331c] bg-[rgba(255,219,212,0.95)] px-3 py-1 rounded-xl">Eliminar</button>
-            </div></div>}
-          <div className="divider-warm mt-4"/>
-          <div className="pt-3 flex justify-between">
-            <span className="font-bold text-sm text-[#5e483d]">Total</span><span className="font-black text-[#b24518]">{fmt(totalG)}</span></div>
-        </div>)}
     </div></div>);
 }
 
@@ -2029,9 +2454,9 @@ function ReportesPage({state}){
         <p className="mt-2 text-sm text-[rgba(255,244,229,0.8)]">Ventas, utilidad y comportamiento del día, sin ruido técnico.</p>
       </div>
       <div className="flex rounded-[26px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 mb-1 overflow-x-auto gap-1 shadow-[0_16px_40px_rgba(90,53,33,0.08)]">
-        {[{id:'diario',l:'Diario'},{id:'mensual',l:'Mensual'},{id:'mandaditos',l:'🛵'},{id:'inteligencia',l:'🧠'},{id:'pdf',l:'📄 PDF'}].map(t=>(
+        {[{id:'diario',l:'Diario',ld:'Diario'},{id:'mensual',l:'Mensual',ld:'Mensual'},{id:'mandaditos',l:'🛵',ld:'🛵 Mandaditos'},{id:'inteligencia',l:'🧠',ld:'🧠 Inteligencia'},{id:'pdf',l:'📄 PDF',ld:'📄 PDF'}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
-            className={`flex-shrink-0 flex-1 py-3 text-xs font-black rounded-[20px] transition-all ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>{t.l}</button>))}</div>
+            className={`flex-shrink-0 flex-1 py-3 text-xs md:text-sm font-black rounded-[20px] transition-all ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}><span className="md:hidden">{t.l}</span><span className="hidden md:inline">{t.ld}</span></button>))}</div>
 
       {tab==='diario'&&(<div className="space-y-5">
         {state.jornadas.length===0&&<EmptyState emoji="📊" title="Sin jornadas aun" sub="Abre tu primera jornada"/>}
@@ -2048,7 +2473,7 @@ function ReportesPage({state}){
             const pRecoger=(jActual.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
             const pEnvio=(jActual.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
             return(<div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <MetricCard icon="💰" label="Ventas" value={fmt(tv)} color="green"/>
                 <MetricCard icon="💸" label="Gastos" value={fmt(tg)} color="red"/>
                 <MetricCard icon="📈" label="Utilidad" value={fmt(ut)} color={ut>=0?'green':'red'} sub={`Margen: ${mg}%`}/>
@@ -2067,7 +2492,7 @@ function ReportesPage({state}){
         {cerradas.length>0&&(()=>{const tv=cerradas.reduce((s,j)=>s+calcVentasTotal(j.ventas),0);
           const tg=cerradas.reduce((s,j)=>s+calcGastosTotal(j.gastos),0);const tu=tv-tg;
           return(<div className="space-y-5">
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <MetricCard icon="📅" label="Jornadas" value={cerradas.length} sub="registradas" color="blue"/>
               <MetricCard icon="📊" label="Prom/Jornada" value={fmt(tv/cerradas.length)} color="orange"/>
               <MetricCard icon="💰" label="Total Acumulado" value={fmt(tv)} color="green"/>
@@ -2116,7 +2541,7 @@ function ReportesPage({state}){
             <p className="text-purple-200 text-xs">{intel.totalJornadas} jornadas analizadas</p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <MetricCard icon="🧾" label="Ticket Promedio" value={fmt(intel.ticketProm)} color="orange"/>
             <MetricCard icon="🛵" label="Tasa de Envio" value={`${intel.tasaEnvio.toFixed(0)}%`} color="purple"/>
             {intel.mejorDia&&<MetricCard icon="📅" label="Mejor Dia" value={intel.mejorDia.dia} sub={fmt(intel.mejorDia.promVentas)+' prom'} color="green"/>}
@@ -2222,7 +2647,7 @@ function MandaditosReport({jornadas,jornadaActiva}){
   return(<div className="space-y-5">
     {totalClientes===0&&<EmptyState emoji="🛵" title="Sin datos de envios" sub="Los mandaditos apareceran aqui"/>}
     {totalClientes>0&&(<React.Fragment>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <MetricCard icon="🛵" label="Ingresos Mandaditos" value={fmt(totalManda)} color="purple" sub="Contabilidad separada"/>
         <MetricCard icon="📦" label="Total Envios" value={totalEnvios} color="blue"/>
         <MetricCard icon="🏃" label="Pasan a Recoger" value={totalRecoger} color="green"/>
@@ -2247,7 +2672,8 @@ function MandaditosReport({jornadas,jornadaActiva}){
 // ─── ADMIN ──────────────────────────────────────────────────────────
 function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
   onActualizarImpresora,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,
-  syncStatus,lastCloudAt,deviceInfo,onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup}){
+  syncStatus,lastCloudAt,deviceInfo,onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup,
+  onAuditHistoricalData,onRepairHistoricalData}){
   const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);
   const productStats=getProductoStats(state.jornadas,state.productos);
   return(<div className="safe-bottom"><TopBar title="Administración" subtitle={`v${APP_VERSION}`}/>
@@ -2257,9 +2683,9 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
         <h2 className="section-title">Ajustes, sincronización y operación interna</h2>
       </div>
       <div className="flex rounded-[26px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 mb-1 gap-1 overflow-x-auto shadow-[0_16px_40px_rgba(90,53,33,0.08)]">
-        {[{id:'importar',l:'📥 Importar'},{id:'costos',l:'Costos'},{id:'productos',l:'Productos'},{id:'impresora',l:'🖨️'},{id:'config',l:'Config'}].map(t=>(
+        {[{id:'importar',l:'📥 Importar',ld:'📥 Importar'},{id:'costos',l:'Costos',ld:'💰 Costos'},{id:'productos',l:'Productos',ld:'🍖 Productos'},{id:'impresora',l:'🖨️',ld:'🖨️ Impresora'},{id:'config',l:'Config',ld:'⚙️ Config'}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)}
-            className={`flex-shrink-0 flex-1 py-3 text-xs font-black rounded-[20px] ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>{t.l}</button>))}</div>
+            className={`flex-shrink-0 flex-1 py-3 text-xs md:text-sm font-black rounded-[20px] ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}><span className="md:hidden">{t.l}</span><span className="hidden md:inline">{t.ld}</span></button>))}</div>
 
       {tab==='importar'&&(<ImportarTab onImportarProductos={onImportarProductos} onImportarCostos={onImportarCostos} productos={state.productos} costos={state.costos}/>)}
 
@@ -2267,6 +2693,7 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
         <div className="rounded-[24px] border border-[rgba(178,69,24,0.16)] bg-[rgba(255,243,232,0.95)] p-4 text-sm text-[#a14017]">
           <p className="font-bold">💡 Rentabilidad por producto</p>
           <p className="text-xs mt-1 opacity-70">Estos costos se usan para calcular el margen. Actualízalos desde la pestaña Importar.</p></div>
+        <div className="md:grid md:grid-cols-2 md:gap-4 space-y-4 md:space-y-0">
         {state.productos.map(p=>{const margen=p.precio>0?(((p.precio-p.costo)/p.precio)*100):0;
           const s=productStats.find(x=>x.id===p.id);
           return(<div key={p.id} className="surface-card">
@@ -2282,9 +2709,10 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
             {s&&s.cantidad>0&&<p className="text-xs text-gray-400 mt-2 text-center">{s.cantidad} vendidos · {fmt(s.revenue)}</p>}
             <div className="mt-2 bg-gray-100 rounded-full h-2"><div className={`h-2 rounded-full ${margen>=40?'bg-green-500':margen>=20?'bg-yellow-400':'bg-red-400'}`} style={{width:`${Math.min(margen,100)}%`}}/></div>
           </div>);})}
+        </div>{/* close md:grid costos */}
       </div>)}
 
-      {tab==='productos'&&(<div className="space-y-3">
+      {tab==='productos'&&(<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
         {state.productos.map(p=>(<div key={p.id} className="surface-card flex items-center justify-between">
           <div className="flex items-center gap-3"><span className="text-2xl">{p.emoji}</span>
             <div><p className="font-bold text-sm text-[#2f1d17]">{p.nombre}</p><p className="text-xs text-[#7a6255]">{fmt(p.precio)}{COMBO_DESC[p.id]?` · ${COMBO_DESC[p.id]}`:''}</p></div></div>
@@ -2300,7 +2728,8 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
         onAgregarEmpleado={onAgregarEmpleado} onEditarEmpleado={onEditarEmpleado} onEliminarEmpleado={onEliminarEmpleado}
         syncStatus={syncStatus} lastCloudAt={lastCloudAt} deviceInfo={deviceInfo}
         onSyncNow={onSyncNow} onPullFromCloud={onPullFromCloud} onSetDeviceRole={onSetDeviceRole}
-        onListBackups={onListBackups} onRestoreBackup={onRestoreBackup}/>)}
+        onListBackups={onListBackups} onRestoreBackup={onRestoreBackup}
+        onAuditHistoricalData={onAuditHistoricalData} onRepairHistoricalData={onRepairHistoricalData}/>)}
     </div>
 
     {editProd&&<Modal open={!!editProd} onClose={()=>setEditProd(null)} title={`Editar: ${editProd.nombre}`}>
@@ -2311,12 +2740,14 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
 // ── Config Tab ──
 function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
   onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,syncStatus,lastCloudAt,deviceInfo,
-  onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup}){
+  onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup,
+  onAuditHistoricalData,onRepairHistoricalData}){
   const [showAddEmp,setShowAddEmp]=useState(false);const [editEmp,setEditEmp]=useState(null);
   const [empNombre,setEmpNombre]=useState('');const [empRol,setEmpRol]=useState('');const [empSueldo,setEmpSueldo]=useState('');
   const [nuevoGF,setNuevoGF]=useState('');const [confirmDelEmp,setConfirmDelEmp]=useState(null);const [confirmDelGF,setConfirmDelGF]=useState(null);
   const [backups,setBackups]=useState([]);const [syncMsg,setSyncMsg]=useState('');
   const [confirmPull,setConfirmPull]=useState(false);const [confirmRestore,setConfirmRestore]=useState(null);
+  const [auditReport,setAuditReport]=useState(null);const [repairMsg,setRepairMsg]=useState('');
 
   useEffect(()=>{setBackups(onListBackups());},[onListBackups]);
 
@@ -2348,8 +2779,19 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
     setSyncMsg(ok?'✅ Backup restaurado en este dispositivo':'❌ No se pudo restaurar');
     refreshBackups();
   };
+  const runAudit=()=>{
+    const report=onAuditHistoricalData();
+    setAuditReport(report);
+    setRepairMsg('');
+  };
+  const runRepair=()=>{
+    const repaired=onRepairHistoricalData();
+    setAuditReport(repaired.report);
+    setRepairMsg(repaired.changed?'✅ Reparación histórica aplicada y guardada':'ℹ️ No se encontraron cambios históricos por aplicar');
+    refreshBackups();
+  };
 
-  return(<div className="space-y-5">
+  return(<div className="space-y-5 md:grid md:grid-cols-2 md:gap-5 md:space-y-0 md:items-start">
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-black text-gray-800 text-sm">☁️ Sync y Respaldo</h3>
@@ -2397,6 +2839,38 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
     </div>
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
+        <h3 className="font-black text-gray-800 text-sm">🧪 Auditoría histórica</h3>
+        <button onClick={runAudit} className="text-xs font-bold text-orange-500">Analizar</button>
+      </div>
+      <div className="space-y-3">
+        <p className="text-xs text-gray-500">Revisa y corrige ventas duplicadas históricas y diferencias de caja calculadas con la fórmula anterior.</p>
+        <div className="grid grid-cols-2 gap-2">
+          <Btn size="sm" color="gray" onClick={runAudit}>🔎 Auditar</Btn>
+          <Btn size="sm" color="orange" onClick={runRepair}>🛠️ Reparar</Btn>
+        </div>
+        {repairMsg&&<div className={`rounded-xl p-3 text-sm font-bold ${repairMsg.startsWith('✅')?'bg-green-50 text-green-700':'bg-blue-50 text-blue-700'}`}>{repairMsg}</div>}
+        {auditReport&&<div className="rounded-2xl bg-gray-50 p-3 space-y-2">
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Jornadas</p><p className="font-black text-gray-700">{auditReport.summary.jornadas}</p></div>
+            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Estado</p><p className={`font-black ${auditReport.ok?'text-green-600':'text-red-500'}`}>{auditReport.ok?'OK':'Con hallazgos'}</p></div>
+            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Ventas duplicadas</p><p className="font-black text-gray-700">{auditReport.summary.duplicateOriginalVentas}</p></div>
+            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Reversas duplicadas</p><p className="font-black text-gray-700">{auditReport.summary.duplicateActiveReversals}</p></div>
+            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Reversas huérfanas</p><p className="font-black text-gray-700">{auditReport.summary.orphanReversals}</p></div>
+            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Dif. desfasadas</p><p className="font-black text-gray-700">{auditReport.summary.mismatchDiferencias}</p></div>
+          </div>
+          <p className="text-[11px] text-gray-500">También disponible en consola como <b>kapulitsHistoricalAudit()</b> y <b>kapulitsRepairHistoricalData()</b>.</p>
+          {!!auditReport.issues.length&&<div className="space-y-2 max-h-48 overflow-y-auto">
+            {auditReport.issues.slice(0,8).map((issue,idx)=><div key={idx} className="rounded-xl bg-white p-2 text-[11px] text-gray-600">
+              <p className="font-bold text-gray-800">{issue.fecha||'Sin fecha'} · {issue.type}</p>
+              <p className="mt-1 break-words">{JSON.stringify(issue)}</p>
+            </div>)}
+            {auditReport.issues.length>8&&<p className="text-[11px] text-gray-400">Se muestran 8 de {auditReport.issues.length} hallazgos.</p>}
+          </div>}
+        </div>}
+      </div>
+    </div>
+    <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+      <div className="flex items-center justify-between mb-3">
         <h3 className="font-black text-gray-800 text-sm">💼 Equipo</h3>
         <button onClick={()=>{setEditEmp(null);setEmpNombre('');setEmpRol('');setEmpSueldo('');setShowAddEmp(true);}}
           className="text-xs font-bold text-orange-500 bg-orange-50 px-3 py-1 rounded-lg border border-orange-200">+ Agregar</button>
@@ -2412,7 +2886,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
         <span className="font-bold text-sm">Total nomina/jornada</span>
         <span className="font-black text-orange-600">{fmt(state.empleados.reduce((s,e)=>s+e.sueldo,0))}</span></div>
       <div className="mt-2 bg-blue-50 rounded-xl p-2 text-[10px] text-blue-600">
-        💡 La nomina se registra automaticamente como gasto al abrir cada jornada.</div>
+        💡 La nomina se puede registrar manualmente desde la pestaña Gastos.</div>
     </div>
 
     <Modal open={showAddEmp} onClose={()=>{setShowAddEmp(false);setEditEmp(null);}} title={editEmp?'✏️ Editar empleado':'👤 Agregar empleado'}>
@@ -2632,10 +3106,10 @@ let _showTicketPreview=null;
 function App(){
   const [page,_setPage]=useState('dashboard');
   const setPage=useCallback(p=>{_setPage(p);window.scrollTo(0,0);},[]);
-  const {state,syncStatus,remoteNotice,lastCloudAt,deviceInfo,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+  const {state,syncStatus,remoteNotice,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
-    syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup}=useStore();
+    syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
   const hasJornada=!!state.jornadaActiva;
   const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
   const [toast,setToast]=useState(null);
@@ -2685,8 +3159,11 @@ function App(){
       syncStatus={syncStatus} lastCloudAt={lastCloudAt} deviceInfo={deviceInfo}
       onSyncNow={async()=>{const r=await syncNow();showToast(r.ok?'☁️ Cambios enviados':'❌ Sync falló',r.ok?'green':'red');return r;}}
       onPullFromCloud={pullFromCloud} onSetDeviceRole={role=>{setDeviceRole(role);showToast(role==='primary'?'🖥️ Modo principal':'📱 Modo espejo','orange');}}
-      onListBackups={listBackups} onRestoreBackup={restoreBackup}/>}
+      onListBackups={listBackups} onRestoreBackup={restoreBackup}
+      onAuditHistoricalData={auditHistoricalData} onRepairHistoricalData={repairHistoricalData}/>}
     <BottomNav page={page} setPage={setPage} hasJornada={hasJornada} pedidosNuevos={pedidosNuevos}/>
+    {saveError&&(<div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-red-600 text-white font-bold text-xs shadow-xl max-w-[90%] text-center">
+      ⚠️ {saveError}</div>)}
     {toast&&(<div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl text-white font-bold text-sm shadow-xl slide-up
       ${toast.color==='green'?'bg-green-500':toast.color==='red'?'bg-red-500':toast.color==='orange'?'bg-orange-500':'bg-gray-700'}`}>{toast.msg}</div>)}
     {remoteNotice&&(<div className="fixed top-32 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-blue-500 text-white font-bold text-sm shadow-xl slide-up">
