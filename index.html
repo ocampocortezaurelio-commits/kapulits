@@ -190,6 +190,7 @@ const PRODUCTOS_DEFAULT = [
   {id:'combo_jarocho',nombre:'Combo Jarocho',precio:415,costo:162,cat:'combo',emoji:'🎉',activo:true},
   {id:'combo_clasico',nombre:'Combo Clásico',precio:265,costo:100,cat:'combo',emoji:'🌟',activo:true},
   {id:'combo_2x2',nombre:'Combo 2+2',precio:290,costo:0,cat:'combo',emoji:'🥤',activo:true},
+  {id:'guacamole',nombre:'Guacamole',precio:45,costo:45,cat:'platillo',emoji:'🥑',activo:true},
   {id:'coca',nombre:'Coca-Cola',precio:30,costo:14,cat:'bebida',emoji:'🥤',activo:true},
   {id:'jamaica',nombre:'Jamaica',precio:35,costo:7,cat:'bebida',emoji:'🍹',activo:true},
   {id:'horchata',nombre:'Horchata',precio:35,costo:9,cat:'bebida',emoji:'🥛',activo:true},
@@ -998,6 +999,26 @@ function useStore(){
     save({...state,jornadas:js,jornadaActiva:ja});
   },[state,save]);
 
+  const agregarProducto=useCallback((datos)=>{
+    const nombre=(datos.nombre||'').trim();
+    if(!nombre)return;
+    const baseId=nombre.toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g,'')
+      .replace(/[^a-z0-9]+/g,'_')
+      .replace(/^_+|_+$/g,'')||uid();
+    const finalId=state.productos.some(p=>p.id===baseId)?`${baseId}_${Date.now().toString(36)}`:baseId;
+    const nuevo={
+      id:finalId,
+      nombre,
+      precio:Number(datos.precio)||0,
+      costo:Number(datos.costo)||0,
+      cat:datos.cat||'platillo',
+      emoji:(datos.emoji||'🍽️').trim()||'🍽️',
+      activo:datos.activo!==false
+    };
+    save({...state,productos:[...state.productos,nuevo]});
+  },[state,save]);
   const actualizarProducto=useCallback((pid,datos)=>{save({...state,productos:state.productos.map(p=>p.id===pid?{...p,...datos}:p)});},[state,save]);
   const actualizarGastoFijo=useCallback((gid,monto)=>{save({...state,gastosFijos:state.gastosFijos.map(g=>g.id===gid?{...g,monto:Number(monto)}:g)});},[state,save]);
   const agregarGastoFijo=useCallback((nombre)=>{const id=uid();save({...state,gastosFijos:[...state.gastosFijos,{id,nombre,monto:0}]});},[state,save]);
@@ -1011,7 +1032,7 @@ function useStore(){
   const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
 
   return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
-    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
+    registrarGasto,eliminarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
 }
@@ -2691,11 +2712,11 @@ function MandaditosReport({jornadas,jornadaActiva}){
 }
 
 // ─── ADMIN ──────────────────────────────────────────────────────────
-function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
+function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
   onActualizarImpresora,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,
   syncStatus,lastCloudAt,deviceInfo,onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup,
   onAuditHistoricalData,onRepairHistoricalData}){
-  const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);
+  const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);const [showAddProd,setShowAddProd]=useState(false);
   const productStats=getProductoStats(state.jornadas,state.productos);
   return(<div className="safe-bottom"><TopBar title="Administración" subtitle={`v${APP_VERSION}`}/>
     <div className="app-shell">
@@ -2733,14 +2754,30 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
         </div>{/* close md:grid costos */}
       </div>)}
 
-      {tab==='productos'&&(<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
-        {state.productos.map(p=>(<div key={p.id} className="surface-card flex items-center justify-between">
-          <div className="flex items-center gap-3"><span className="text-2xl">{p.emoji}</span>
-            <div><p className="font-bold text-sm text-[#2f1d17]">{p.nombre}</p><p className="text-xs text-[#7a6255]">{fmt(p.precio)}{COMBO_DESC[p.id]?` · ${COMBO_DESC[p.id]}`:''}</p></div></div>
-          <button onClick={()=>onActualizarProducto(p.id,{activo:!p.activo})}
-            className={`w-12 h-6 rounded-full transition-colors ${p.activo?'bg-green-500':'bg-[#d8c6bd]'} relative`}>
-            <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${p.activo?'right-0.5':'left-0.5'}`}/></button>
-        </div>))}</div>)}
+      {tab==='productos'&&(<div className="space-y-4">
+        <div className="surface-card-strong flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="section-kicker mb-1">Catalogo</p>
+            <h3 className="section-title text-[22px]">Productos del menu</h3>
+            <p className="text-sm text-[var(--text-soft)] mt-1">Activa, desactiva o agrega productos manualmente con emoji, precio y costo.</p>
+          </div>
+          <Btn color="orange" onClick={()=>setShowAddProd(true)}>+ Agregar producto</Btn>
+        </div>
+        <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
+          {state.productos.map(p=>(<div key={p.id} className="surface-card flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-2xl shrink-0">{p.emoji}</span>
+              <div className="min-w-0">
+                <p className="font-bold text-sm text-[#2f1d17] truncate">{p.nombre}</p>
+                <p className="text-xs text-[#7a6255] truncate">{fmt(p.precio)}{COMBO_DESC[p.id]?` · ${COMBO_DESC[p.id]}`:''}</p>
+              </div>
+            </div>
+            <button onClick={()=>onActualizarProducto(p.id,{activo:!p.activo})}
+              className={`w-12 h-6 rounded-full transition-colors shrink-0 ${p.activo?'bg-green-500':'bg-[#d8c6bd]'} relative`}>
+              <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${p.activo?'right-0.5':'left-0.5'}`}/></button>
+          </div>))}
+        </div>
+      </div>)}
 
       {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} onActualizar={onActualizarImpresora}/>)}
 
@@ -2755,6 +2792,9 @@ function AdminPage({state,onActualizarProducto,onActualizarGastoFijo,onAgregarGa
 
     {editProd&&<Modal open={!!editProd} onClose={()=>setEditProd(null)} title={`Editar: ${editProd.nombre}`}>
       <EditProductoForm producto={editProd} onSave={d=>{onActualizarProducto(editProd.id,d);setEditProd(null);}}/></Modal>}
+    <Modal open={showAddProd} onClose={()=>setShowAddProd(false)} title="➕ Agregar producto">
+      <ProductoForm onSave={d=>{onAgregarProducto(d);setShowAddProd(false);}}/>
+    </Modal>
   </div>);
 }
 
@@ -3119,6 +3159,59 @@ function EditProductoForm({producto,onSave}){
       Margen: {margen}% {margen>=40?'✅':margen>=20?'⚠️':'🚨'}</div>
     <Btn full onClick={()=>onSave({precio,costo})}>Guardar</Btn></div>);
 }
+function ProductoForm({onSave}){
+  const [nombre,setNombre]=useState('');
+  const [precio,setPrecio]=useState('');
+  const [costo,setCosto]=useState('');
+  const [cat,setCat]=useState('platillo');
+  const [emoji,setEmoji]=useState('🍽️');
+  const sugerencias=['🍽️','🥑','🌮','🫓','🧀','🥙','🫔','🥪','🍜','🎉','🌟','🥤','🍹','🥛','🍲'];
+  const canSave=nombre.trim()&&Number(precio)>0;
+  return(<div className="space-y-4">
+    <Input label="Nombre del producto" value={nombre} onChange={setNombre} placeholder="Ej: Guacamole"/>
+    <div className="grid grid-cols-2 gap-3">
+      <Input label="Precio de venta" type="number" prefix="$" value={precio} onChange={setPrecio} placeholder="0"/>
+      <Input label="Costo estimado" type="number" prefix="$" value={costo} onChange={setCosto} placeholder="Opcional"/>
+    </div>
+    <div className="flex flex-col gap-1">
+      <label className="text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-[0.14em]">Categoria</label>
+      <select value={cat} onChange={e=>setCat(e.target.value)}
+        className="w-full px-4 py-3.5 text-[15px] outline-none bg-[rgba(255,250,244,.9)] text-[var(--text)] border border-[rgba(221,192,161,.7)] rounded-[18px] focus:border-[var(--brand)]">
+        <option value="platillo">Platillo</option>
+        <option value="combo">Combo</option>
+        <option value="bebida">Bebida</option>
+      </select>
+    </div>
+    <div className="space-y-2">
+      <Input label="Emoji" value={emoji} onChange={setEmoji} placeholder="Ej: 🥑"/>
+      <div className="rounded-[18px] border border-[rgba(221,192,161,.55)] bg-[rgba(255,250,244,.82)] p-3">
+        <p className="text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-[0.14em] mb-2">Sugerencias rapidas</p>
+        <div className="flex flex-wrap gap-2">
+          {sugerencias.map(icon=><button key={icon} type="button" onClick={()=>setEmoji(icon)}
+            className={`w-11 h-11 rounded-2xl border text-xl transition-all ${emoji===icon?'border-[var(--brand)] bg-[rgba(242,191,90,.18)] scale-105':'border-[rgba(221,192,161,.55)] bg-white'}`}>{icon}</button>)}
+        </div>
+      </div>
+    </div>
+    <div className="surface-card flex items-center justify-between gap-3">
+      <div className="flex items-center gap-3 min-w-0">
+        <span className="text-3xl shrink-0">{emoji||'🍽️'}</span>
+        <div className="min-w-0">
+          <p className="font-bold text-sm text-[#2f1d17] truncate">{nombre.trim()||'Nuevo producto'}</p>
+          <p className="text-xs text-[#7a6255]">{fmt(Number(precio)||0)} · {cat}</p>
+        </div>
+      </div>
+      <Badge color="green">Activo</Badge>
+    </div>
+    <Btn full color="green" disabled={!canSave} onClick={()=>onSave({
+      nombre:nombre.trim(),
+      precio:Number(precio)||0,
+      costo:Number(costo)||0,
+      cat,
+      emoji:(emoji||'🍽️').trim()||'🍽️',
+      activo:true
+    })}>Guardar producto</Btn>
+  </div>);
+}
 
 // ─── APP ────────────────────────────────────────────────────────────
 // Global callback for preview fallback
@@ -3128,7 +3221,7 @@ function App(){
   const [page,_setPage]=useState('dashboard');
   const setPage=useCallback(p=>{_setPage(p);window.scrollTo(0,0);},[]);
   const {state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
-    registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
+    registrarGasto,eliminarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
   const hasJornada=!!state.jornadaActiva;
@@ -3168,7 +3261,7 @@ function App(){
       onRegistrar={(c,d,m,e)=>{registrarGasto(c,d,m,e);showToast('💸 Gasto registrado','orange');}}
       onEliminar={eliminarGasto}/>}
     {page==='reportes'&&<ReportesPage state={state}/>}
-    {page==='admin'&&<AdminPage state={state} onActualizarProducto={actualizarProducto}
+    {page==='admin'&&<AdminPage state={state} onAgregarProducto={d=>{agregarProducto(d);showToast('✅ Producto agregado');}} onActualizarProducto={actualizarProducto}
       onActualizarGastoFijo={actualizarGastoFijo} onAgregarGastoFijo={n=>{agregarGastoFijo(n);showToast('✅ Gasto fijo agregado');}}
       onEliminarGastoFijo={id=>{eliminarGastoFijo(id);showToast('🗑️ Gasto fijo eliminado','red');}}
       onActualizarImpresora={actualizarImpresora}
