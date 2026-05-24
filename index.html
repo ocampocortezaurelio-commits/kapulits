@@ -656,6 +656,11 @@ function localISODate(d=new Date()){
   return `${y}-${m}-${day}`;
 }
 function calcVentaCobrada(v){
+  // Solo productos del negocio — nunca incluye costoEnvio
+  return Number(v?.total??0);
+}
+function calcVentaTotalCliente(v){
+  // Lo que pago el cliente (productos + envio) — solo para display en ticket/recibo
   return Number(v?.totalCobrado??v?.total??0);
 }
 function ventasActivas(ventas=[]){
@@ -1202,7 +1207,7 @@ function generarPDF(tipo,jornadas,productos){
   const totalPedidos=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length,0);
 
   addSection('Resumen Financiero');
-  addRow('Ventas cobradas (total)',fmt(tv),{bold:true});
+  addRow('Ventas de productos',fmt(tv),{bold:true});
   addRow('  Cobrado en efectivo',fmt(tvEf),{indent:ML+4});
   addRow('  Cobrado por transferencia',fmt(tvTr),{indent:ML+4});
   addDivider();
@@ -1622,17 +1627,18 @@ function _buildCierreText(jornada){
   t+=sep+'\n';
   t+=`  Fondo inicial:    ${fmt(jornada.fondoInicial).padStart(10)}\n`;
   t+=sep+'\n';
-  t+=`  VENTAS\n`;
+  t+=`  VENTAS DE PRODUCTOS\n`;
   t+=`  Efectivo:         ${fmt(vEf).padStart(10)}\n`;
   t+=`  Transferencia:    ${fmt(vTr).padStart(10)}\n`;
-  t+=`  Total cobrado:    ${fmt(totalV).padStart(10)}\n`;
+  t+=`  Total productos:  ${fmt(totalV).padStart(10)}\n`;
+  if(totalManda>0)t+=`  Mandaditos:       ${fmt(totalManda).padStart(10)}\n`;
   t+=sep+'\n';
   t+=`  GASTOS\n`;
   t+=`  Gastos efectivo:  ${fmt(gEf).padStart(10)}\n`;
   t+=`  Total gastos:     ${fmt(totalG).padStart(10)}\n`;
   t+=sep+'\n';
   t+=`  CAJA\n`;
-  t+=`  Efectivo esperado:${fmt(esperado).padStart(10)}\n`;
+  t+=`  Caja esp.negocio: ${fmt(esperado).padStart(10)}\n`;
   if(jornada.totalEfectivo!=null){
     t+=`  Efectivo contado: ${fmt(jornada.totalEfectivo).padStart(10)}\n`;
     const dif=(jornada.totalEfectivo||0)-esperado;
@@ -1640,7 +1646,6 @@ function _buildCierreText(jornada){
   }
   t+=sep+'\n';
   t+=`  Utilidad bruta:   ${fmt(util).padStart(10)}\n`;
-  if(totalManda>0)t+=`  Mandaditos:       ${fmt(totalManda).padStart(10)}\n`;
   t+=`  Pedidos: ${pedidosOk} ok`;
   if(pedidosCan>0)t+=` / ${pedidosCan} cancel`;
   t+='\n';
@@ -1677,24 +1682,24 @@ function buildCierreHTML(jornada){
   h+=`<div class="s"></div>`;
   h+=`<div class="r"><span>Fondo inicial</span><span class="b">${fmt(jornada.fondoInicial)}</span></div>`;
   h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">VENTAS</div>`;
+  h+=`<div class="c b" style="margin:2px 0">VENTAS DE PRODUCTOS</div>`;
   h+=`<div class="r"><span>Efectivo</span><span>${fmt(vEf)}</span></div>`;
   h+=`<div class="r"><span>Transferencia</span><span>${fmt(vTr)}</span></div>`;
-  h+=`<div class="r b"><span>Total cobrado</span><span>${fmt(totalV)}</span></div>`;
+  h+=`<div class="r b"><span>Total productos</span><span>${fmt(totalV)}</span></div>`;
+  if(totalManda>0)h+=`<div class="r" style="color:#7c3aed"><span>Mandaditos</span><span>${fmt(totalManda)}</span></div>`;
   h+=`<div class="s"></div>`;
   h+=`<div class="c b" style="margin:2px 0">GASTOS</div>`;
   h+=`<div class="r"><span>En efectivo</span><span>${fmt(gEf)}</span></div>`;
   h+=`<div class="r b"><span>Total gastos</span><span>${fmt(totalG)}</span></div>`;
   h+=`<div class="s"></div>`;
   h+=`<div class="c b" style="margin:2px 0">CAJA</div>`;
-  h+=`<div class="r"><span>Efectivo esperado</span><span class="b">${fmt(esperado)}</span></div>`;
+  h+=`<div class="r"><span>Caja esperada del negocio</span><span class="b">${fmt(esperado)}</span></div>`;
   if(jornada.totalEfectivo!=null){
     h+=`<div class="r"><span>Efectivo contado</span><span class="b">${fmt(jornada.totalEfectivo)}</span></div>`;
     h+=`<div class="r b" style="color:${dif===0?'#000':dif>0?'green':'red'}"><span>Diferencia</span><span>${fmt(dif)}</span></div>`;
   }
   h+=`<div class="s"></div>`;
   h+=`<div class="r b"><span>Utilidad bruta</span><span style="color:${util>=0?'green':'red'}">${fmt(util)}</span></div>`;
-  if(totalManda>0)h+=`<div class="r"><span>Mandaditos</span><span>${fmt(totalManda)}</span></div>`;
   h+=`<div class="r"><span>Pedidos completados</span><span>${pedidosOk}</span></div>`;
   h+=`<div class="s"></div>`;
   if(jornada.observaciones)h+=`<div class="sm" style="margin:4px 0">Obs: ${jornada.observaciones}</div><div class="s"></div>`;
@@ -1905,19 +1910,22 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
     <div className="flex flex-col gap-4">
       <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
         <h3 className="font-bold text-gray-700 text-sm mb-3">Resumen del dia</h3>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas (total cobrado)</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas de productos</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Cobrado en efectivo</span><span>{fmt(vEf)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Cobrado por transferencia</span><span>{fmt(vTr)}</span></div>
+        {totalManda>0&&<React.Fragment>
+          <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Mandaditos gestionados ({pedidosEnvio} envios)</span><span className="font-bold text-purple-600">{fmt(totalManda)}</span></div>
+          <div className="flex justify-between text-xs text-gray-400"><span className="italic">  Total cliente (referencial)</span><span>{fmt(totalV+totalManda)}</span></div>
+        </React.Fragment>}
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm"><span className="text-gray-500">💸 Total Gastos</span><span className="font-bold text-red-500">{fmt(totalG)}</span></div>
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm font-bold"><span>Utilidad bruta</span><span className={util>=0?'text-green-600':'text-red-500'}>{fmt(util)}</span></div>
         <div className="border-t my-2"/>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Mandaditos ({pedidosEnvio} envios)</span><span className="font-bold text-purple-600">{fmt(totalManda)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">🏃 Pasan a recoger</span><span>{pedidosRecoger} clientes</span></div>
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm"><span className="text-gray-500">Fondo inicial</span><span>{fmt(jornada.fondoInicial)}</span></div>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">Efectivo esperado</span><span className="font-bold">{fmt(esperado)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">Caja esperada del negocio</span><span className="font-bold">{fmt(esperado)}</span></div>
       </div>
       <Input label="Efectivo real contado" type="number" placeholder="0" prefix="$" value={efectivo} onChange={setEfectivo}/>
       {efectivo&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
@@ -2081,7 +2089,11 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
           {[...ja.ventas].reverse().slice(0,5).map(v=>(
             <div key={v.id} className="flex items-center justify-between py-3 border-b divider-warm last:border-0">
               <p className="text-[13px] text-[var(--text-soft)] flex-1 pr-3 truncate">{v.hora} · {v.items.map(i=>i.nombre).join(', ').substring(0,40)}</p>
-              <div className="flex items-center gap-2 shrink-0"><p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentaCobrada(v))}</p>
+              <div className="flex items-center gap-2 shrink-0">
+                <div className="text-right">
+                  <p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentaCobrada(v))}</p>
+                  {(v.costoEnvio||0)>0&&<p className="text-[10px] text-purple-500">+{fmt(v.costoEnvio)} envío</p>}
+                </div>
                 <Badge color={v.metodoPago==='efectivo'?'green':'blue'}>{v.metodoPago==='efectivo'?'💵':'📱'}</Badge></div>
             </div>))}
         </div>)}
