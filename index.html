@@ -521,6 +521,17 @@ function _mergeStates(cloud,local){
   };
 }
 
+function _isEffectivelyEmpty(s){
+  if(!s)return true;
+  const hasJornadas=(s.jornadas||[]).length>0;
+  const hasActiva=!!s.jornadaActiva;
+  return !hasJornadas&&!hasActiva;
+}
+function _cloudHasRealData(d){
+  if(!d)return false;
+  return (d.jornadas||[]).length>0||!!d.jornadaActiva;
+}
+
 // cloudSave hace MERGE entre nube y local antes de subir. Asi multiples
 // dispositivos pueden agregar/editar pedidos al mismo tiempo sin perder nada.
 async function cloudSave(state,opts={}){
@@ -694,6 +705,7 @@ function useStore(){
   });
   const [syncStatus,setSyncStatus]=useState('idle');
   const [remoteNotice,setRemoteNotice]=useState('');
+  const [cloudRecovery,setCloudRecovery]=useState(null);
   const [lastCloudAt,setLastCloudAt]=useState('');
   const showRemoteNotice=useCallback(msg=>{
     setRemoteNotice(msg);
@@ -721,13 +733,22 @@ function useStore(){
         const cloudWriter=cloud.data?.__sync?.writerId||'';
         const shouldApplyMirror=deviceInfo.role==='mirror'&&(!localTs||cloud.updated_at>localTs);
         const shouldApplyPrimary=!hasLocal;
-        if(shouldApplyMirror||shouldApplyPrimary){
+        const localState=hasLocal?(()=>{try{return JSON.parse(localStorage.getItem('kapulits_v2'));}catch(e){return null;}})():null;
+        const localEmpty=_isEffectivelyEmpty(localState);
+        const cloudRich=_cloudHasRealData(cloud.data);
+        if(shouldApplyMirror||shouldApplyPrimary||(localEmpty&&cloudRich)){
           const ns=hydrateState(cloud.data);
           persistLocal(ns,cloud.updated_at,false);
           setState(ns);
         }else if(deviceInfo.role==='primary'&&localTs&&cloud.updated_at>localTs&&cloudWriter!==deviceInfo.id){
+          if(cloudRich&&!localEmpty){
+            setCloudRecovery({cloudData:cloud.data,cloudTs:cloud.updated_at});
+          }else if(cloudRich&&localEmpty){
+            const ns=hydrateState(cloud.data);
+            persistLocal(ns,cloud.updated_at,false);
+            setState(ns);
+          }
           setSyncStatus('remote');
-          showRemoteNotice('Hay cambios remotos pendientes por revisar');
           return;
         }
       }
@@ -989,7 +1010,7 @@ function useStore(){
   const editarEmpleado=useCallback((eid,datos)=>{save({...state,empleados:state.empleados.map(e=>e.id===eid?{...e,...datos,sueldo:Number(datos.sueldo)||0}:e)});},[state,save]);
   const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
 
-  return{state,syncStatus,remoteNotice,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+  return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
@@ -3106,7 +3127,7 @@ let _showTicketPreview=null;
 function App(){
   const [page,_setPage]=useState('dashboard');
   const setPage=useCallback(p=>{_setPage(p);window.scrollTo(0,0);},[]);
-  const {state,syncStatus,remoteNotice,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+  const {state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarGasto,eliminarGasto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
@@ -3166,8 +3187,18 @@ function App(){
       ⚠️ {saveError}</div>)}
     {toast&&(<div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl text-white font-bold text-sm shadow-xl slide-up
       ${toast.color==='green'?'bg-green-500':toast.color==='red'?'bg-red-500':toast.color==='orange'?'bg-orange-500':'bg-gray-700'}`}>{toast.msg}</div>)}
-    {remoteNotice&&(<div className="fixed top-32 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-blue-500 text-white font-bold text-sm shadow-xl slide-up">
+    {remoteNotice&&!cloudRecovery&&(<div className="fixed top-32 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-blue-500 text-white font-bold text-sm shadow-xl slide-up">
       {remoteNotice}</div>)}
+    {cloudRecovery&&(<div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-md px-5 py-4 rounded-2xl bg-blue-600 text-white shadow-2xl slide-up" style={{border:'2px solid rgba(255,255,255,.3)'}}>
+      <div className="font-black text-sm mb-1">Hay datos en la nube mas recientes</div>
+      <div className="text-xs opacity-90 mb-3">Este navegador tiene datos vacios o desactualizados. Puedes restaurar la informacion desde la nube sin perder nada.</div>
+      <div className="flex gap-2">
+        <button onClick={async()=>{const r=await pullFromCloud();if(r.ok){setCloudRecovery(null);showToast('Datos restaurados desde la nube','green');}else{showToast('No se pudo restaurar','red');}}}
+          className="flex-1 py-2 rounded-xl bg-white text-blue-700 font-bold text-sm active:scale-95 transition-transform">Restaurar desde nube</button>
+        <button onClick={()=>setCloudRecovery(null)}
+          className="px-4 py-2 rounded-xl bg-blue-500 text-white font-bold text-sm opacity-80 active:scale-95 transition-transform">Ignorar</button>
+      </div>
+    </div>)}
     <TicketPreviewModal open={!!previewPedido} pedido={previewPedido} onClose={()=>setPreviewPedido(null)}/>
   </div>);
 }
