@@ -616,7 +616,7 @@ window.kapulitsSanityCheck=()=>{
         errors.push(`J:${j.fecha} reversal ${v.id}: orphan (no matching venta original ${v.ventaOrigId})`);
     });
     // INV4: cash formula consistency check
-    const vEf=ventas.filter(v=>!v.anulada&&v.metodoPago==='efectivo').reduce((s,v)=>s+Number(v.totalCobrado??v.total??0),0);
+    const vEf=ventas.filter(v=>!v.anulada&&v.metodoPago==='efectivo').reduce((s,v)=>s+calcVentaCobrada(v),0);
     const gEf=(j.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
     const esperado=j.fondoInicial+vEf-gEf;
     if(j.estado==='cerrada'&&j.totalEfectivo!=null){
