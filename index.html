@@ -989,35 +989,31 @@ function useStore(){
       ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:ventaOrig?.metodoPago||null}:m);
     }
 
-    // Edit-sync: only update original venta, never reversals
-    if(pedOld.cobrado&&!cambios.estado&&(cambios.items||cambios.tipoEntrega||cambios.metodoPago)){
-      ja.ventas=ja.ventas.map(v=>(v.pedidoId===pedidoId&&!v.esReversa)?{
-        ...v,
-        items:newItems,
-        total:newTotalProd,
-        totalCobrado:newTotal,
-        costoEnvio:newCostoEnvio,
-        metodoPago:cambios.metodoPago||v.metodoPago
-      }:v);
-      // El pedido esta cobrado: su envio (mandadito) tambien esta cobrado y debe
-      // llevar el mismo metodo de pago de la venta. Esto cubre el caso de cambiar
-      // recoger->envio en un pedido ya pagado (mandadito recien creado) y la
-      // edicion del metodo de pago.
-      const ventaSync=ja.ventas.find(v=>v.pedidoId===pedidoId&&!v.esReversa);
-      const metodoSync=cambios.metodoPago||ventaSync?.metodoPago||null;
-      ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:metodoSync}:m);
-    }
-
-    // Si se cobra, crear venta y marcar mandadito (guard: no duplicates)
-    if(cambios.cobrado&&cambios.metodoPago){
-      const ped=ja.pedidos.find(p=>p.id===pedidoId);
-      const alreadySold=ja.ventas.some(v=>v.pedidoId===pedidoId);
-      if(ped&&!alreadySold){
-        const venta={id:uid(),hora:now(),items:ped.items,total:ped.totalProductos,totalCobrado:ped.total,
-          costoEnvio:ped.costoEnvio||0,metodoPago:cambios.metodoPago,pedidoId:ped.id};
-        ja.ventas=[...ja.ventas,venta];
-        ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:cambios.metodoPago}:m);
+    // ── RECONCILIACION FINAL DE LA VENTA ──────────────────────────────
+    // La venta activa de un pedido cobrado SIEMPRE debe reflejar el estado
+    // FINAL del pedido: monto de productos, items, costo de envio y metodo de
+    // pago. Asi cualquier modificacion (incluido cambiar efectivo<->transferencia
+    // por cualquier ruta: editar, recobrar, cambiar tipo de envio) se aplica al
+    // calculo interno (caja y transferencias), no solo al texto en pantalla.
+    // No corre para cancelados: su reversa ya quedo gestionada arriba.
+    const pedFinal=ja.pedidos.find(p=>p.id===pedidoId);
+    if(pedFinal&&pedFinal.cobrado&&pedFinal.estado!=='cancelado'){
+      const idxOrig=ja.ventas.findIndex(v=>v.pedidoId===pedidoId&&!v.esReversa&&!v.anulada);
+      const metodoFinal=pedFinal.metodoPago||(idxOrig>=0?ja.ventas[idxOrig].metodoPago:null);
+      const ventaFinal={
+        items:pedFinal.items,
+        total:Number(pedFinal.totalProductos)||0,
+        totalCobrado:Number(pedFinal.total)||0,
+        costoEnvio:Number(pedFinal.costoEnvio)||0,
+        metodoPago:metodoFinal
+      };
+      if(idxOrig>=0){
+        ja.ventas=ja.ventas.map((v,i)=>i===idxOrig?{...v,...ventaFinal}:v);
+      }else{
+        ja.ventas=[...ja.ventas,{id:uid(),hora:now(),pedidoId,...ventaFinal}];
       }
+      // El envio (mandadito) sigue el mismo metodo del pedido cobrado.
+      ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:metodoFinal}:m);
     }
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:ja});
