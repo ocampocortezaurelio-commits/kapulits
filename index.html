@@ -653,10 +653,6 @@ function calcVentaCobrada(v){
   // Solo productos del negocio — nunca incluye costoEnvio
   return Number(v?.total??0);
 }
-function calcVentaTotalCliente(v){
-  // Lo que pago el cliente (productos + envio) — solo para display en ticket/recibo
-  return Number(v?.totalCobrado??v?.total??0);
-}
 function ventasActivas(ventas=[]){
   return ventas.filter(v=>!v.anulada);
 }
@@ -679,12 +675,31 @@ function calcMandaditosEfectivo(mandaditos=[]){
 function calcMandaditosTransferencia(mandaditos=[]){
   return (mandaditos||[]).filter(m=>m&&m.cobrado&&m.metodoPago==='transferencia').reduce((s,m)=>s+(Number(m.tarifa)||0),0);
 }
+function _backfillMandaditoMetodo(j){
+  // Completa (sin sobrescribir) el metodo de pago de un envio cobrado tomandolo
+  // de la venta del mismo pedido. Garantiza que el desglose efectivo/transferencia
+  // siempre sume el total cobrado. No toca tarifas, ni diferencia, ni borra nada.
+  if(!j||!Array.isArray(j.mandaditos)||!j.mandaditos.length)return j;
+  const ventas=j.ventas||[];
+  let changed=false;
+  const mandaditos=j.mandaditos.map(m=>{
+    if(m&&m.cobrado&&!m.metodoPago){
+      const v=ventas.find(x=>x.pedidoId===m.pedidoId&&!x.esReversa&&!x.anulada);
+      if(v&&v.metodoPago){changed=true;return{...m,metodoPago:v.metodoPago};}
+    }
+    return m;
+  });
+  return changed?{...j,mandaditos}:j;
+}
 function hydrateState(p){
-  return _autoCloseExpired({...INITIAL_STATE,...p,
+  const base={...INITIAL_STATE,...p,
     productos:migrateProducts(p?.productos||PRODUCTOS_DEFAULT),
     costos:p?.costos||COSTOS_DEFAULT,
     empleados:p?.empleados||EMPLEADOS_DEFAULT,
-    impresora:{...INITIAL_STATE.impresora,...(p?.impresora||{}),conectada:false,reconectando:false}});
+    impresora:{...INITIAL_STATE.impresora,...(p?.impresora||{}),conectada:false,reconectando:false}};
+  base.jornadas=(base.jornadas||[]).map(_backfillMandaditoMetodo);
+  if(base.jornadaActiva)base.jornadaActiva=_backfillMandaditoMetodo(base.jornadaActiva);
+  return _autoCloseExpired(base);
 }
 function readBackups(){
   return Object.keys(localStorage).filter(k=>k.startsWith('kapulits_backup_')).sort().reverse()
@@ -3028,7 +3043,6 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
             <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Ventas duplicadas</p><p className="font-black text-gray-700">{auditReport.summary.duplicateOriginalVentas}</p></div>
             <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Reversas duplicadas</p><p className="font-black text-gray-700">{auditReport.summary.duplicateActiveReversals}</p></div>
             <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Reversas huérfanas</p><p className="font-black text-gray-700">{auditReport.summary.orphanReversals}</p></div>
-            <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Dif. desfasadas</p><p className="font-black text-gray-700">{auditReport.summary.mismatchDiferencias}</p></div>
           </div>
           <p className="text-[11px] text-gray-500">También disponible en consola como <b>kapulitsHistoricalAudit()</b> y <b>kapulitsRepairHistoricalData()</b>.</p>
           {!!auditReport.issues.length&&<div className="space-y-2 max-h-48 overflow-y-auto">
