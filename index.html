@@ -970,8 +970,18 @@ function useStore(){
     }
 
     // Edit-sync: only update original venta, never reversals
-    if(pedOld.cobrado&&!cambios.estado&&(cambios.items||cambios.tipoEntrega)){
-      ja.ventas=ja.ventas.map(v=>(v.pedidoId===pedidoId&&!v.esReversa)?{...v,items:newItems,total:newTotalProd,totalCobrado:newTotal,costoEnvio:newCostoEnvio}:v);
+    if(pedOld.cobrado&&!cambios.estado&&(cambios.items||cambios.tipoEntrega||cambios.metodoPago)){
+      ja.ventas=ja.ventas.map(v=>(v.pedidoId===pedidoId&&!v.esReversa)?{
+        ...v,
+        items:newItems,
+        total:newTotalProd,
+        totalCobrado:newTotal,
+        costoEnvio:newCostoEnvio,
+        metodoPago:cambios.metodoPago||v.metodoPago
+      }:v);
+      if(cambios.metodoPago){
+        ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,metodoPago:cambios.metodoPago}:m);
+      }
     }
 
     // Si se cobra, crear venta y marcar mandadito (guard: no duplicates)
@@ -2296,6 +2306,18 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const [cliente,setCliente]=useState(pedido.cliente||'');
   const [direccion,setDireccion]=useState(pedido.direccion||'');
   const [notas,setNotas]=useState(pedido.notas||'');
+  const [metodoPago,setMetodoPago]=useState(pedido.metodoPago||'efectivo');
+  useEffect(()=>{
+    if(!open)return;
+    const c={};
+    pedido.items.forEach(i=>{c[i.productoId]={...i,id:i.productoId};});
+    setCart(c);
+    setTipo(pedido.tipoEntrega);
+    setCliente(pedido.cliente||'');
+    setDireccion(pedido.direccion||'');
+    setNotas(pedido.notas||'');
+    setMetodoPago(pedido.metodoPago||'efectivo');
+  },[open,pedido]);
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
@@ -2304,13 +2326,30 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const guardar=()=>{
     if(!items.length)return;
     const its=items.map(i=>({productoId:i.productoId||i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji}));
-    onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas});
+    onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas,...(pedido.cobrado?{metodoPago}:{} )});
   };
   return(<Modal open={open} onClose={onClose} title={`✏️ Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
       <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
       {tipo!=='recoger'&&<Input label="Direccion de envio" value={direccion} onChange={setDireccion} placeholder="Calle, numero, colonia..."/>}
+      {pedido.cobrado&&<div className="surface-card space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-black text-sm text-[var(--text)]">Metodo de pago</p>
+            <p className="text-xs text-[var(--text-soft)] mt-1">Corrige si este pedido se registro como efectivo o transferencia.</p>
+          </div>
+          <Badge color={metodoPago==='efectivo'?'green':'blue'}>{metodoPago==='efectivo'?'💵 Efectivo':'📱 Transferencia'}</Badge>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <button type="button" onClick={()=>setMetodoPago('efectivo')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='efectivo'?'bg-[rgba(45,139,87,.12)] border-[rgba(45,139,87,.32)] shadow-[0_10px_24px_rgba(45,139,87,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
+            <div className="text-2xl mb-1">💵</div><p className="font-black text-sm text-[#2c7a54]">Efectivo</p>
+          </button>
+          <button type="button" onClick={()=>setMetodoPago('transferencia')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='transferencia'?'bg-[rgba(72,118,168,.12)] border-[rgba(72,118,168,.32)] shadow-[0_10px_24px_rgba(72,118,168,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
+            <div className="text-2xl mb-1">📱</div><p className="font-black text-sm text-[#255a7b]">Transferencia</p>
+          </button>
+        </div>
+      </div>}
       <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
@@ -3268,7 +3307,7 @@ function App(){
         if(c.cobrado)showToast('💰 Cobrado','green');
         else if(c.estado==='entregado')showToast('✅ Entregado','green');
         else if(c.estado==='cancelado')showToast('🔴 Cancelado','red');
-        else if(c.items||c.tipoEntrega)showToast('✏️ Pedido editado','orange');}}/>}
+        else if(c.items||c.tipoEntrega||c.metodoPago)showToast('✏️ Pedido editado','orange');}}/>}
     {page==='gastos'&&<GastosPage state={state}
       onRegistrar={(c,d,m,e)=>{registrarGasto(c,d,m,e);showToast('💸 Gasto registrado','orange');}}
       onEliminar={eliminarGasto}/>}
