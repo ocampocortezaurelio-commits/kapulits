@@ -390,11 +390,11 @@ function _gastosEfectivo(jornada){
 }
 function _calcEsperadoCaja(jornada){
   // Caja esperada = fondo + efectivo de productos + efectivo de envios - gastos en efectivo.
-  // El efectivo de envios (mandaditos cobrados en efectivo) esta fisicamente en el cajon,
-  // por eso se incluye en la conciliacion aunque no sea utilidad del negocio.
-  const ventasEf=calcVentasEfectivo(jornada?.ventas||[]);
-  const enviosEf=calcMandaditosEfectivo(jornada?.mandaditos||[]);
-  return Number(jornada?.fondoInicial||0)+ventasEf+enviosEf-_gastosEfectivo(jornada);
+  // Se calcula desde el DESGLOSE (que lee del pedido = ultima edicion del operador),
+  // por lo que siempre refleja el metodo/monto final, no el primer guardado.
+  // El efectivo de envios esta fisicamente en el cajon, por eso se incluye.
+  const d=buildCierreDesglose(jornada);
+  return Number(jornada?.fondoInicial||0)+d.totals.productosEfectivo+d.totals.enviosEfectivo-_gastosEfectivo(jornada);
 }
 function _auditHistoricalState(state){
   const jornadas=[...(state?.jornadas||[]),state?.jornadaActiva].filter(Boolean);
@@ -691,14 +691,43 @@ function _backfillMandaditoMetodo(j){
   });
   return changed?{...j,mandaditos}:j;
 }
+// Auto-corrige datos ya guardados: la venta de un pedido cobrado SIEMPRE debe
+// igualar el estado final del pedido (monto, items, costo de envio y metodo de
+// pago). Si una edicion previa quedo solo en el pedido y no en la venta (dato
+// "congelado"), aqui se corrige al cargar. Respeta cancelaciones (no toca su
+// reversa) y NUNCA crea/borra ventas; solo actualiza la venta original activa.
+function _reconcileVentasFromPedidos(j){
+  if(!j||!Array.isArray(j.pedidos)||!j.pedidos.length)return j;
+  let ventas=[...(j.ventas||[])];
+  let mandaditos=[...(j.mandaditos||[])];
+  let changed=false;
+  j.pedidos.forEach(p=>{
+    if(!p||!p.cobrado||p.estado==='cancelado')return;
+    const idx=ventas.findIndex(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
+    if(idx<0)return;
+    const v=ventas[idx];
+    const metodoFinal=p.metodoPago||v.metodoPago||null;
+    const want={total:Number(p.totalProductos)||0,totalCobrado:Number(p.total)||0,costoEnvio:Number(p.costoEnvio)||0,metodoPago:metodoFinal};
+    if(v.total!==want.total||v.totalCobrado!==want.totalCobrado||v.costoEnvio!==want.costoEnvio||v.metodoPago!==want.metodoPago){
+      ventas[idx]={...v,...want,items:p.items};changed=true;
+    }
+    // El envio (mandadito) de un pedido cobrado queda cobrado con el mismo metodo.
+    mandaditos=mandaditos.map(m=>{
+      if(m.pedidoId===p.id&&(m.cobrado!==true||m.metodoPago!==metodoFinal)){changed=true;return{...m,cobrado:true,metodoPago:metodoFinal};}
+      return m;
+    });
+  });
+  return changed?{...j,ventas,mandaditos}:j;
+}
 function hydrateState(p){
   const base={...INITIAL_STATE,...p,
     productos:migrateProducts(p?.productos||PRODUCTOS_DEFAULT),
     costos:p?.costos||COSTOS_DEFAULT,
     empleados:p?.empleados||EMPLEADOS_DEFAULT,
     impresora:{...INITIAL_STATE.impresora,...(p?.impresora||{}),conectada:false,reconectando:false}};
-  base.jornadas=(base.jornadas||[]).map(_backfillMandaditoMetodo);
-  if(base.jornadaActiva)base.jornadaActiva=_backfillMandaditoMetodo(base.jornadaActiva);
+  const fix=j=>_reconcileVentasFromPedidos(_backfillMandaditoMetodo(j));
+  base.jornadas=(base.jornadas||[]).map(fix);
+  if(base.jornadaActiva)base.jornadaActiva=fix(base.jornadaActiva);
   return _autoCloseExpired(base);
 }
 function readBackups(){
@@ -1649,31 +1678,27 @@ async function printTicket(pedido){
 
 // ─── CIERRE DE CAJA PRINT ───────────────────────────────────────────
 // ─── DESGLOSE AUDITABLE DE CIERRE ───────────────────────────────────
-// Construye una fila por pedido (ordenado por folio, incluye cancelados) y
-// los subtotales SE SUMAN DE ESTAS FILAS. Asi el total impreso es literalmente
-// la suma de lo que se ve. Refleja el estado final cobrado de cada pedido
-// (incluyendo modificaciones posteriores, porque lee de la venta del ledger).
+// FUENTE DE VERDAD = EL PEDIDO (la ultima edicion del operador). Construye una
+// fila por pedido (ordenado por folio, incluye cancelados) y los subtotales SE
+// SUMAN DE ESTAS FILAS. Asi el total es literalmente la suma de lo que se ve y
+// SIEMPRE refleja la ultima modificacion (monto, metodo, items, tipo de envio),
+// nunca el primer guardado. La venta del ledger solo se usa como respaldo si el
+// pedido no trae metodo de pago (datos muy viejos).
 function buildCierreDesglose(jornada){
   const pedidos=[...(jornada?.pedidos||[])].sort((a,b)=>(a.numero||0)-(b.numero||0));
   const ventas=jornada?.ventas||[];
-  const mandaditos=jornada?.mandaditos||[];
   const rows=pedidos.map(p=>{
+    const cancelado=p.estado==='cancelado';
+    const cobrado=!!p.cobrado&&!cancelado;
     const ventaOrig=ventas.find(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
-    const reversaActiva=ventas.some(v=>v.pedidoId===p.id&&v.esReversa&&!v.anulada);
-    const cancelado=p.estado==='cancelado'||reversaActiva;
-    const cobrado=!!ventaOrig&&!cancelado;
-    const metodo=ventaOrig?.metodoPago||p.metodoPago||null;
-    const mand=mandaditos.find(m=>m.pedidoId===p.id);
-    const envioCobrado=!!(mand&&mand.cobrado&&!cancelado);
-    const envio=envioCobrado?(Number(mand.tarifa)||0):0;
-    const envioMetodo=mand?.metodoPago||metodo;
-    // productos = monto FINAL del pedido (lee la venta cobrada; si no esta cobrado,
-    // muestra el monto del pedido como referencia pero NO suma a caja).
-    const productos=cobrado?(Number(ventaOrig.total)||0):(Number(p.totalProductos)||0);
+    const metodo=p.metodoPago||ventaOrig?.metodoPago||null;
+    const tieneEnvio=(p.tipoEntrega&&p.tipoEntrega!=='recoger')||((Number(p.costoEnvio)||0)>0);
+    const envio=(cobrado&&tieneEnvio)?(Number(p.costoEnvio)||0):0;
+    const productos=Number(p.totalProductos)||0;
     return {
       folio:p.numero, cliente:p.cliente||'', tipoEntrega:p.tipoEntrega||'recoger',
       estado:cancelado?'cancelado':(cobrado?'cobrado':(p.estado||'nuevo')),
-      cobrado, cancelado, metodo, envioMetodo,
+      cobrado, cancelado, metodo, envioMetodo:metodo,
       productos, envio, total:productos+envio,
       cuentaCaja:cobrado, // solo los cobrados-no-cancelados suman a caja
     };
