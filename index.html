@@ -1652,21 +1652,69 @@ async function printTicket(pedido){
 }
 
 // ─── CIERRE DE CAJA PRINT ───────────────────────────────────────────
+// ─── DESGLOSE AUDITABLE DE CIERRE ───────────────────────────────────
+// Construye una fila por pedido (ordenado por folio, incluye cancelados) y
+// los subtotales SE SUMAN DE ESTAS FILAS. Asi el total impreso es literalmente
+// la suma de lo que se ve. Refleja el estado final cobrado de cada pedido
+// (incluyendo modificaciones posteriores, porque lee de la venta del ledger).
+function buildCierreDesglose(jornada){
+  const pedidos=[...(jornada?.pedidos||[])].sort((a,b)=>(a.numero||0)-(b.numero||0));
+  const ventas=jornada?.ventas||[];
+  const mandaditos=jornada?.mandaditos||[];
+  const rows=pedidos.map(p=>{
+    const ventaOrig=ventas.find(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
+    const reversaActiva=ventas.some(v=>v.pedidoId===p.id&&v.esReversa&&!v.anulada);
+    const cancelado=p.estado==='cancelado'||reversaActiva;
+    const cobrado=!!ventaOrig&&!cancelado;
+    const metodo=ventaOrig?.metodoPago||p.metodoPago||null;
+    const mand=mandaditos.find(m=>m.pedidoId===p.id);
+    const envioCobrado=!!(mand&&mand.cobrado&&!cancelado);
+    const envio=envioCobrado?(Number(mand.tarifa)||0):0;
+    const envioMetodo=mand?.metodoPago||metodo;
+    // productos = monto FINAL del pedido (lee la venta cobrada; si no esta cobrado,
+    // muestra el monto del pedido como referencia pero NO suma a caja).
+    const productos=cobrado?(Number(ventaOrig.total)||0):(Number(p.totalProductos)||0);
+    return {
+      folio:p.numero, cliente:p.cliente||'', tipoEntrega:p.tipoEntrega||'recoger',
+      estado:cancelado?'cancelado':(cobrado?'cobrado':(p.estado||'nuevo')),
+      cobrado, cancelado, metodo, envioMetodo,
+      productos, envio, total:productos+envio,
+      cuentaCaja:cobrado, // solo los cobrados-no-cancelados suman a caja
+    };
+  });
+  const sum=(pred,field)=>rows.filter(pred).reduce((s,r)=>s+r[field],0);
+  const totals={
+    productosEfectivo: sum(r=>r.cuentaCaja&&r.metodo==='efectivo','productos'),
+    productosTransfer: sum(r=>r.cuentaCaja&&r.metodo==='transferencia','productos'),
+    productos:         sum(r=>r.cuentaCaja,'productos'),
+    enviosEfectivo:    sum(r=>r.envioMetodo==='efectivo','envio'),
+    enviosTransfer:    sum(r=>r.envioMetodo==='transferencia','envio'),
+    envios:            sum(()=>true,'envio'),
+    canceladas:        rows.filter(r=>r.cancelado).map(r=>r.folio),
+    countCobrados:     rows.filter(r=>r.cuentaCaja).length,
+  };
+  totals.transferenciaTotal=totals.productosTransfer+totals.enviosTransfer;
+  totals.efectivoIngresos=totals.productosEfectivo+totals.enviosEfectivo;
+  return {rows,totals};
+}
+
 function _buildCierreText(jornada){
   const sep='-'.repeat(32);
-  const vEf=calcVentasEfectivo(jornada.ventas);
-  const vTr=calcVentasTransferencia(jornada.ventas);
-  const totalV=calcVentasTotal(jornada.ventas);
+  const desg=buildCierreDesglose(jornada);
+  const vEf=desg.totals.productosEfectivo;
+  const vTr=desg.totals.productosTransfer;
+  const totalV=desg.totals.productos;
   const totalG=calcGastosTotal(jornada.gastos);
-  const enviosEf=calcMandaditosEfectivo(jornada.mandaditos||[]);
-  const enviosTr=calcMandaditosTransferencia(jornada.mandaditos||[]);
-  const enviosCobrados=calcMandaditosCobrados(jornada.mandaditos||[]);
+  const enviosEf=desg.totals.enviosEfectivo;
+  const enviosTr=desg.totals.enviosTransfer;
+  const enviosCobrados=desg.totals.envios;
   const esperado=_calcEsperadoCaja(jornada);
-  const transferenciaTotal=vTr+enviosTr;
+  const transferenciaTotal=desg.totals.transferenciaTotal;
   const dineroTotal=esperado+transferenciaTotal;
   const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
-  const pedidosCan=(jornada.pedidos||[]).filter(p=>p.estado==='cancelado').length;
+  const pedidosCan=desg.totals.canceladas.length;
   const util=totalV-totalG;
+  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':'--';
   let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
   t+=`    CORTE DE CAJA\n${sep}\n`;
   t+=`  Fecha:    ${jornada.fecha}\n`;
@@ -1674,6 +1722,20 @@ function _buildCierreText(jornada){
   t+=`  Cierre:   ${jornada.horaCierre||'--'}\n`;
   t+=sep+'\n';
   t+=`  Fondo inicial:    ${fmt(jornada.fondoInicial).padStart(10)}\n`;
+  t+=sep+'\n';
+  // DESGLOSE POR PEDIDO (folio a folio, incluye cancelados)
+  t+=`  DESGLOSE POR PEDIDO\n`;
+  t+=`  #   Met Prod   Env   Total\n`;
+  desg.rows.forEach(r=>{
+    const folio='#'+String(r.folio).padStart(3,'0');
+    if(r.cancelado){
+      t+=`  ${folio} CANCELADO (no suma)\n`;
+    }else if(!r.cobrado){
+      t+=`  ${folio} ${metAbbr(r.metodo)} pendiente (no cobrado)\n`;
+    }else{
+      t+=`  ${folio} ${metAbbr(r.metodo).padEnd(3)} ${fmt(r.productos).padStart(6)} ${fmt(r.envio).padStart(5)} ${fmt(r.total).padStart(6)}\n`;
+    }
+  });
   t+=sep+'\n';
   t+=`  VENTAS DE PRODUCTOS\n`;
   t+=`  Efectivo:         ${fmt(vEf).padStart(10)}\n`;
@@ -1714,20 +1776,22 @@ function _buildCierreText(jornada){
 }
 
 function buildCierreHTML(jornada){
-  const vEf=calcVentasEfectivo(jornada.ventas);
-  const vTr=calcVentasTransferencia(jornada.ventas);
-  const totalV=calcVentasTotal(jornada.ventas);
+  const desg=buildCierreDesglose(jornada);
+  const vEf=desg.totals.productosEfectivo;
+  const vTr=desg.totals.productosTransfer;
+  const totalV=desg.totals.productos;
   const totalG=calcGastosTotal(jornada.gastos);
   const gEf=_gastosEfectivo(jornada);
-  const enviosEf=calcMandaditosEfectivo(jornada.mandaditos||[]);
-  const enviosTr=calcMandaditosTransferencia(jornada.mandaditos||[]);
-  const enviosCobrados=calcMandaditosCobrados(jornada.mandaditos||[]);
+  const enviosEf=desg.totals.enviosEfectivo;
+  const enviosTr=desg.totals.enviosTransfer;
+  const enviosCobrados=desg.totals.envios;
   const esperado=_calcEsperadoCaja(jornada);
-  const transferenciaTotal=vTr+enviosTr;
+  const transferenciaTotal=desg.totals.transferenciaTotal;
   const dineroTotal=esperado+transferenciaTotal;
   const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
   const util=totalV-totalG;
   const dif=jornada.totalEfectivo!=null?(jornada.totalEfectivo-esperado):null;
+  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':'--';
   let h=`<html><head><title>Corte</title><style>
     *{margin:0;padding:0}body{font-family:monospace;font-size:12px;width:80mm;padding:5mm}
     .c{text-align:center}.b{font-weight:bold}.s{border-top:1px dashed #000;margin:4px 0}
@@ -1741,6 +1805,19 @@ function buildCierreHTML(jornada){
   h+=`<div class="r"><span>Cierre</span><span>${jornada.horaCierre||'--'}</span></div>`;
   h+=`<div class="s"></div>`;
   h+=`<div class="r"><span>Fondo inicial</span><span class="b">${fmt(jornada.fondoInicial)}</span></div>`;
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">DESGLOSE POR PEDIDO</div>`;
+  h+=`<div class="r sm" style="font-weight:bold"><span>#  Met</span><span>Prod  Env  Total</span></div>`;
+  desg.rows.forEach(r=>{
+    const folio='#'+String(r.folio).padStart(3,'0');
+    if(r.cancelado){
+      h+=`<div class="r sm" style="color:#b91c1c"><span>${folio} CANCELADO</span><span>no suma</span></div>`;
+    }else if(!r.cobrado){
+      h+=`<div class="r sm" style="color:#a16207"><span>${folio} ${metAbbr(r.metodo)}</span><span>pendiente</span></div>`;
+    }else{
+      h+=`<div class="r sm"><span>${folio} ${metAbbr(r.metodo)}</span><span>${fmt(r.productos)} ${r.envio>0?'+'+fmt(r.envio):'·'} = ${fmt(r.total)}</span></div>`;
+    }
+  });
   h+=`<div class="s"></div>`;
   h+=`<div class="c b" style="margin:2px 0">VENTAS DE PRODUCTOS</div>`;
   h+=`<div class="r"><span>Efectivo</span><span>${fmt(vEf)}</span></div>`;
@@ -1966,19 +2043,46 @@ function AbrirJornadaModal({open,onClose,onAbrir}){
 function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
   const [efectivo,setEfectivo]=useState('');const [obs,setObs]=useState('');
   if(!jornada)return null;
-  const totalV=calcVentasTotal(jornada.ventas);const totalG=calcGastosTotal(jornada.gastos);const util=totalV-totalG;
-  const vEf=calcVentasEfectivo(jornada.ventas);
-  const vTr=calcVentasTransferencia(jornada.ventas);
-  const enviosEf=calcMandaditosEfectivo(jornada.mandaditos||[]);
-  const enviosTr=calcMandaditosTransferencia(jornada.mandaditos||[]);
-  const enviosCobrados=calcMandaditosCobrados(jornada.mandaditos||[]);
+  const desg=buildCierreDesglose(jornada);
+  const totalG=calcGastosTotal(jornada.gastos);
+  const vEf=desg.totals.productosEfectivo;
+  const vTr=desg.totals.productosTransfer;
+  const totalV=desg.totals.productos;
+  const util=totalV-totalG;
+  const enviosEf=desg.totals.enviosEfectivo;
+  const enviosTr=desg.totals.enviosTransfer;
+  const enviosCobrados=desg.totals.envios;
   const esperado=_calcEsperadoCaja(jornada);const dif=(Number(efectivo)||0)-esperado;
-  const transferenciaTotal=vTr+enviosTr;
+  const transferenciaTotal=desg.totals.transferenciaTotal;
   const dineroTotal=esperado+transferenciaTotal;
+  const metAbbr=m=>m==='efectivo'?'💵':m==='transferencia'?'📱':'—';
   const pedidosRecoger=(jornada.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
   const pedidosEnvio=(jornada.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
   return(<Modal open={open} onClose={onClose} title="🔴 Corte de Caja">
     <div className="flex flex-col gap-4">
+      <div className="bg-white border border-gray-200 rounded-2xl p-4">
+        <h3 className="font-bold text-gray-700 text-sm mb-2">Desglose por pedido ({desg.totals.countCobrados} cobrados{desg.totals.canceladas.length>0?`, ${desg.totals.canceladas.length} cancelados`:''})</h3>
+        <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-x-2 gap-y-1 text-[12px] max-h-56 overflow-y-auto">
+          <div className="font-bold text-gray-400">#</div><div className="font-bold text-gray-400">Mét</div><div className="font-bold text-gray-400 text-right">Prod</div><div className="font-bold text-gray-400 text-right">Env</div><div className="font-bold text-gray-400 text-right">Total</div>
+          {desg.rows.map(r=>(<React.Fragment key={r.folio}>
+            <div className="text-gray-600">#{String(r.folio).padStart(3,'0')}</div>
+            {r.cancelado
+              ? <div className="col-span-4 text-red-500 italic">cancelado · no suma a caja</div>
+              : !r.cobrado
+                ? <div className="col-span-4 text-yellow-600 italic">{metAbbr(r.metodo)} pendiente · no cobrado</div>
+                : <React.Fragment>
+                    <div>{metAbbr(r.metodo)}</div>
+                    <div className="text-right">{fmt(r.productos)}</div>
+                    <div className="text-right text-purple-600">{r.envio>0?fmt(r.envio):'·'}</div>
+                    <div className="text-right font-bold">{fmt(r.total)}</div>
+                  </React.Fragment>}
+          </React.Fragment>))}
+        </div>
+        <div className="border-t mt-2 pt-2 grid grid-cols-2 gap-1 text-[12px]">
+          <span className="text-gray-500">💵 Suma efectivo (prod+env)</span><span className="text-right font-bold">{fmt(desg.totals.efectivoIngresos)}</span>
+          <span className="text-gray-500">📱 Suma transferencia (prod+env)</span><span className="text-right font-bold">{fmt(transferenciaTotal)}</span>
+        </div>
+      </div>
       <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
         <h3 className="font-bold text-gray-700 text-sm mb-1">Negocio (utilidad)</h3>
         <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas de productos</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
