@@ -385,10 +385,16 @@ function _repairHistoricalVentas(ventas=[]){
   }
   return repaired;
 }
+function _gastosEfectivo(jornada){
+  return (jornada?.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+(Number(g.monto)||0),0);
+}
 function _calcEsperadoCaja(jornada){
+  // Caja esperada = fondo + efectivo de productos + efectivo de envios - gastos en efectivo.
+  // El efectivo de envios (mandaditos cobrados en efectivo) esta fisicamente en el cajon,
+  // por eso se incluye en la conciliacion aunque no sea utilidad del negocio.
   const ventasEf=calcVentasEfectivo(jornada?.ventas||[]);
-  const gastosEf=(jornada?.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-  return Number(jornada?.fondoInicial||0)+ventasEf-gastosEf;
+  const enviosEf=calcMandaditosEfectivo(jornada?.mandaditos||[]);
+  return Number(jornada?.fondoInicial||0)+ventasEf+enviosEf-_gastosEfectivo(jornada);
 }
 function _auditHistoricalState(state){
   const jornadas=[...(state?.jornadas||[]),state?.jornadaActiva].filter(Boolean);
@@ -424,13 +430,12 @@ function _auditHistoricalState(state){
         issues.push({type:'orphan_reversal',fecha:j.fecha,reversalId:v.id,ventaOrigId:v.ventaOrigId});
       }
     });
-    if(j.estado==='cerrada'&&j.totalEfectivo!=null){
-      const recalculated=Number(j.totalEfectivo)-_calcEsperadoCaja(j);
-      if(Math.abs(Number(j.diferencia||0)-recalculated)>0.01){
-        summary.mismatchDiferencias++;
-        issues.push({type:'diferencia_mismatch',fecha:j.fecha,stored:j.diferencia,recalculated:Number(recalculated.toFixed(2))});
-      }
-    }
+    // NOTA: NO recalculamos la `diferencia` de jornadas cerradas. La diferencia
+    // se registro al momento del corte con un conteo fisico real; es un hecho
+    // historico. Ademas la formula de caja evoluciono en el tiempo (antes/despues
+    // de separar envios), por lo que recalcular generaria falsos positivos y
+    // tentaria a sobrescribir datos historicos validos. Solo auditamos
+    // integridad estructural de ventas (duplicados, reversas huerfanas).
   });
   return{ok:issues.length===0,summary,issues};
 }
@@ -442,14 +447,9 @@ function _repairHistoricalState(state){
     let jornadaChanged=false;
     let next={...j,ventas:_repairHistoricalVentas(j.ventas||[])};
     if(JSON.stringify(next.ventas)!==JSON.stringify(j.ventas||[])){changed=true;jornadaChanged=true;}
-    if(next.estado==='cerrada'&&next.totalEfectivo!=null){
-      const newDiff=Number((Number(next.totalEfectivo)-_calcEsperadoCaja(next)).toFixed(2));
-      if(Math.abs(Number(next.diferencia||0)-newDiff)>0.01){
-        next={...next,diferencia:newDiff,observaciones:[next.observaciones,'Reparación histórica: diferencia recalculada.'].filter(Boolean).join(' | ')};
-        changed=true;
-        jornadaChanged=true;
-      }
-    }
+    // NO se recalcula ni sobrescribe `diferencia` de jornadas cerradas: es un
+    // hecho historico (conteo fisico real al corte). La reparacion solo corrige
+    // corrupcion estructural de ventas (duplicados/reversas), nunca la caja.
     return jornadaChanged?{...next,_ts:stamp}:next;
   };
   const jornadas=(state.jornadas||[]).map(repairJornada);
@@ -615,15 +615,9 @@ window.kapulitsSanityCheck=()=>{
       if(!ventas.find(o=>o.id===v.ventaOrigId&&!o.esReversa))
         errors.push(`J:${j.fecha} reversal ${v.id}: orphan (no matching venta original ${v.ventaOrigId})`);
     });
-    // INV4: cash formula consistency check
-    const vEf=ventas.filter(v=>!v.anulada&&v.metodoPago==='efectivo').reduce((s,v)=>s+calcVentaCobrada(v),0);
-    const gEf=(j.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-    const esperado=j.fondoInicial+vEf-gEf;
-    if(j.estado==='cerrada'&&j.totalEfectivo!=null){
-      const difCalc=j.totalEfectivo-esperado;
-      if(Math.abs(difCalc-j.diferencia)>0.01)
-        errors.push(`J:${j.fecha} diferencia stored=${j.diferencia} but recalc=${difCalc.toFixed(2)}`);
-    }
+    // INV4 (cash diferencia recompute) retirado a proposito: la `diferencia` de
+    // una jornada cerrada es un hecho historico del conteo fisico y la formula de
+    // caja cambio al separar envios; recalcular daria falsos positivos.
   });
   const result={ok:errors.length===0,checked:allJornadas.length+' jornadas',errors};
   console.table(errors.length?errors:['All invariants OK']);
@@ -671,6 +665,19 @@ function calcVentasEfectivo(ventas=[]){
 }
 function calcVentasTransferencia(ventas=[]){
   return ventasActivas(ventas).filter(v=>v.metodoPago==='transferencia').reduce((s,v)=>s+calcVentaCobrada(v),0);
+}
+// ─── MANDADITOS / ENVIOS: dinero fisico cobrado, por metodo de pago ──
+// El envio NO es venta del negocio (no entra en utilidad), pero SI es
+// dinero real que pasa por la caja (efectivo) o por el banco (transferencia).
+// Por eso se concilia por separado y por metodo de pago.
+function calcMandaditosCobrados(mandaditos=[]){
+  return (mandaditos||[]).filter(m=>m&&m.cobrado).reduce((s,m)=>s+(Number(m.tarifa)||0),0);
+}
+function calcMandaditosEfectivo(mandaditos=[]){
+  return (mandaditos||[]).filter(m=>m&&m.cobrado&&m.metodoPago==='efectivo').reduce((s,m)=>s+(Number(m.tarifa)||0),0);
+}
+function calcMandaditosTransferencia(mandaditos=[]){
+  return (mandaditos||[]).filter(m=>m&&m.cobrado&&m.metodoPago==='transferencia').reduce((s,m)=>s+(Number(m.tarifa)||0),0);
 }
 function hydrateState(p){
   return _autoCloseExpired({...INITIAL_STATE,...p,
@@ -883,9 +890,7 @@ function useStore(){
     if(!state.jornadaActiva)return;
     const ja={...state.jornadaActiva,estado:'cerrada',horaCierre:now(),
       totalEfectivo:Number(totalEfectivo)||0,observaciones:observaciones||''};
-    const ventasEf=calcVentasEfectivo(ja.ventas);
-    const gastosEf=ja.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-    const esperado=ja.fondoInicial+ventasEf-gastosEf;
+    const esperado=_calcEsperadoCaja(ja);
     ja.diferencia=(Number(totalEfectivo)||0)-esperado;
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:null});
@@ -979,9 +984,13 @@ function useStore(){
         costoEnvio:newCostoEnvio,
         metodoPago:cambios.metodoPago||v.metodoPago
       }:v);
-      if(cambios.metodoPago){
-        ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,metodoPago:cambios.metodoPago}:m);
-      }
+      // El pedido esta cobrado: su envio (mandadito) tambien esta cobrado y debe
+      // llevar el mismo metodo de pago de la venta. Esto cubre el caso de cambiar
+      // recoger->envio en un pedido ya pagado (mandadito recien creado) y la
+      // edicion del metodo de pago.
+      const ventaSync=ja.ventas.find(v=>v.pedidoId===pedidoId&&!v.esReversa);
+      const metodoSync=cambios.metodoPago||ventaSync?.metodoPago||null;
+      ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:metodoSync}:m);
     }
 
     // Si se cobra, crear venta y marcar mandadito (guard: no duplicates)
@@ -1212,21 +1221,32 @@ function generarPDF(tipo,jornadas,productos){
   const tu=tv-tg;
   const tvEf=cerradas.reduce((s,j)=>s+calcVentasEfectivo(j.ventas),0);
   const tvTr=cerradas.reduce((s,j)=>s+calcVentasTransferencia(j.ventas),0);
-  const tm=cerradas.reduce((s,j)=>s+calcMandaditosTotal(j.mandaditos||[]),0);
+  const tmEf=cerradas.reduce((s,j)=>s+calcMandaditosEfectivo(j.mandaditos||[]),0);
+  const tmTr=cerradas.reduce((s,j)=>s+calcMandaditosTransferencia(j.mandaditos||[]),0);
+  const tm=cerradas.reduce((s,j)=>s+calcMandaditosCobrados(j.mandaditos||[]),0);
+  const tTransfer=tvTr+tmTr;
   const margen=tv>0?((tu/tv)*100).toFixed(1):'0';
   const totalPedidos=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length,0);
 
-  addSection('Resumen Financiero');
+  addSection('Resumen del Negocio (utilidad)');
   addRow('Ventas de productos',fmt(tv),{bold:true});
-  addRow('  Cobrado en efectivo',fmt(tvEf),{indent:ML+4});
-  addRow('  Cobrado por transferencia',fmt(tvTr),{indent:ML+4});
+  addRow('  Productos en efectivo',fmt(tvEf),{indent:ML+4});
+  addRow('  Productos por transferencia',fmt(tvTr),{indent:ML+4});
   addDivider();
   addRow('Total gastos del periodo',fmt(tg),{bold:true,color:[202,77,44]});
   addDivider();
-  addRow('Utilidad bruta',fmt(tu),{bold:true,color:tu>=0?[45,139,87]:[202,77,44]});
+  addRow('Utilidad bruta (solo productos)',fmt(tu),{bold:true,color:tu>=0?[45,139,87]:[202,77,44]});
   addRow('Margen de utilidad',margen+'%');
-  addDivider();
-  addRow('Envios / mandaditos',fmt(tm),{color:[112,63,186]});
+  y+=3;
+
+  addSection('Envios / Mandaditos (dinero separado)');
+  addRow('Total envios cobrados',fmt(tm),{bold:true,color:[112,63,186]});
+  addRow('  Envios en efectivo',fmt(tmEf),{indent:ML+4});
+  addRow('  Envios por transferencia',fmt(tmTr),{indent:ML+4});
+  y+=3;
+
+  addSection('Dinero Recibido (conciliacion)');
+  addRow('Transferencias recibidas (prod + envios)',fmt(tTransfer),{bold:true,color:[72,118,168]});
   addRow('Promedio ventas por jornada',fmt(tv/cerradas.length));
   addRow('Total pedidos completados',String(totalPedidos));
   y+=3;
@@ -1238,7 +1258,7 @@ function generarPDF(tipo,jornadas,productos){
     const v=calcVentasTotal(j.ventas);const g=calcGastosTotal(j.gastos);const u=v-g;
     const vEf=calcVentasEfectivo(j.ventas);const vTr=calcVentasTransferencia(j.ventas);
     const peds=(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
-    const manda=calcMandaditosTotal(j.mandaditos||[]);
+    const manda=calcMandaditosCobrados(j.mandaditos||[]);
     doc.setFillColor(248,244,238);doc.roundedRect(ML-1,y-3,MR-ML+2,18,1.5,1.5,'F');
     doc.setFont('helvetica','bold');doc.setFontSize(9);
     doc.text(j.fecha+' ('+j.horaApertura+' - '+(j.horaCierre||'?')+')',ML+1,y+1);
@@ -1323,7 +1343,7 @@ function calcProjections(jornadas){
   const revenues=cerradas.map(j=>calcVentasTotal(j.ventas));
   const expenses=cerradas.map(j=>calcGastosTotal(j.gastos));
   const profits=revenues.map((r,i)=>r-expenses[i]);
-  const mandas=cerradas.map(j=>calcMandaditosTotal(j.mandaditos||[]));
+  const mandas=cerradas.map(j=>calcMandaditosCobrados(j.mandaditos||[]));
   const recoger=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length);
   const envios=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length);
   const avg=a=>a.reduce((s,v)=>s+v,0)/a.length;
@@ -1623,9 +1643,12 @@ function _buildCierreText(jornada){
   const vTr=calcVentasTransferencia(jornada.ventas);
   const totalV=calcVentasTotal(jornada.ventas);
   const totalG=calcGastosTotal(jornada.gastos);
-  const gEf=jornada.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-  const esperado=jornada.fondoInicial+vEf-gEf;
-  const totalManda=calcMandaditosTotal(jornada.mandaditos||[]);
+  const enviosEf=calcMandaditosEfectivo(jornada.mandaditos||[]);
+  const enviosTr=calcMandaditosTransferencia(jornada.mandaditos||[]);
+  const enviosCobrados=calcMandaditosCobrados(jornada.mandaditos||[]);
+  const esperado=_calcEsperadoCaja(jornada);
+  const transferenciaTotal=vTr+enviosTr;
+  const dineroTotal=esperado+transferenciaTotal;
   const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
   const pedidosCan=(jornada.pedidos||[]).filter(p=>p.estado==='cancelado').length;
   const util=totalV-totalG;
@@ -1641,21 +1664,29 @@ function _buildCierreText(jornada){
   t+=`  Efectivo:         ${fmt(vEf).padStart(10)}\n`;
   t+=`  Transferencia:    ${fmt(vTr).padStart(10)}\n`;
   t+=`  Total productos:  ${fmt(totalV).padStart(10)}\n`;
-  if(totalManda>0)t+=`  Mandaditos:       ${fmt(totalManda).padStart(10)}\n`;
+  if(enviosCobrados>0){
+    t+=sep+'\n';
+    t+=`  ENVIOS / MANDADITOS\n`;
+    t+=`  Efectivo:         ${fmt(enviosEf).padStart(10)}\n`;
+    t+=`  Transferencia:    ${fmt(enviosTr).padStart(10)}\n`;
+    t+=`  Total envios:     ${fmt(enviosCobrados).padStart(10)}\n`;
+  }
   t+=sep+'\n';
   t+=`  GASTOS\n`;
-  t+=`  Gastos efectivo:  ${fmt(gEf).padStart(10)}\n`;
+  t+=`  Gastos efectivo:  ${fmt(_gastosEfectivo(jornada)).padStart(10)}\n`;
   t+=`  Total gastos:     ${fmt(totalG).padStart(10)}\n`;
   t+=sep+'\n';
-  t+=`  CAJA\n`;
-  t+=`  Caja esp.negocio: ${fmt(esperado).padStart(10)}\n`;
+  t+=`  CONCILIACION\n`;
+  t+=`  Caja efectivo esp:${fmt(esperado).padStart(10)}\n`;
   if(jornada.totalEfectivo!=null){
     t+=`  Efectivo contado: ${fmt(jornada.totalEfectivo).padStart(10)}\n`;
     const dif=(jornada.totalEfectivo||0)-esperado;
     t+=`  Diferencia:       ${fmt(dif).padStart(10)}\n`;
   }
+  t+=`  Transferencias:   ${fmt(transferenciaTotal).padStart(10)}\n`;
+  t+=`  Dinero total:     ${fmt(dineroTotal).padStart(10)}\n`;
   t+=sep+'\n';
-  t+=`  Utilidad bruta:   ${fmt(util).padStart(10)}\n`;
+  t+=`  Utilidad (prod):  ${fmt(util).padStart(10)}\n`;
   t+=`  Pedidos: ${pedidosOk} ok`;
   if(pedidosCan>0)t+=` / ${pedidosCan} cancel`;
   t+='\n';
@@ -1672,9 +1703,13 @@ function buildCierreHTML(jornada){
   const vTr=calcVentasTransferencia(jornada.ventas);
   const totalV=calcVentasTotal(jornada.ventas);
   const totalG=calcGastosTotal(jornada.gastos);
-  const gEf=jornada.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-  const esperado=jornada.fondoInicial+vEf-gEf;
-  const totalManda=calcMandaditosTotal(jornada.mandaditos||[]);
+  const gEf=_gastosEfectivo(jornada);
+  const enviosEf=calcMandaditosEfectivo(jornada.mandaditos||[]);
+  const enviosTr=calcMandaditosTransferencia(jornada.mandaditos||[]);
+  const enviosCobrados=calcMandaditosCobrados(jornada.mandaditos||[]);
+  const esperado=_calcEsperadoCaja(jornada);
+  const transferenciaTotal=vTr+enviosTr;
+  const dineroTotal=esperado+transferenciaTotal;
   const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
   const util=totalV-totalG;
   const dif=jornada.totalEfectivo!=null?(jornada.totalEfectivo-esperado):null;
@@ -1696,20 +1731,28 @@ function buildCierreHTML(jornada){
   h+=`<div class="r"><span>Efectivo</span><span>${fmt(vEf)}</span></div>`;
   h+=`<div class="r"><span>Transferencia</span><span>${fmt(vTr)}</span></div>`;
   h+=`<div class="r b"><span>Total productos</span><span>${fmt(totalV)}</span></div>`;
-  if(totalManda>0)h+=`<div class="r" style="color:#7c3aed"><span>Mandaditos</span><span>${fmt(totalManda)}</span></div>`;
+  if(enviosCobrados>0){
+    h+=`<div class="s"></div>`;
+    h+=`<div class="c b" style="margin:2px 0;color:#7c3aed">ENVIOS / MANDADITOS</div>`;
+    h+=`<div class="r"><span>Efectivo</span><span>${fmt(enviosEf)}</span></div>`;
+    h+=`<div class="r"><span>Transferencia</span><span>${fmt(enviosTr)}</span></div>`;
+    h+=`<div class="r b" style="color:#7c3aed"><span>Total envios</span><span>${fmt(enviosCobrados)}</span></div>`;
+  }
   h+=`<div class="s"></div>`;
   h+=`<div class="c b" style="margin:2px 0">GASTOS</div>`;
   h+=`<div class="r"><span>En efectivo</span><span>${fmt(gEf)}</span></div>`;
   h+=`<div class="r b"><span>Total gastos</span><span>${fmt(totalG)}</span></div>`;
   h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">CAJA</div>`;
-  h+=`<div class="r"><span>Caja esperada del negocio</span><span class="b">${fmt(esperado)}</span></div>`;
+  h+=`<div class="c b" style="margin:2px 0">CONCILIACION</div>`;
+  h+=`<div class="r"><span>Caja efectivo esperada</span><span class="b">${fmt(esperado)}</span></div>`;
   if(jornada.totalEfectivo!=null){
     h+=`<div class="r"><span>Efectivo contado</span><span class="b">${fmt(jornada.totalEfectivo)}</span></div>`;
     h+=`<div class="r b" style="color:${dif===0?'#000':dif>0?'green':'red'}"><span>Diferencia</span><span>${fmt(dif)}</span></div>`;
   }
+  h+=`<div class="r"><span>Transferencias recibidas</span><span class="b">${fmt(transferenciaTotal)}</span></div>`;
+  h+=`<div class="r b"><span>Dinero total del dia</span><span>${fmt(dineroTotal)}</span></div>`;
   h+=`<div class="s"></div>`;
-  h+=`<div class="r b"><span>Utilidad bruta</span><span style="color:${util>=0?'green':'red'}">${fmt(util)}</span></div>`;
+  h+=`<div class="r b"><span>Utilidad (solo productos)</span><span style="color:${util>=0?'green':'red'}">${fmt(util)}</span></div>`;
   h+=`<div class="r"><span>Pedidos completados</span><span>${pedidosOk}</span></div>`;
   h+=`<div class="s"></div>`;
   if(jornada.observaciones)h+=`<div class="sm" style="margin:4px 0">Obs: ${jornada.observaciones}</div><div class="s"></div>`;
@@ -1911,31 +1954,41 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
   const totalV=calcVentasTotal(jornada.ventas);const totalG=calcGastosTotal(jornada.gastos);const util=totalV-totalG;
   const vEf=calcVentasEfectivo(jornada.ventas);
   const vTr=calcVentasTransferencia(jornada.ventas);
-  const gEf=jornada.gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+g.monto,0);
-  const esperado=jornada.fondoInicial+vEf-gEf;const dif=(Number(efectivo)||0)-esperado;
-  const totalManda=calcMandaditosTotal(jornada.mandaditos||[]);
+  const enviosEf=calcMandaditosEfectivo(jornada.mandaditos||[]);
+  const enviosTr=calcMandaditosTransferencia(jornada.mandaditos||[]);
+  const enviosCobrados=calcMandaditosCobrados(jornada.mandaditos||[]);
+  const esperado=_calcEsperadoCaja(jornada);const dif=(Number(efectivo)||0)-esperado;
+  const transferenciaTotal=vTr+enviosTr;
+  const dineroTotal=esperado+transferenciaTotal;
   const pedidosRecoger=(jornada.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
   const pedidosEnvio=(jornada.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
   return(<Modal open={open} onClose={onClose} title="🔴 Corte de Caja">
     <div className="flex flex-col gap-4">
       <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
-        <h3 className="font-bold text-gray-700 text-sm mb-3">Resumen del dia</h3>
+        <h3 className="font-bold text-gray-700 text-sm mb-1">Negocio (utilidad)</h3>
         <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas de productos</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Cobrado en efectivo</span><span>{fmt(vEf)}</span></div>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Cobrado por transferencia</span><span>{fmt(vTr)}</span></div>
-        {totalManda>0&&<React.Fragment>
-          <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Mandaditos gestionados ({pedidosEnvio} envios)</span><span className="font-bold text-purple-600">{fmt(totalManda)}</span></div>
-          <div className="flex justify-between text-xs text-gray-400"><span className="italic">  Total cliente (referencial)</span><span>{fmt(totalV+totalManda)}</span></div>
-        </React.Fragment>}
+        <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Productos en efectivo</span><span>{fmt(vEf)}</span></div>
+        <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Productos por transferencia</span><span>{fmt(vTr)}</span></div>
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm"><span className="text-gray-500">💸 Total Gastos</span><span className="font-bold text-red-500">{fmt(totalG)}</span></div>
-        <div className="border-t my-2"/>
-        <div className="flex justify-between text-sm font-bold"><span>Utilidad bruta</span><span className={util>=0?'text-green-600':'text-red-500'}>{fmt(util)}</span></div>
-        <div className="border-t my-2"/>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">🏃 Pasan a recoger</span><span>{pedidosRecoger} clientes</span></div>
-        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm font-bold"><span>Utilidad bruta (solo productos)</span><span className={util>=0?'text-green-600':'text-red-500'}>{fmt(util)}</span></div>
+      </div>
+      <div className="bg-blue-50 rounded-2xl p-4 space-y-2">
+        <h3 className="font-bold text-gray-700 text-sm mb-1">Conciliación de dinero</h3>
         <div className="flex justify-between text-sm"><span className="text-gray-500">Fondo inicial</span><span>{fmt(jornada.fondoInicial)}</span></div>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">Caja esperada del negocio</span><span className="font-bold">{fmt(esperado)}</span></div>
+        {enviosCobrados>0&&<React.Fragment>
+          <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Envíos cobrados ({pedidosEnvio})</span><span className="font-bold text-purple-600">{fmt(enviosCobrados)}</span></div>
+          <div className="flex justify-between text-xs text-gray-500"><span>  💵 Envíos en efectivo</span><span>{fmt(enviosEf)}</span></div>
+          <div className="flex justify-between text-xs text-gray-500"><span>  📱 Envíos por transferencia</span><span>{fmt(enviosTr)}</span></div>
+        </React.Fragment>}
+        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm font-bold"><span className="text-gray-600">💵 Caja esperada (efectivo)</span><span>{fmt(esperado)}</span></div>
+        <div className="text-[11px] text-gray-400 -mt-1">Fondo + productos efectivo + envíos efectivo − gastos efectivo</div>
+        <div className="flex justify-between text-sm font-bold"><span className="text-gray-600">📱 Transferencias recibidas</span><span className="text-blue-700">{fmt(transferenciaTotal)}</span></div>
+        {(vTr>0||enviosTr>0)&&<div className="text-[11px] text-gray-400 -mt-1">Productos {fmt(vTr)} + envíos {fmt(enviosTr)}</div>}
+        <div className="border-t my-2"/>
+        <div className="flex justify-between text-sm font-black"><span>Dinero total del día</span><span>{fmt(dineroTotal)}</span></div>
+        <div className="flex justify-between text-xs text-gray-400"><span>🏃 Pasan a recoger</span><span>{pedidosRecoger} clientes</span></div>
       </div>
       <Input label="Efectivo real contado" type="number" placeholder="0" prefix="$" value={efectivo} onChange={setEfectivo}/>
       {efectivo&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
@@ -2039,7 +2092,7 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
   const totalV=ja?calcVentasTotal(ja.ventas):0;const totalG=ja?calcGastosTotal(ja.gastos):0;const util=totalV-totalG;
   const margen=totalV>0?((util/totalV)*100).toFixed(1):0;
   const pedidosActivos=ja?(ja.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
-  const totalManda=ja?calcMandaditosTotal(ja.mandaditos||[]):0;
+  const totalManda=ja?calcMandaditosCobrados(ja.mandaditos||[]):0;
   const ultimasJ=state.jornadas.filter(j=>j.estado==='cerrada').slice(-5).reverse();
   return(<div className="safe-bottom">
     <TopBar title="K'apul'Its" syncStatus={syncStatus} subtitle={ja?`Jornada activa · ${ja.horaApertura}`:NEGOCIO.slogan}
@@ -2562,7 +2615,7 @@ function ReportesPage({state}){
                 <button key={j.id} onClick={()=>setJornadaSel(j.id)}
                   className={`flex-shrink-0 px-3.5 py-2.5 rounded-2xl text-xs font-bold border ${jornadaSel===j.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.9)] text-[#6f564a]'}`}>{fmtDateShort(j.fecha)}</button>))}</div></div>
           {jActual&&(()=>{const tv=calcVentasTotal(jActual.ventas);const tg=calcGastosTotal(jActual.gastos);const ut=tv-tg;
-            const mg=tv>0?((ut/tv)*100).toFixed(1):0;const manda=calcMandaditosTotal(jActual.mandaditos||[]);
+            const mg=tv>0?((ut/tv)*100).toFixed(1):0;const manda=calcMandaditosCobrados(jActual.mandaditos||[]);
             const pRecoger=(jActual.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
             const pEnvio=(jActual.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
             return(<div className="space-y-4">
@@ -2728,7 +2781,9 @@ function ReportesPage({state}){
 function MandaditosReport({jornadas,jornadaActiva}){
   const todas=[...jornadas.filter(j=>j.estado==='cerrada')];
   if(jornadaActiva)todas.push(jornadaActiva);
-  const totalManda=todas.reduce((s,j)=>s+calcMandaditosTotal(j.mandaditos||[]),0);
+  const totalManda=todas.reduce((s,j)=>s+calcMandaditosCobrados(j.mandaditos||[]),0);
+  const totalMandaEf=todas.reduce((s,j)=>s+calcMandaditosEfectivo(j.mandaditos||[]),0);
+  const totalMandaTr=todas.reduce((s,j)=>s+calcMandaditosTransferencia(j.mandaditos||[]),0);
   const totalEnvios=todas.reduce((s,j)=>s+(j.mandaditos||[]).length,0);
   const totalRecoger=todas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length,0);
   const totalClientes=totalEnvios+totalRecoger;
@@ -2741,11 +2796,16 @@ function MandaditosReport({jornadas,jornadaActiva}){
     {totalClientes===0&&<EmptyState emoji="🛵" title="Sin datos de envios" sub="Los mandaditos apareceran aqui"/>}
     {totalClientes>0&&(<React.Fragment>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <MetricCard icon="🛵" label="Ingresos Mandaditos" value={fmt(totalManda)} color="purple" sub="Contabilidad separada"/>
+        <MetricCard icon="🛵" label="Envios cobrados" value={fmt(totalManda)} color="purple" sub="Dinero separado del negocio"/>
         <MetricCard icon="📦" label="Total Envios" value={totalEnvios} color="blue"/>
         <MetricCard icon="🏃" label="Pasan a Recoger" value={totalRecoger} color="green"/>
         <MetricCard icon="👥" label="Total Clientes" value={totalClientes} color="orange"/>
       </div>
+      {totalManda>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
+        <h3 className="font-black text-gray-800 mb-3 text-sm">Envios por metodo de pago</h3>
+        <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600">💵 Efectivo (esta en caja)</span><span className="font-bold text-sm text-green-600">{fmt(totalMandaEf)}</span></div>
+        <div className="flex justify-between items-center py-2"><span className="text-sm text-gray-600">📱 Transferencia (esta en banco)</span><span className="font-bold text-sm text-blue-600">{fmt(totalMandaTr)}</span></div>
+      </div>)}
       {Object.keys(porTipo).length>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
         <h3 className="font-black text-gray-800 mb-3 text-sm">Desglose por tipo de envio</h3>
         {Object.entries(porTipo).map(([tipo,data])=>{const t=TARIFAS_ENVIO[tipo];
