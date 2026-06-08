@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets';
+const CACHE_NAME = 'kapulits-assets-v20260607-pagos-mixtos';
 const STATIC_ASSETS = [
   './icon-192.png',
   './icon-512.png',
@@ -42,13 +42,5 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  event.respondWith(
-    fetch(req).then(res => {
-      if (res.status === 200) {
-        const clone = res.clone();
-        caches.open(CACHE_NAME).then(c => c.put(req, clone));
-      }
-      return res;
-    }).catch(() => caches.match(req).then(cached => cached || caches.match('./index.html')))
-  );
+  event.respondWith(fetch(req).catch(() => caches.match('./index.html')));
 });
