@@ -1104,6 +1104,18 @@ function useStore(){
     save({...state,jornadas:js,jornadaActiva:ja});
   },[state,save]);
 
+  const actualizarGasto=useCallback((gastoId,cambios)=>{
+    if(!state.jornadaActiva)return;
+    const ja={...state.jornadaActiva,gastos:state.jornadaActiva.gastos.map(g=>g.id===gastoId?{
+      ...g,
+      ...cambios,
+      monto:Number(cambios.monto??g.monto)||0,
+      _ts:new Date().toISOString()
+    }:g)};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
   const agregarProducto=useCallback((datos)=>{
     const nombre=(datos.nombre||'').trim();
     if(!nombre)return;
@@ -1137,7 +1149,7 @@ function useStore(){
   const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
 
   return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
-    registrarGasto,eliminarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
+    registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
 }
@@ -2737,14 +2749,17 @@ function TicketPreviewModal({open,pedido,onClose}){
 }
 
 // ─── GASTOS ─────────────────────────────────────────────────────────
-function GastosPage({state,onRegistrar,onEliminar}){
+function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
   const [catSel,setCatSel]=useState('guiso_principal');const [desc,setDesc]=useState('');const [monto,setMonto]=useState('');
   const [enEfectivo,setEnEfectivo]=useState(true);const [confirmDel,setConfirmDel]=useState(null);
   const [showConfirmAdd,setShowConfirmAdd]=useState(false);const [nuevaCat,setNuevaCat]=useState('');
+  const [editGasto,setEditGasto]=useState(null);
   const ja=state.jornadaActiva;
   if(!ja)return(<div className="safe-bottom"><TopBar title="Gastos"/>
     <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada"/></div>);
   const totalG=calcGastosTotal(ja.gastos);
+  const totalGEfectivo=_gastosEfectivo(ja);
+  const totalGOtro=totalG-totalGEfectivo;
 
   // Categorias dinamicas: las default + cualquiera que haya sido usada en gastos historicos
   const catsUsadas=useMemo(()=>{
@@ -2820,8 +2835,9 @@ function GastosPage({state,onRegistrar,onEliminar}){
             return(<div key={g.id} className="flex items-center justify-between py-2.5 border-b border-[rgba(104,74,56,0.08)] last:border-0">
               <div className="flex items-center gap-2 min-w-0"><span className="text-lg shrink-0">{cat?.emoji||'💸'}</span>
                 <div className="min-w-0"><p className="text-sm font-bold text-[#2f1d17] truncate">{g.descripcion}</p>
-                  <p className="text-xs text-[#8c7265]">{g.hora} · {cat?.label||g.categoria}</p></div></div>
+                  <p className="text-xs text-[#8c7265]">{g.hora} · {cat?.label||g.categoria} · {g.enEfectivo!==false?'impacta caja':'otro medio'}</p></div></div>
               <div className="flex items-center gap-2 shrink-0"><span className="font-black text-[#b24518] text-sm">{fmt(g.monto)}</span>
+                <button onClick={()=>setEditGasto(g)} className="text-[#8c7265] text-xs font-bold px-2 py-1 rounded-lg bg-[rgba(121,87,67,.08)]" aria-label="Editar gasto">Editar</button>
                 <button onClick={()=>setConfirmDel(g)} className="text-[#c6a79a] text-lg" aria-label="Eliminar gasto">✕</button></div></div>);})}
           {confirmDel&&<div className="mt-3 bg-[rgba(255,239,236,0.95)] rounded-2xl p-3 flex items-center justify-between gap-3">
             <span className="text-xs text-[#a33f26]">Eliminar "{confirmDel.descripcion}" ({fmt(confirmDel.monto)})?</span>
@@ -2830,8 +2846,12 @@ function GastosPage({state,onRegistrar,onEliminar}){
               <button onClick={()=>{onEliminar(confirmDel.id);setConfirmDel(null);}} className="text-xs font-bold text-[#9f331c] bg-[rgba(255,219,212,0.95)] px-3 py-1 rounded-xl">Eliminar</button>
             </div></div>}
           <div className="divider-warm mt-4"/>
-          <div className="pt-3 flex justify-between">
+          <div className="pt-3 space-y-1">
+            <div className="flex justify-between text-xs"><span className="text-[#80665a]">Impacta caja</span><span className="font-bold text-[#2f1d17]">{fmt(totalGEfectivo)}</span></div>
+            {totalGOtro>0&&<div className="flex justify-between text-xs"><span className="text-[#80665a]">Otro medio</span><span className="font-bold text-[#2f1d17]">{fmt(totalGOtro)}</span></div>}
+            <div className="flex justify-between">
             <span className="font-bold text-sm text-[#5e483d]">Total</span><span className="font-black text-[#b24518]">{fmt(totalG)}</span></div>
+          </div>
         </div>)}
       </div>{/* close md:grid */}
 
@@ -2850,7 +2870,44 @@ function GastosPage({state,onRegistrar,onEliminar}){
           </div>
         </div>)}
       </Modal>
+      <EditarGastoModal open={!!editGasto} gasto={editGasto} cats={catsUsadas}
+        onClose={()=>setEditGasto(null)}
+        onGuardar={cambios=>{onActualizar(editGasto.id,cambios);setEditGasto(null);}}/>
     </div></div>);
+}
+
+function EditarGastoModal({open,gasto,cats,onClose,onGuardar}){
+  const [categoria,setCategoria]=useState(gasto?.categoria||'ingredientes');
+  const [descripcion,setDescripcion]=useState(gasto?.descripcion||'');
+  const [monto,setMonto]=useState(gasto?.monto||'');
+  const [enEfectivo,setEnEfectivo]=useState(gasto?.enEfectivo!==false);
+  useEffect(()=>{
+    if(!open||!gasto)return;
+    setCategoria(gasto.categoria);
+    setDescripcion(gasto.descripcion||'');
+    setMonto(gasto.monto||'');
+    setEnEfectivo(gasto.enEfectivo!==false);
+  },[open,gasto]);
+  if(!gasto)return null;
+  return(<Modal open={open} onClose={onClose} title="✏️ Editar gasto">
+    <div className="space-y-4">
+      <div>
+        <p className="text-xs font-bold text-[#86695c] mb-2 uppercase tracking-[0.22em]">Categoria</p>
+        <div className="flex gap-2 overflow-x-auto pb-1">{cats.map(c=>(
+          <button key={c.id} onClick={()=>setCategoria(c.id)}
+            className={`flex-shrink-0 flex items-center gap-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold border
+              ${categoria===c.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.92)] text-[#6e5548]'}`}>{c.emoji} {c.label}</button>))}</div>
+      </div>
+      <Input label="Descripcion" value={descripcion} onChange={setDescripcion}/>
+      <Input label="Monto" type="number" value={monto} onChange={setMonto} prefix="$"/>
+      <div className="flex items-center justify-between rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.9)] px-4 py-3">
+        <span className="text-sm text-[#5d463b] font-medium">{enEfectivo?'💵 Sale de caja':'📱 No sale de caja'}</span>
+        <button onClick={()=>setEnEfectivo(!enEfectivo)} className={`w-12 h-6 rounded-full transition-colors ${enEfectivo?'bg-green-500':'bg-[#d8c6bd]'} relative`}>
+          <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${enEfectivo?'right-0.5':'left-0.5'}`}/></button>
+      </div>
+      <Btn full color="green" disabled={!descripcion||!monto} onClick={()=>onGuardar({categoria,descripcion,monto:Number(monto),enEfectivo})}>Guardar gasto</Btn>
+    </div>
+  </Modal>);
 }
 
 // ─── REPORTES ───────────────────────────────────────────────────────
@@ -3602,7 +3659,7 @@ function App(){
   const [page,_setPage]=useState('dashboard');
   const setPage=useCallback(p=>{_setPage(p);window.scrollTo(0,0);},[]);
   const {state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
-    registrarGasto,eliminarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
+    registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
   const hasJornada=!!state.jornadaActiva;
@@ -3640,7 +3697,8 @@ function App(){
         else if(c.items||c.tipoEntrega||c.metodoPago)showToast('✏️ Pedido editado','orange');}}/>}
     {page==='gastos'&&<GastosPage state={state}
       onRegistrar={(c,d,m,e)=>{registrarGasto(c,d,m,e);showToast('💸 Gasto registrado','orange');}}
-      onEliminar={eliminarGasto}/>}
+      onEliminar={eliminarGasto}
+      onActualizar={(id,c)=>{actualizarGasto(id,c);showToast('✏️ Gasto actualizado','orange');}}/>}
     {page==='reportes'&&<ReportesPage state={state}/>}
     {page==='admin'&&<AdminPage state={state} onAgregarProducto={d=>{agregarProducto(d);showToast('✅ Producto agregado');}} onActualizarProducto={actualizarProducto}
       onActualizarGastoFijo={actualizarGastoFijo} onAgregarGastoFijo={n=>{agregarGastoFijo(n);showToast('✅ Gasto fijo agregado');}}
