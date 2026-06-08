@@ -394,7 +394,7 @@ function _calcEsperadoCaja(jornada){
   // por lo que siempre refleja el metodo/monto final, no el primer guardado.
   // El efectivo de envios esta fisicamente en el cajon, por eso se incluye.
   const d=buildCierreDesglose(jornada);
-  return Number(jornada?.fondoInicial||0)+d.totals.productosEfectivo+d.totals.enviosEfectivo-_gastosEfectivo(jornada);
+  return Number(jornada?.fondoInicial||0)+d.totals.cobrosEfectivo-_gastosEfectivo(jornada);
 }
 function _auditHistoricalState(state){
   const jornadas=[...(state?.jornadas||[]),state?.jornadaActiva].filter(Boolean);
@@ -653,6 +653,40 @@ function calcVentaCobrada(v){
   // Solo productos del negocio — nunca incluye costoEnvio
   return Number(v?.total??0);
 }
+function _roundMoney(n){
+  return Math.round((Number(n)||0)*100)/100;
+}
+function sumPagos(pagos){
+  return _roundMoney((Number(pagos?.efectivo)||0)+(Number(pagos?.transferencia)||0));
+}
+function normalizePagos(pagos,total,metodoFallback){
+  const monto=_roundMoney(total);
+  if(pagos&&typeof pagos==='object'){
+    return {
+      efectivo:_roundMoney(pagos.efectivo),
+      transferencia:_roundMoney(pagos.transferencia)
+    };
+  }
+  const metodo=metodoFallback==='transferencia'?'transferencia':'efectivo';
+  return {
+    efectivo:metodo==='efectivo'?monto:0,
+    transferencia:metodo==='transferencia'?monto:0
+  };
+}
+function metodoFromPagos(pagos,metodoFallback){
+  const ef=Number(pagos?.efectivo)||0;
+  const tr=Number(pagos?.transferencia)||0;
+  if(ef>0&&tr>0)return'mixto';
+  if(tr>0)return'transferencia';
+  if(ef>0)return'efectivo';
+  return metodoFallback||null;
+}
+function pagoLabel(metodo){
+  return metodo==='mixto'?'💵📱':metodo==='transferencia'?'📱':metodo==='efectivo'?'💵':'—';
+}
+function pagoBadgeColor(metodo){
+  return metodo==='mixto'?'purple':metodo==='transferencia'?'blue':'green';
+}
 function ventasActivas(ventas=[]){
   return ventas.filter(v=>!v.anulada);
 }
@@ -706,9 +740,10 @@ function _reconcileVentasFromPedidos(j){
     const idx=ventas.findIndex(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
     if(idx<0)return;
     const v=ventas[idx];
-    const metodoFinal=p.metodoPago||v.metodoPago||null;
-    const want={total:Number(p.totalProductos)||0,totalCobrado:Number(p.total)||0,costoEnvio:Number(p.costoEnvio)||0,metodoPago:metodoFinal};
-    if(v.total!==want.total||v.totalCobrado!==want.totalCobrado||v.costoEnvio!==want.costoEnvio||v.metodoPago!==want.metodoPago){
+    const pagosFinal=normalizePagos(p.pagos||v.pagos,Number(p.total)||0,p.metodoPago||v.metodoPago);
+    const metodoFinal=metodoFromPagos(pagosFinal,p.metodoPago||v.metodoPago||null);
+    const want={total:Number(p.totalProductos)||0,totalCobrado:Number(p.total)||0,costoEnvio:Number(p.costoEnvio)||0,metodoPago:metodoFinal,pagos:pagosFinal};
+    if(v.total!==want.total||v.totalCobrado!==want.totalCobrado||v.costoEnvio!==want.costoEnvio||v.metodoPago!==want.metodoPago||JSON.stringify(v.pagos||null)!==JSON.stringify(want.pagos)){
       ventas[idx]={...v,...want,items:p.items};changed=true;
     }
     // El envio (mandadito) de un pedido cobrado queda cobrado con el mismo metodo.
@@ -999,10 +1034,14 @@ function useStore(){
       if(ventaOrig){
         const reversaExistente=ja.ventas.find(v=>v.pedidoId===pedidoId&&v.esReversa&&v.ventaOrigId===ventaOrig.id);
         if(reversaExistente){
-          ja.ventas=ja.ventas.map(v=>v.id===reversaExistente.id?{...v,anulada:false,total:-ventaOrig.total,totalCobrado:-ventaOrig.totalCobrado,costoEnvio:-(ventaOrig.costoEnvio||0),_ts:new Date().toISOString()}:v);
+          const pagosOrig=normalizePagos(ventaOrig.pagos,Number(ventaOrig.totalCobrado)||((Number(ventaOrig.total)||0)+(Number(ventaOrig.costoEnvio)||0)),ventaOrig.metodoPago);
+          const reversaPagos={efectivo:-pagosOrig.efectivo,transferencia:-pagosOrig.transferencia};
+          ja.ventas=ja.ventas.map(v=>v.id===reversaExistente.id?{...v,anulada:false,total:-ventaOrig.total,totalCobrado:-ventaOrig.totalCobrado,costoEnvio:-(ventaOrig.costoEnvio||0),pagos:reversaPagos,_ts:new Date().toISOString()}:v);
         }else{
+          const pagosOrig=normalizePagos(ventaOrig.pagos,Number(ventaOrig.totalCobrado)||((Number(ventaOrig.total)||0)+(Number(ventaOrig.costoEnvio)||0)),ventaOrig.metodoPago);
+          const reversaPagos={efectivo:-pagosOrig.efectivo,transferencia:-pagosOrig.transferencia};
           const reversa={id:uid(),hora:now(),_ts:new Date().toISOString(),items:[],total:-ventaOrig.total,totalCobrado:-ventaOrig.totalCobrado,
-            costoEnvio:-(ventaOrig.costoEnvio||0),metodoPago:ventaOrig.metodoPago,pedidoId,esReversa:true,ventaOrigId:ventaOrig.id};
+            costoEnvio:-(ventaOrig.costoEnvio||0),metodoPago:ventaOrig.metodoPago,pagos:reversaPagos,pedidoId,esReversa:true,ventaOrigId:ventaOrig.id};
           ja.ventas=[...ja.ventas,reversa];
         }
       }
@@ -1028,13 +1067,15 @@ function useStore(){
     const pedFinal=ja.pedidos.find(p=>p.id===pedidoId);
     if(pedFinal&&pedFinal.cobrado&&pedFinal.estado!=='cancelado'){
       const idxOrig=ja.ventas.findIndex(v=>v.pedidoId===pedidoId&&!v.esReversa&&!v.anulada);
-      const metodoFinal=pedFinal.metodoPago||(idxOrig>=0?ja.ventas[idxOrig].metodoPago:null);
+      const pagosFinal=normalizePagos(pedFinal.pagos||(idxOrig>=0?ja.ventas[idxOrig].pagos:null),Number(pedFinal.total)||0,pedFinal.metodoPago||(idxOrig>=0?ja.ventas[idxOrig].metodoPago:null));
+      const metodoFinal=metodoFromPagos(pagosFinal,pedFinal.metodoPago||(idxOrig>=0?ja.ventas[idxOrig].metodoPago:null));
       const ventaFinal={
         items:pedFinal.items,
         total:Number(pedFinal.totalProductos)||0,
         totalCobrado:Number(pedFinal.total)||0,
         costoEnvio:Number(pedFinal.costoEnvio)||0,
-        metodoPago:metodoFinal
+        metodoPago:metodoFinal,
+        pagos:pagosFinal
       };
       if(idxOrig>=0){
         ja.ventas=ja.ventas.map((v,i)=>i===idxOrig?{...v,...ventaFinal}:v);
@@ -1691,15 +1732,18 @@ function buildCierreDesglose(jornada){
     const cancelado=p.estado==='cancelado';
     const cobrado=!!p.cobrado&&!cancelado;
     const ventaOrig=ventas.find(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
-    const metodo=p.metodoPago||ventaOrig?.metodoPago||null;
     const tieneEnvio=(p.tipoEntrega&&p.tipoEntrega!=='recoger')||((Number(p.costoEnvio)||0)>0);
     const envio=(cobrado&&tieneEnvio)?(Number(p.costoEnvio)||0):0;
     const productos=Number(p.totalProductos)||0;
+    const total=productos+envio;
+    const pagos=cobrado?normalizePagos(p.pagos||ventaOrig?.pagos,total,p.metodoPago||ventaOrig?.metodoPago):{efectivo:0,transferencia:0};
+    const metodo=metodoFromPagos(pagos,p.metodoPago||ventaOrig?.metodoPago||null);
     return {
       folio:p.numero, cliente:p.cliente||'', tipoEntrega:p.tipoEntrega||'recoger',
       estado:cancelado?'cancelado':(cobrado?'cobrado':(p.estado||'nuevo')),
       cobrado, cancelado, metodo, envioMetodo:metodo,
-      productos, envio, total:productos+envio,
+      productos, envio, total, pagos,
+      pagoEfectivo:pagos.efectivo, pagoTransferencia:pagos.transferencia,
       cuentaCaja:cobrado, // solo los cobrados-no-cancelados suman a caja
     };
   });
@@ -1707,15 +1751,20 @@ function buildCierreDesglose(jornada){
   const totals={
     productosEfectivo: sum(r=>r.cuentaCaja&&r.metodo==='efectivo','productos'),
     productosTransfer: sum(r=>r.cuentaCaja&&r.metodo==='transferencia','productos'),
+    productosMixto:    sum(r=>r.cuentaCaja&&r.metodo==='mixto','productos'),
     productos:         sum(r=>r.cuentaCaja,'productos'),
+    servicios:         sum(r=>r.cuentaCaja,'total'),
+    cobrosEfectivo:    sum(r=>r.cuentaCaja,'pagoEfectivo'),
+    cobrosTransfer:    sum(r=>r.cuentaCaja,'pagoTransferencia'),
     enviosEfectivo:    sum(r=>r.envioMetodo==='efectivo','envio'),
     enviosTransfer:    sum(r=>r.envioMetodo==='transferencia','envio'),
+    enviosMixto:       sum(r=>r.envioMetodo==='mixto','envio'),
     envios:            sum(()=>true,'envio'),
     canceladas:        rows.filter(r=>r.cancelado).map(r=>r.folio),
     countCobrados:     rows.filter(r=>r.cuentaCaja).length,
   };
-  totals.transferenciaTotal=totals.productosTransfer+totals.enviosTransfer;
-  totals.efectivoIngresos=totals.productosEfectivo+totals.enviosEfectivo;
+  totals.transferenciaTotal=totals.cobrosTransfer;
+  totals.efectivoIngresos=totals.cobrosEfectivo;
   return {rows,totals};
 }
 
@@ -1724,18 +1773,22 @@ function _buildCierreText(jornada){
   const desg=buildCierreDesglose(jornada);
   const vEf=desg.totals.productosEfectivo;
   const vTr=desg.totals.productosTransfer;
+  const vMx=desg.totals.productosMixto;
   const totalV=desg.totals.productos;
   const totalG=calcGastosTotal(jornada.gastos);
   const enviosEf=desg.totals.enviosEfectivo;
   const enviosTr=desg.totals.enviosTransfer;
+  const enviosMx=desg.totals.enviosMixto;
   const enviosCobrados=desg.totals.envios;
   const esperado=_calcEsperadoCaja(jornada);
   const transferenciaTotal=desg.totals.transferenciaTotal;
+  const efectivoIngresos=desg.totals.efectivoIngresos;
+  const totalServicios=desg.totals.servicios;
   const dineroTotal=esperado+transferenciaTotal;
   const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
   const pedidosCan=desg.totals.canceladas.length;
   const util=totalV-totalG;
-  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':'--';
+  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':m==='mixto'?'MX':'--';
   let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
   t+=`    CORTE DE CAJA\n${sep}\n`;
   t+=`  Fecha:    ${jornada.fecha}\n`;
@@ -1761,14 +1814,21 @@ function _buildCierreText(jornada){
   t+=`  VENTAS DE PRODUCTOS\n`;
   t+=`  Efectivo:         ${fmt(vEf).padStart(10)}\n`;
   t+=`  Transferencia:    ${fmt(vTr).padStart(10)}\n`;
+  if(vMx>0)t+=`  Pago mixto:       ${fmt(vMx).padStart(10)}\n`;
   t+=`  Total productos:  ${fmt(totalV).padStart(10)}\n`;
   if(enviosCobrados>0){
     t+=sep+'\n';
     t+=`  ENVIOS / MANDADITOS\n`;
     t+=`  Efectivo:         ${fmt(enviosEf).padStart(10)}\n`;
     t+=`  Transferencia:    ${fmt(enviosTr).padStart(10)}\n`;
+    if(enviosMx>0)t+=`  Pago mixto:       ${fmt(enviosMx).padStart(10)}\n`;
     t+=`  Total envios:     ${fmt(enviosCobrados).padStart(10)}\n`;
   }
+  t+=sep+'\n';
+  t+=`  TOTAL TICKETS/SERVICIOS\n`;
+  t+=`  Efectivo real:    ${fmt(efectivoIngresos).padStart(10)}\n`;
+  t+=`  Transfer real:    ${fmt(transferenciaTotal).padStart(10)}\n`;
+  t+=`  Total cobrado:    ${fmt(totalServicios).padStart(10)}\n`;
   t+=sep+'\n';
   t+=`  GASTOS\n`;
   t+=`  Gastos efectivo:  ${fmt(_gastosEfectivo(jornada)).padStart(10)}\n`;
@@ -1800,19 +1860,23 @@ function buildCierreHTML(jornada){
   const desg=buildCierreDesglose(jornada);
   const vEf=desg.totals.productosEfectivo;
   const vTr=desg.totals.productosTransfer;
+  const vMx=desg.totals.productosMixto;
   const totalV=desg.totals.productos;
   const totalG=calcGastosTotal(jornada.gastos);
   const gEf=_gastosEfectivo(jornada);
   const enviosEf=desg.totals.enviosEfectivo;
   const enviosTr=desg.totals.enviosTransfer;
+  const enviosMx=desg.totals.enviosMixto;
   const enviosCobrados=desg.totals.envios;
   const esperado=_calcEsperadoCaja(jornada);
   const transferenciaTotal=desg.totals.transferenciaTotal;
+  const efectivoIngresos=desg.totals.efectivoIngresos;
+  const totalServicios=desg.totals.servicios;
   const dineroTotal=esperado+transferenciaTotal;
   const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
   const util=totalV-totalG;
   const dif=jornada.totalEfectivo!=null?(jornada.totalEfectivo-esperado):null;
-  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':'--';
+  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':m==='mixto'?'MX':'--';
   let h=`<html><head><title>Corte</title><style>
     *{margin:0;padding:0}body{font-family:monospace;font-size:12px;width:80mm;padding:5mm}
     .c{text-align:center}.b{font-weight:bold}.s{border-top:1px dashed #000;margin:4px 0}
@@ -1843,14 +1907,21 @@ function buildCierreHTML(jornada){
   h+=`<div class="c b" style="margin:2px 0">VENTAS DE PRODUCTOS</div>`;
   h+=`<div class="r"><span>Efectivo</span><span>${fmt(vEf)}</span></div>`;
   h+=`<div class="r"><span>Transferencia</span><span>${fmt(vTr)}</span></div>`;
+  if(vMx>0)h+=`<div class="r"><span>Pago mixto</span><span>${fmt(vMx)}</span></div>`;
   h+=`<div class="r b"><span>Total productos</span><span>${fmt(totalV)}</span></div>`;
   if(enviosCobrados>0){
     h+=`<div class="s"></div>`;
     h+=`<div class="c b" style="margin:2px 0;color:#7c3aed">ENVIOS / MANDADITOS</div>`;
     h+=`<div class="r"><span>Efectivo</span><span>${fmt(enviosEf)}</span></div>`;
     h+=`<div class="r"><span>Transferencia</span><span>${fmt(enviosTr)}</span></div>`;
+    if(enviosMx>0)h+=`<div class="r"><span>Pago mixto</span><span>${fmt(enviosMx)}</span></div>`;
     h+=`<div class="r b" style="color:#7c3aed"><span>Total envios</span><span>${fmt(enviosCobrados)}</span></div>`;
   }
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">TOTAL TICKETS/SERVICIOS</div>`;
+  h+=`<div class="r"><span>Efectivo real</span><span>${fmt(efectivoIngresos)}</span></div>`;
+  h+=`<div class="r"><span>Transfer real</span><span>${fmt(transferenciaTotal)}</span></div>`;
+  h+=`<div class="r b"><span>Total cobrado</span><span>${fmt(totalServicios)}</span></div>`;
   h+=`<div class="s"></div>`;
   h+=`<div class="c b" style="margin:2px 0">GASTOS</div>`;
   h+=`<div class="r"><span>En efectivo</span><span>${fmt(gEf)}</span></div>`;
@@ -1975,6 +2046,7 @@ function Btn(props){
     red:{solid:'bg-[linear-gradient(135deg,#c84b2a,#d86a38)] text-white shadow-[0_12px_28px_rgba(202,77,44,.18)]'},
     gray:{solid:'bg-[rgba(121,87,67,.08)] text-[var(--text)] border border-[rgba(121,87,67,.12)]'},
     blue:{solid:'bg-[linear-gradient(135deg,#4876a8,#6b95c2)] text-white shadow-[0_12px_28px_rgba(72,118,168,.18)]'},
+    purple:{solid:'bg-[linear-gradient(135deg,#7040a0,#9b6bd3)] text-white shadow-[0_12px_28px_rgba(112,64,160,.18)]'},
     orange_o:'border border-[rgba(215,101,22,.24)] text-[var(--brand-strong)] bg-[rgba(242,191,90,.12)]',
     red_o:'border border-[rgba(202,77,44,.24)] text-[var(--danger)] bg-[rgba(202,77,44,.08)]',
     green_o:'border border-[rgba(45,139,87,.24)] text-[var(--success)] bg-[rgba(45,139,87,.08)]'
@@ -2068,15 +2140,19 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
   const totalG=calcGastosTotal(jornada.gastos);
   const vEf=desg.totals.productosEfectivo;
   const vTr=desg.totals.productosTransfer;
+  const vMx=desg.totals.productosMixto;
   const totalV=desg.totals.productos;
   const util=totalV-totalG;
   const enviosEf=desg.totals.enviosEfectivo;
   const enviosTr=desg.totals.enviosTransfer;
+  const enviosMx=desg.totals.enviosMixto;
   const enviosCobrados=desg.totals.envios;
   const esperado=_calcEsperadoCaja(jornada);const dif=(Number(efectivo)||0)-esperado;
   const transferenciaTotal=desg.totals.transferenciaTotal;
+  const efectivoIngresos=desg.totals.efectivoIngresos;
+  const totalServicios=desg.totals.servicios;
   const dineroTotal=esperado+transferenciaTotal;
-  const metAbbr=m=>m==='efectivo'?'💵':m==='transferencia'?'📱':'—';
+  const metAbbr=m=>pagoLabel(m);
   const pedidosRecoger=(jornada.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
   const pedidosEnvio=(jornada.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
   return(<Modal open={open} onClose={onClose} title="🔴 Corte de Caja">
@@ -2100,8 +2176,9 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
           </React.Fragment>))}
         </div>
         <div className="border-t mt-2 pt-2 grid grid-cols-2 gap-1 text-[12px]">
-          <span className="text-gray-500">💵 Suma efectivo (prod+env)</span><span className="text-right font-bold">{fmt(desg.totals.efectivoIngresos)}</span>
-          <span className="text-gray-500">📱 Suma transferencia (prod+env)</span><span className="text-right font-bold">{fmt(transferenciaTotal)}</span>
+          <span className="text-gray-500">💵 Efectivo real cobrado</span><span className="text-right font-bold">{fmt(efectivoIngresos)}</span>
+          <span className="text-gray-500">📱 Transferencia real cobrada</span><span className="text-right font-bold">{fmt(transferenciaTotal)}</span>
+          <span className="text-gray-500">🧾 Total tickets/servicios</span><span className="text-right font-black">{fmt(totalServicios)}</span>
         </div>
       </div>
       <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
@@ -2109,6 +2186,7 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
         <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas de productos</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Productos en efectivo</span><span>{fmt(vEf)}</span></div>
         <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Productos por transferencia</span><span>{fmt(vTr)}</span></div>
+        {vMx>0&&<div className="flex justify-between text-sm"><span className="text-gray-500">  💵📱 Productos con pago mixto</span><span>{fmt(vMx)}</span></div>}
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm"><span className="text-gray-500">💸 Total Gastos</span><span className="font-bold text-red-500">{fmt(totalG)}</span></div>
         <div className="flex justify-between text-sm font-bold"><span>Utilidad bruta (solo productos)</span><span className={util>=0?'text-green-600':'text-red-500'}>{fmt(util)}</span></div>
@@ -2120,12 +2198,13 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
           <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Envíos cobrados ({pedidosEnvio})</span><span className="font-bold text-purple-600">{fmt(enviosCobrados)}</span></div>
           <div className="flex justify-between text-xs text-gray-500"><span>  💵 Envíos en efectivo</span><span>{fmt(enviosEf)}</span></div>
           <div className="flex justify-between text-xs text-gray-500"><span>  📱 Envíos por transferencia</span><span>{fmt(enviosTr)}</span></div>
+          {enviosMx>0&&<div className="flex justify-between text-xs text-gray-500"><span>  💵📱 Envíos con pago mixto</span><span>{fmt(enviosMx)}</span></div>}
         </React.Fragment>}
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm font-bold"><span className="text-gray-600">💵 Caja esperada (efectivo)</span><span>{fmt(esperado)}</span></div>
-        <div className="text-[11px] text-gray-400 -mt-1">Fondo + productos efectivo + envíos efectivo − gastos efectivo</div>
+        <div className="text-[11px] text-gray-400 -mt-1">Fondo + efectivo real cobrado − gastos efectivo</div>
         <div className="flex justify-between text-sm font-bold"><span className="text-gray-600">📱 Transferencias recibidas</span><span className="text-blue-700">{fmt(transferenciaTotal)}</span></div>
-        {(vTr>0||enviosTr>0)&&<div className="text-[11px] text-gray-400 -mt-1">Productos {fmt(vTr)} + envíos {fmt(enviosTr)}</div>}
+        {transferenciaTotal>0&&<div className="text-[11px] text-gray-400 -mt-1">Transferencia capturada en pedidos: {fmt(transferenciaTotal)}</div>}
         <div className="border-t my-2"/>
         <div className="flex justify-between text-sm font-black"><span>Dinero total del día</span><span>{fmt(dineroTotal)}</span></div>
         <div className="flex justify-between text-xs text-gray-400"><span>🏃 Pasan a recoger</span><span>{pedidosRecoger} clientes</span></div>
@@ -2297,7 +2376,7 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
                   <p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentaCobrada(v))}</p>
                   {(v.costoEnvio||0)>0&&<p className="text-[10px] text-purple-500">+{fmt(v.costoEnvio)} envío</p>}
                 </div>
-                <Badge color={v.metodoPago==='efectivo'?'green':'blue'}>{v.metodoPago==='efectivo'?'💵':'📱'}</Badge></div>
+                <Badge color={pagoBadgeColor(v.metodoPago)}>{pagoLabel(v.metodoPago)}</Badge></div>
             </div>))}
         </div>)}
       {ultimasJ.length>0&&(
@@ -2384,7 +2463,7 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
           if(p&&state.impresora.autoImprimir)printTicket(p);
           setShowCrear(false);}}/>
       <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
-        onCobrar={metodo=>{onActualizarPedido(showCobrar.id,{cobrado:true,metodoPago:metodo,estado:'entregado'});setShowCobrar(null);}}/>
+        onCobrar={pago=>{onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
       {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos}
         onClose={()=>setShowEditar(null)}
         onGuardar={cambios=>{onActualizarPedido(showEditar.id,cambios);setShowEditar(null);}}/>}
@@ -2433,7 +2512,7 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWh
           <span className={`w-3 h-3 rounded-full ${est.dot}`}/>
           <span className="font-black text-[#251813] text-lg tracking-tight">#{String(pedido.numero).padStart(3,'0')}</span>
           <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${est.color}`}>{est.label}</span>
-          {pedido.cobrado&&<Badge color={pedido.metodoPago==='efectivo'?'green':'blue'}>{pedido.metodoPago==='efectivo'?'💵':'📱'}</Badge>}
+          {pedido.cobrado&&<Badge color={pagoBadgeColor(pedido.metodoPago)}>{pagoLabel(pedido.metodoPago)}</Badge>}
         </div>
         <p className="text-xs text-[#86695c] mt-1">{pedido.hora} · {tarifa.emoji} {tarifa.label}
           {pedido.cliente&&` · ${pedido.cliente}`}</p>
@@ -2500,6 +2579,8 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const [direccion,setDireccion]=useState(pedido.direccion||'');
   const [notas,setNotas]=useState(pedido.notas||'');
   const [metodoPago,setMetodoPago]=useState(pedido.metodoPago||'efectivo');
+  const [pagoEfectivo,setPagoEfectivo]=useState('');
+  const [pagoTransferencia,setPagoTransferencia]=useState('');
   useEffect(()=>{
     if(!open)return;
     const c={};
@@ -2509,7 +2590,11 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
     setCliente(pedido.cliente||'');
     setDireccion(pedido.direccion||'');
     setNotas(pedido.notas||'');
-    setMetodoPago(pedido.metodoPago||'efectivo');
+    const pagos=normalizePagos(pedido.pagos,Number(pedido.total)||0,pedido.metodoPago||'efectivo');
+    const metodo=metodoFromPagos(pagos,pedido.metodoPago||'efectivo');
+    setMetodoPago(metodo||'efectivo');
+    setPagoEfectivo(pagos.efectivo?String(pagos.efectivo):'');
+    setPagoTransferencia(pagos.transferencia?String(pagos.transferencia):'');
   },[open,pedido]);
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
@@ -2519,8 +2604,11 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const guardar=()=>{
     if(!items.length)return;
     const its=items.map(i=>({productoId:i.productoId||i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji}));
-    onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas,...(pedido.cobrado?{metodoPago}:{} )});
+    const pagoSimple=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
+    onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
+  const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
+  const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||sumPagos(pagoEditado)===_roundMoney(totalFinal);
   return(<Modal open={open} onClose={onClose} title={`✏️ Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
@@ -2532,28 +2620,57 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
             <p className="font-black text-sm text-[var(--text)]">Metodo de pago</p>
             <p className="text-xs text-[var(--text-soft)] mt-1">Corrige si este pedido se registro como efectivo o transferencia.</p>
           </div>
-          <Badge color={metodoPago==='efectivo'?'green':'blue'}>{metodoPago==='efectivo'?'💵 Efectivo':'📱 Transferencia'}</Badge>
+          <Badge color={pagoBadgeColor(metodoPago)}>{metodoPago==='mixto'?'💵📱 Mixto':metodoPago==='efectivo'?'💵 Efectivo':'📱 Transferencia'}</Badge>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-2">
           <button type="button" onClick={()=>setMetodoPago('efectivo')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='efectivo'?'bg-[rgba(45,139,87,.12)] border-[rgba(45,139,87,.32)] shadow-[0_10px_24px_rgba(45,139,87,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
             <div className="text-2xl mb-1">💵</div><p className="font-black text-sm text-[#2c7a54]">Efectivo</p>
           </button>
           <button type="button" onClick={()=>setMetodoPago('transferencia')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='transferencia'?'bg-[rgba(72,118,168,.12)] border-[rgba(72,118,168,.32)] shadow-[0_10px_24px_rgba(72,118,168,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
             <div className="text-2xl mb-1">📱</div><p className="font-black text-sm text-[#255a7b]">Transferencia</p>
           </button>
+          <button type="button" onClick={()=>setMetodoPago('mixto')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='mixto'?'bg-[rgba(163,99,255,.12)] border-[rgba(163,99,255,.32)] shadow-[0_10px_24px_rgba(112,64,160,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
+            <div className="text-2xl mb-1">💵📱</div><p className="font-black text-sm text-[#7040a0]">Mixto</p>
+          </button>
         </div>
+        {metodoPago==='mixto'&&<div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <Input label="Efectivo recibido" type="number" value={pagoEfectivo} onChange={setPagoEfectivo} prefix="$" placeholder="0"/>
+            <Input label="Transferencia" type="number" value={pagoTransferencia} onChange={setPagoTransferencia} prefix="$" placeholder="0"/>
+          </div>
+          <div className={`rounded-xl p-3 text-sm font-bold text-center ${pagoOk?'bg-green-50 text-green-700':'bg-red-50 text-red-600'}`}>
+            {pagoOk?`Suma correcta: ${fmt(totalFinal)}`:`Faltan o sobran ${fmt(Math.abs(totalFinal-sumPagos(pagoEditado)))}`}
+          </div>
+        </div>}
       </div>}
       <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        <Btn full color="orange" size="lg" onClick={guardar}>💾 Guardar Cambios · {fmt(totalFinal)}</Btn>
+        <Btn full color="orange" size="lg" disabled={!pagoOk} onClick={guardar}>💾 Guardar Cambios · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
 }
 
 function CobrarModal({open,pedido,onClose,onCobrar}){
+  const [modo,setModo]=useState('efectivo');
+  const [efectivo,setEfectivo]=useState('');
+  const [transferencia,setTransferencia]=useState('');
+  useEffect(()=>{
+    if(open&&pedido){
+      const pagos=normalizePagos(pedido.pagos,Number(pedido.total)||0,pedido.metodoPago||'efectivo');
+      const metodo=metodoFromPagos(pagos,pedido.metodoPago||'efectivo');
+      setModo(metodo||'efectivo');
+      setEfectivo(pagos.efectivo?String(pagos.efectivo):'');
+      setTransferencia(pagos.transferencia?String(pagos.transferencia):'');
+    }
+  },[open,pedido]);
   if(!pedido)return null;
+  const total=Number(pedido.total)||0;
+  const pagoMixto={efectivo:Number(efectivo)||0,transferencia:Number(transferencia)||0};
+  const mixtoOk=sumPagos(pagoMixto)===_roundMoney(total);
+  const cobrarSimple=metodo=>onCobrar({metodoPago:metodo,pagos:normalizePagos(null,total,metodo)});
+  const cobrarMixto=()=>{if(mixtoOk)onCobrar({metodoPago:'mixto',pagos:pagoMixto});};
   return(<Modal open={open} onClose={onClose} title={`💰 Cobrar #${String(pedido.numero).padStart(3,'0')}`}>
     <div className="space-y-4">
       <div className="brand-panel text-center">
@@ -2562,12 +2679,26 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
         {pedido.costoEnvio>0&&<p className="text-xs text-[rgba(255,244,229,0.86)] mt-2">Incluye envio: {fmt(pedido.costoEnvio)}</p>}
         {pedido.cliente&&<p className="text-xs text-[rgba(255,244,229,0.72)] mt-2">{pedido.cliente}</p>}
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <button onClick={()=>onCobrar('efectivo')} className="surface-card-strong py-5 text-center card-press">
+      <div className="grid grid-cols-3 gap-2">
+        <button onClick={()=>setModo('efectivo')} className={`${modo==='efectivo'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
           <div className="text-3xl mb-2">💵</div><p className="font-black text-[#2c7a54]">Efectivo</p><p className="text-[11px] text-[#698170] mt-1">Entra directo a caja</p></button>
-        <button onClick={()=>onCobrar('transferencia')} className="surface-card py-5 text-center card-press">
+        <button onClick={()=>setModo('transferencia')} className={`${modo==='transferencia'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
           <div className="text-3xl mb-2">📱</div><p className="font-black text-[#255a7b]">Transferencia</p><p className="text-[11px] text-[#677987] mt-1">Pago digital confirmado</p></button>
+        <button onClick={()=>setModo('mixto')} className={`${modo==='mixto'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
+          <div className="text-3xl mb-2">💵📱</div><p className="font-black text-[#7040a0]">Mixto</p><p className="text-[11px] text-[#786482] mt-1">Parte y parte</p></button>
       </div>
+      {modo==='mixto'&&<div className="surface-card space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <Input label="Efectivo recibido" type="number" value={efectivo} onChange={setEfectivo} prefix="$" placeholder="0"/>
+          <Input label="Transferencia" type="number" value={transferencia} onChange={setTransferencia} prefix="$" placeholder="0"/>
+        </div>
+        <div className={`rounded-xl p-3 text-sm font-bold text-center ${mixtoOk?'bg-green-50 text-green-700':'bg-red-50 text-red-600'}`}>
+          {mixtoOk?`Suma correcta: ${fmt(total)}`:`Faltan o sobran ${fmt(Math.abs(total-sumPagos(pagoMixto)))}`}
+        </div>
+      </div>}
+      {modo!=='mixto'
+        ? <Btn full color={modo==='efectivo'?'green':'blue'} size="lg" onClick={()=>cobrarSimple(modo)}>Cobrar {fmt(total)} · {pagoLabel(modo)}</Btn>
+        : <Btn full color="purple" size="lg" disabled={!mixtoOk} onClick={cobrarMixto}>Cobrar pago mixto</Btn>}
     </div></Modal>);
 }
 
