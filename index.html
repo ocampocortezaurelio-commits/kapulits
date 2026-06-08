@@ -1658,6 +1658,40 @@ function buildTicketHTML(pedido){
   return h;
 }
 
+function buildTicketsHTML(pedidos=[]){
+  let h=`<html><head><title>Tickets</title><style>
+    *{margin:0;padding:0}body{font-family:monospace;font-size:12px;width:80mm;padding:5mm}
+    .ticket{page-break-after:always;margin-bottom:8mm}.ticket:last-child{page-break-after:auto}
+    .c{text-align:center}.b{font-weight:bold}.s{border-top:1px dashed #000;margin:4px 0}
+    .r{display:flex;justify-content:space-between}.sm{font-size:10px;color:#555}
+    @media print{@page{size:80mm auto;margin:0}.ticket{break-after:page}}</style></head><body>`;
+  pedidos.forEach(pedido=>{
+    const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+    h+=`<section class="ticket">`;
+    h+=`<div class="c b" style="font-size:18px">K'apul'Its</div>`;
+    h+=`<div class="c sm">Birria y algo mas</div><div class="s"></div>`;
+    h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
+    h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
+    if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
+    h+=`<div>Tipo: ${tarifa.emoji} ${tarifa.label}</div>`;
+    if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>${pedido.direccion}</div>`;
+    h+=`<div class="s"></div>`;
+    pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
+    h+=`<div class="s"></div>`;
+    h+=`<div class="r"><span>Subtotal productos</span><span>${fmt(pedido.totalProductos)}</span></div>`;
+    if(pedido.costoEnvio>0)h+=`<div class="r"><span>Costo envio</span><span>${fmt(pedido.costoEnvio)}</span></div>`;
+    h+=`<div class="r b" style="font-size:14px"><span>TOTAL</span><span>${fmt(pedido.total)}</span></div>`;
+    h+=`<div class="s"></div>`;
+    if(pedido.notas){h+=`<div class="b" style="margin-top:4px">Notas:</div><div>${pedido.notas}</div><div class="s"></div>`;}
+    h+=`<div class="c sm" style="margin-top:6px">${NEGOCIO.direccion}</div>`;
+    h+=`<div class="c sm">Tel.: ${NEGOCIO.telefono}</div>`;
+    h+=`<div class="c b" style="margin-top:4px">Gracias por tu compra!</div>`;
+    h+=`</section>`;
+  });
+  h+=`</body></html>`;
+  return h;
+}
+
 function _buildBTText(pedido){
   const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
   const sep='-'.repeat(32);
@@ -1727,6 +1761,36 @@ async function printTicket(pedido){
   // Fallback: preview en-app
   if(_showTicketPreview)_showTicketPreview(pedido);
   return{success:true,method:'preview'};
+}
+
+async function printTicketsJornada(jornada){
+  const pedidos=[...(jornada?.pedidos||[])]
+    .filter(p=>p&&p.estado!=='cancelado')
+    .sort((a,b)=>(a.numero||0)-(b.numero||0));
+  if(!pedidos.length)return{success:false,error:'Sin pedidos para imprimir'};
+  const text=pedidos.map(_buildBTText).join('\n\n');
+  if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
+    await reconnectBluetooth();
+  }
+  if(printerCharacteristic){
+    try{await _sendToBT(text);return{success:true,method:'bluetooth',count:pedidos.length};}
+    catch(e){
+      printerCharacteristic=null;
+      const ok=await reconnectBluetooth();
+      if(ok){try{await _sendToBT(text);return{success:true,method:'bluetooth',count:pedidos.length};}catch(e2){}}
+    }
+  }
+  if(_usbDevice){
+    try{await _sendToUSB(text);return{success:true,method:'usb',count:pedidos.length};}
+    catch(e){_usbDevice=null;_usbEndpoint=null;}
+  }
+  if(!_usbDevice&&navigator.usb?.getDevices){
+    const ok=await tryAutoConnectUSB();
+    if(ok){try{await _sendToUSB(text);return{success:true,method:'usb',count:pedidos.length};}catch(e){}}
+  }
+  const w=window.open('','_blank','width=350,height=700');
+  if(w){w.document.write(buildTicketsHTML(pedidos));w.document.close();w.focus();w.print();}
+  return{success:true,method:'preview',count:pedidos.length};
 }
 
 // ─── CIERRE DE CAJA PRINT ───────────────────────────────────────────
@@ -2404,7 +2468,10 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
               <div className="flex items-center gap-2 shrink-0 ml-3">
                 <div className="text-right"><p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentasTotal(j.ventas))}</p>
                   <span className={`text-[12px] font-bold ${u>=0?'text-[var(--success)]':'text-[var(--danger)]'}`}>{u>=0?'+':''}{fmt(u)}</span></div>
-                {j.estado==='cerrada'&&<button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Imprimir cierre" aria-label="Imprimir cierre de caja">🖨️</button>}
+                {j.estado==='cerrada'&&<React.Fragment>
+                  <button onClick={()=>printTicketsJornada(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Reimprimir todos los tickets" aria-label="Reimprimir todos los tickets del dia">🧾</button>
+                  <button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Imprimir cierre" aria-label="Imprimir cierre de caja">🖨️</button>
+                </React.Fragment>}
               </div>
             </div>);})}</div>)}
       </div>
