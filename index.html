@@ -389,12 +389,9 @@ function _gastosEfectivo(jornada){
   return (jornada?.gastos||[]).filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+(Number(g.monto)||0),0);
 }
 function _calcEsperadoCaja(jornada){
-  // Caja esperada = fondo + efectivo de productos + efectivo de envios - gastos en efectivo.
-  // Se calcula desde el DESGLOSE (que lee del pedido = ultima edicion del operador),
-  // por lo que siempre refleja el metodo/monto final, no el primer guardado.
-  // El efectivo de envios esta fisicamente en el cajon, por eso se incluye.
-  const d=buildCierreDesglose(jornada);
-  return Number(jornada?.fondoInicial||0)+d.totals.cobrosEfectivo-_gastosEfectivo(jornada);
+  // Delega en el modelo contable unico (buildCajaModel) para que exista una
+  // sola formula de caja esperada en toda la app.
+  return buildCajaModel(jornada).cajaEsperada;
 }
 function _auditHistoricalState(state){
   const jornadas=[...(state?.jornadas||[]),state?.jornadaActiva].filter(Boolean);
@@ -960,7 +957,7 @@ function useStore(){
 
   const abrirJornada=useCallback((fondoInicial,fecha)=>{
     const j={id:uid(),fecha:fecha||today(),estado:'abierta',fondoInicial:Number(fondoInicial)||0,
-      ventas:[],gastos:[],pedidos:[],mandaditos:[],contadorPedido:1,
+      ventas:[],gastos:[],pedidos:[],mandaditos:[],ajustesCaja:[],contadorPedido:1,
       horaApertura:now(),timestampApertura:Date.now(),horaCierre:null,totalEfectivo:null,diferencia:null,observaciones:''};
     save({...state,jornadas:[...state.jornadas,j],jornadaActiva:j});
   },[state,save]);
@@ -1116,6 +1113,54 @@ function useStore(){
     save({...state,jornadas:js,jornadaActiva:ja});
   },[state,save]);
 
+  // ─── CAJA: salidas/entradas explicitas y pago a repartidor (opt-in) ───
+  // Movimiento real de caja con motivo obligatorio. tipo: 'salida' resta,
+  // 'entrada' suma. NO se usa para faltante/sobrante (eso es resultado del
+  // conteo, no una causa).
+  const registrarAjusteCaja=useCallback(({tipo,monto,motivo})=>{
+    if(!state.jornadaActiva)return;
+    const m=Number(monto)||0;
+    if(m<=0||!String(motivo||'').trim())return; // motivo obligatorio
+    const ajuste={id:uid(),hora:now(),_ts:new Date().toISOString(),tipo:tipo==='entrada'?'entrada':'salida',monto:m,motivo:String(motivo).trim()};
+    const ja={...state.jornadaActiva,ajustesCaja:[...(state.jornadaActiva.ajustesCaja||[]),ajuste]};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
+  const eliminarAjusteCaja=useCallback(ajusteId=>{
+    if(!state.jornadaActiva)return;
+    const ja={...state.jornadaActiva,ajustesCaja:(state.jornadaActiva.ajustesCaja||[]).filter(a=>a.id!==ajusteId)};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
+  // Registra el efectivo del cajon entregado al repartidor por un envio.
+  // Opt-in por mandadito; nunca automatico. monto<=0 limpia el registro.
+  const registrarPagoRepartidor=useCallback((pedidoId,monto)=>{
+    if(!state.jornadaActiva)return;
+    const m=Number(monto)||0;
+    const ja={...state.jornadaActiva,mandaditos:(state.jornadaActiva.mandaditos||[]).map(x=>
+      x.pedidoId===pedidoId?{...x,pagoRepartidorEfectivo:m>0?m:0,_ts:new Date().toISOString()}:x)};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
+  // Pago masivo: marca como pagado al repartidor (desde efectivo) TODOS los
+  // envios cobrados pendientes (tarifa>0 y sin pagoRepartidorEfectivo>0).
+  // Conserva los pagos ya registrados manualmente. Solo accion explicita del
+  // usuario; no toca pedidos/ventas/gastos/transferencias ni jornada cerrada.
+  const pagarRepartidoresPendientes=useCallback(()=>{
+    if(!state.jornadaActiva)return;
+    const stamp=new Date().toISOString();
+    const mandaditos=(state.jornadaActiva.mandaditos||[]).map(m=>{
+      const pendiente=m.cobrado&&(Number(m.tarifa)||0)>0&&!((Number(m.pagoRepartidorEfectivo)||0)>0);
+      return pendiente?{...m,pagoRepartidorEfectivo:Number(m.tarifa)||0,_ts:stamp}:m;
+    });
+    const ja={...state.jornadaActiva,mandaditos};
+    const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
+    save({...state,jornadas:js,jornadaActiva:ja});
+  },[state,save]);
+
   const agregarProducto=useCallback((datos)=>{
     const nombre=(datos.nombre||'').trim();
     if(!nombre)return;
@@ -1149,6 +1194,7 @@ function useStore(){
   const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
 
   return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+    registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
@@ -1812,10 +1858,28 @@ function buildCierreDesglose(jornada){
     const envio=(cobrado&&tieneEnvio)?(Number(p.costoEnvio)||0):0;
     const productos=Number(p.totalProductos)||0;
     const total=productos+envio;
-    const pagos=cobrado?normalizePagos(p.pagos||ventaOrig?.pagos,total,p.metodoPago||ventaOrig?.metodoPago):{efectivo:0,transferencia:0};
-    const metodo=metodoFromPagos(pagos,p.metodoPago||ventaOrig?.metodoPago||null);
+    const metodoRef=p.metodoPago||ventaOrig?.metodoPago||null;
+    let pagos=cobrado?normalizePagos(p.pagos||ventaOrig?.pagos,total,metodoRef):{efectivo:0,transferencia:0};
+    // ESTADO FINAL MANDA: si el desglose de pagos (que pudo quedar congelado en
+    // una venta legacy tras editar el pedido) no suma el total FINAL, se
+    // reconcilia. Metodo unico => todo el total al metodo final; mixto => se
+    // escala el split conservando la proporcion. La venta ledger es respaldo,
+    // nunca fuente principal.
+    if(cobrado){
+      const sumP=(Number(pagos.efectivo)||0)+(Number(pagos.transferencia)||0);
+      if(Math.abs(sumP-total)>0.5){
+        const met=metodoFromPagos(pagos,metodoRef);
+        if(met==='mixto'&&sumP>0){
+          const ef=_roundMoney(pagos.efectivo*(total/sumP));
+          pagos={efectivo:ef,transferencia:_roundMoney(total-ef)};
+        }else{
+          pagos=normalizePagos(null,total,met==='transferencia'?'transferencia':'efectivo');
+        }
+      }
+    }
+    const metodo=metodoFromPagos(pagos,metodoRef);
     return {
-      folio:p.numero, cliente:p.cliente||'', tipoEntrega:p.tipoEntrega||'recoger',
+      folio:p.numero, pedidoId:p.id, cliente:p.cliente||'', tipoEntrega:p.tipoEntrega||'recoger',
       estado:cancelado?'cancelado':(cobrado?'cobrado':(p.estado||'nuevo')),
       cobrado, cancelado, metodo, envioMetodo:metodo,
       productos, envio, total, pagos,
@@ -1844,39 +1908,159 @@ function buildCierreDesglose(jornada){
   return {rows,totals};
 }
 
+// ─── MODELO CONTABLE UNICO DEL CIERRE ───────────────────────────────
+// buildCajaModel es la UNICA fuente de verdad del corte: modal, ticket
+// impreso, preview y resumenes consumen este objeto. No duplicar formulas
+// en componentes. Es puro: no muta jornada ni datos.
+//
+// Conceptos clave para no confundir cifras:
+//  - "real": dinero que efectivamente entro (cobrosEfectivo/Transferencia).
+//    Incluye el envio cobrado, porque el envio es dinero fisico del cajon.
+//  - "productos": ingreso por platillos (utilidad), NO es caja fisica.
+//  - "esperada": lo que DEBE haber en caja/banco segun los cobros.
+// Por eso las etiquetas "real" viven SOLO en el bloque de cobros, y la
+// transferencia aparece como "real" (cobros) y como "esperada" (banco),
+// nunca con tres nombres ambiguos.
+function buildCajaModel(jornada){
+  const j=jornada||{};
+  const desg=buildCierreDesglose(j);
+  const t=desg.totals;
+  const num=n=>Number(n)||0;
+  // Gastos: caja fisica solo descuenta los pagados en efectivo (enEfectivo!==false).
+  const gastos=j.gastos||[];
+  const gastosTotal=gastos.reduce((s,g)=>s+num(g.monto),0);
+  const gastosCaja=gastos.filter(g=>g.enEfectivo!==false).reduce((s,g)=>s+num(g.monto),0);
+  const gastosOtroMedio=_roundMoney(gastosTotal-gastosCaja);
+  // Cobros reales (unico bloque que usa "real").
+  const cobrosEfectivo=t.cobrosEfectivo;
+  const cobrosTransferencia=t.cobrosTransfer;
+  const cobrosTotal=_roundMoney(cobrosEfectivo+cobrosTransferencia);
+  // Operativo.
+  const productosTotal=t.productos;
+  const enviosTotal=t.envios;
+  const countCobrados=t.countCobrados;
+  const countCancelados=t.canceladas.length;
+  const countPendientes=desg.rows.filter(r=>!r.cobrado&&!r.cancelado).length;
+  // Salidas de efectivo OPT-IN que reducen la caja fisica:
+  //  - mandaditosPagadosEfectivo: efectivo del cajon entregado al repartidor.
+  //    Solo cuenta lo que el operador registro en cada envio (nunca automatico).
+  //  - salidasCaja / entradasCaja: movimientos reales de caja registrados
+  //    explicitamente (con motivo). NO incluye faltante/sobrante: esos son el
+  //    RESULTADO del conteo (diferencia), nunca una causa que fuerce el cuadre.
+  const mandaditos=j.mandaditos||[];
+  const mandaditosPagadosEfectivo=mandaditos.reduce((s,m)=>s+num(m.pagoRepartidorEfectivo),0);
+  const ajustes=j.ajustesCaja||[];
+  const salidasCaja=ajustes.filter(a=>a.tipo==='salida').reduce((s,a)=>s+num(a.monto),0);
+  const entradasCaja=ajustes.filter(a=>a.tipo==='entrada').reduce((s,a)=>s+num(a.monto),0);
+  // Conciliacion de caja fisica.
+  const fondoInicial=num(j.fondoInicial);
+  const cajaEsperada=_roundMoney(fondoInicial+cobrosEfectivo-gastosCaja-mandaditosPagadosEfectivo-salidasCaja+entradasCaja);
+  const transferenciaEsperada=cobrosTransferencia;
+  const dineroOperado=_roundMoney(cajaEsperada+transferenciaEsperada);
+  const efectivoContado=j.totalEfectivo!=null?num(j.totalEfectivo):null;
+  const diferencia=efectivoContado!=null?_roundMoney(efectivoContado-cajaEsperada):null;
+  // Utilidad del negocio (productos menos todos los gastos).
+  const utilidadBrutaProductos=_roundMoney(productosTotal-gastosTotal);
+  const warnings=_validarCaja(j,desg,gastos);
+  return {
+    rows:desg.rows,
+    // A. cobros reales
+    cobrosEfectivo, cobrosTransferencia, cobrosTotal,
+    // B. operativo
+    productosTotal, enviosTotal,
+    productosEfectivo:t.productosEfectivo, productosTransfer:t.productosTransfer, productosMixto:t.productosMixto,
+    enviosEfectivo:t.enviosEfectivo, enviosTransfer:t.enviosTransfer, enviosMixto:t.enviosMixto,
+    countCobrados, countPendientes, countCancelados, canceladas:t.canceladas,
+    // C. gastos
+    gastosTotal, gastosCaja, gastosOtroMedio,
+    // D. caja fisica
+    fondoInicial, cajaEsperada, transferenciaEsperada, dineroOperado, efectivoContado, diferencia,
+    mandaditosPagadosEfectivo, salidasCaja, entradasCaja, ajustes,
+    // E. utilidad
+    utilidadBrutaProductos,
+    // auditoria
+    warnings,
+  };
+}
+
+// Auditoria de integridad del cierre. NO modifica datos: solo reporta
+// advertencias visibles y por console.warn. Tolerancia de 0.5 por redondeos.
+function _validarCaja(jornada,desg,gastos){
+  const w=[];
+  const TOL=0.5;
+  const num=n=>Number(n)||0;
+  const pedidos=jornada?.pedidos||[];
+  const ventas=jornada?.ventas||[];
+  const mandaditos=jornada?.mandaditos||[];
+  pedidos.forEach(p=>{
+    if(!p||p.estado==='cancelado')return;
+    const compTotal=num(p.totalProductos)+num(p.costoEnvio);
+    if(p.total!=null&&Math.abs(num(p.total)-compTotal)>TOL){
+      w.push({code:'total_descuadrado',folio:p.numero,detail:`total ${fmt(p.total)} ≠ productos ${fmt(p.totalProductos)} + envío ${fmt(p.costoEnvio)}`});
+    }
+    if(!p.cobrado)return;
+    const vs=ventas.filter(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
+    const ventaOrig=vs[0]||null;
+    const pagosRaw=p.pagos||ventaOrig?.pagos||null;
+    const pagos=normalizePagos(pagosRaw,compTotal,p.metodoPago||ventaOrig?.metodoPago);
+    const sumPg=num(pagos.efectivo)+num(pagos.transferencia);
+    if(p.pagos&&Math.abs(sumPg-compTotal)>TOL){
+      w.push({code:'pago_no_cuadra',folio:p.numero,detail:`pagos ${fmt(sumPg)} ≠ total ${fmt(compTotal)}`});
+    }
+    if(vs.length>1)w.push({code:'venta_original_duplicada',folio:p.numero,detail:`${vs.length} ventas originales activas`});
+    if(ventaOrig&&Math.abs(num(ventaOrig.total)-num(p.totalProductos))>TOL){
+      w.push({code:'venta_no_coincide',folio:p.numero,detail:`venta ${fmt(ventaOrig.total)} ≠ productos del pedido ${fmt(p.totalProductos)}`});
+    }
+    const tieneEnvio=(p.tipoEntrega&&p.tipoEntrega!=='recoger')||(num(p.costoEnvio)>0);
+    if(tieneEnvio){
+      const m=mandaditos.find(x=>x.pedidoId===p.id);
+      if(m&&Math.abs(num(m.tarifa)-num(p.costoEnvio))>TOL){
+        w.push({code:'envio_no_coincide',folio:p.numero,detail:`envío ${fmt(m.tarifa)} ≠ pedido ${fmt(p.costoEnvio)}`});
+      }
+    }
+  });
+  const byOrig=new Map();
+  ventas.filter(v=>v.esReversa&&!v.anulada&&v.ventaOrigId).forEach(v=>byOrig.set(v.ventaOrigId,(byOrig.get(v.ventaOrigId)||0)+1));
+  for(const [oid,c] of byOrig){if(c>1)w.push({code:'reversa_duplicada',detail:`${c} reversas activas para venta ${oid}`});}
+  (gastos||[]).forEach((g,i)=>{const m=Number(g.monto);if(!(m>0))w.push({code:'gasto_invalido',detail:`gasto "${g.concepto||g.categoria||('#'+(i+1))}" sin monto válido`});});
+  // Ajustes de caja: motivo OBLIGATORIO. Una salida/entrada sin motivo no es
+  // auditable; se reporta para que el operador la complete o la elimine.
+  (jornada?.ajustesCaja||[]).forEach((a,i)=>{
+    const monto=Number(a.monto);
+    if(!(monto>0))w.push({code:'ajuste_invalido',detail:`ajuste de caja #${i+1} sin monto válido`});
+    else if(!String(a.motivo||'').trim())w.push({code:'ajuste_sin_motivo',detail:`${a.tipo==='entrada'?'entrada':'salida'} de caja ${fmt(monto)} sin motivo`});
+  });
+  if(w.length){try{console.warn('[CajaModel] advertencias de auditoría del cierre:',w);}catch(e){}}
+  return w;
+}
+
 function _buildCierreText(jornada){
   const sep='-'.repeat(32);
-  const desg=buildCierreDesglose(jornada);
-  const vEf=desg.totals.productosEfectivo;
-  const vTr=desg.totals.productosTransfer;
-  const vMx=desg.totals.productosMixto;
-  const totalV=desg.totals.productos;
-  const totalG=calcGastosTotal(jornada.gastos);
-  const enviosEf=desg.totals.enviosEfectivo;
-  const enviosTr=desg.totals.enviosTransfer;
-  const enviosMx=desg.totals.enviosMixto;
-  const enviosCobrados=desg.totals.envios;
-  const esperado=_calcEsperadoCaja(jornada);
-  const transferenciaTotal=desg.totals.transferenciaTotal;
-  const efectivoIngresos=desg.totals.efectivoIngresos;
-  const totalServicios=desg.totals.servicios;
-  const dineroTotal=esperado+transferenciaTotal;
-  const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
-  const pedidosCan=desg.totals.canceladas.length;
-  const util=totalV-totalG;
-  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':m==='mixto'?'MX':'--';
+  const m=buildCajaModel(jornada);
+  const metAbbr=x=>x==='efectivo'?'EF':x==='transferencia'?'TR':x==='mixto'?'MX':'--';
+  const L=(label,val)=>`  ${label.padEnd(18)}${fmt(val).padStart(10)}\n`;
   let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
   t+=`    CORTE DE CAJA\n${sep}\n`;
   t+=`  Fecha:    ${jornada.fecha}\n`;
   t+=`  Apertura: ${jornada.horaApertura||'--'}\n`;
   t+=`  Cierre:   ${jornada.horaCierre||'--'}\n`;
   t+=sep+'\n';
-  t+=`  Fondo inicial:    ${fmt(jornada.fondoInicial).padStart(10)}\n`;
+  // A. RESUMEN DE COBROS DEL DIA (unico bloque con etiqueta "real")
+  t+=`  A. COBROS DEL DIA\n`;
+  t+=L('Total cobrado',m.cobrosTotal);
+  t+=L('Efectivo real',m.cobrosEfectivo);
+  t+=L('Transferencia real',m.cobrosTransferencia);
   t+=sep+'\n';
-  // DESGLOSE POR PEDIDO (folio a folio, incluye cancelados)
-  t+=`  DESGLOSE POR PEDIDO\n`;
+  // B. DESGLOSE OPERATIVO
+  t+=`  B. DESGLOSE OPERATIVO\n`;
+  t+=L('Productos vendidos',m.productosTotal);
+  t+=L('Envios/servicios',m.enviosTotal);
+  t+=`  Pedidos: ${m.countCobrados} cobr`;
+  if(m.countPendientes>0)t+=` / ${m.countPendientes} pend`;
+  if(m.countCancelados>0)t+=` / ${m.countCancelados} canc`;
+  t+='\n';
   t+=`  #   Met Prod   Env   Total\n`;
-  desg.rows.forEach(r=>{
+  m.rows.forEach(r=>{
     const folio='#'+String(r.folio).padStart(3,'0');
     if(r.cancelado){
       t+=`  ${folio} CANCELADO (no suma)\n`;
@@ -1886,45 +2070,45 @@ function _buildCierreText(jornada){
       t+=`  ${folio} ${metAbbr(r.metodo).padEnd(3)} ${fmt(r.productos).padStart(6)} ${fmt(r.envio).padStart(5)} ${fmt(r.total).padStart(6)}\n`;
     }
   });
+  // Detalle secundario: productos segun tipo de pedido (NO es banco real)
+  t+=`  Productos por tipo de pedido:\n`;
+  t+=L('  pedidos efectivo',m.productosEfectivo);
+  t+=L('  pedidos transfer.',m.productosTransfer);
+  if(m.productosMixto>0)t+=L('  pedidos mixtos',m.productosMixto);
   t+=sep+'\n';
-  t+=`  VENTAS DE PRODUCTOS\n`;
-  t+=`  Efectivo:         ${fmt(vEf).padStart(10)}\n`;
-  t+=`  Transferencia:    ${fmt(vTr).padStart(10)}\n`;
-  if(vMx>0)t+=`  Pago mixto:       ${fmt(vMx).padStart(10)}\n`;
-  t+=`  Total productos:  ${fmt(totalV).padStart(10)}\n`;
-  if(enviosCobrados>0){
+  // C. GASTOS
+  t+=`  C. GASTOS\n`;
+  t+=L('Desde caja (efvo)',m.gastosCaja);
+  if(m.gastosOtroMedio>0)t+=L('Por otro medio',m.gastosOtroMedio);
+  t+=L('Total gastos',m.gastosTotal);
+  t+=sep+'\n';
+  // D. CONCILIACION DE CAJA FISICA (formula visible)
+  t+=`  D. CONCILIACION DE CAJA\n`;
+  t+=L('  Fondo inicial',m.fondoInicial);
+  t+=L('+ Efectivo real',m.cobrosEfectivo);
+  t+=L('- Gastos de caja',m.gastosCaja);
+  if(m.mandaditosPagadosEfectivo>0)t+=L('- Pago repartidor',m.mandaditosPagadosEfectivo);
+  if(m.salidasCaja>0)t+=L('- Salidas caja',m.salidasCaja);
+  if(m.entradasCaja>0)t+=L('+ Entradas caja',m.entradasCaja);
+  t+=L('= Caja esperada',m.cajaEsperada);
+  if(m.efectivoContado!=null){
+    t+=L('Efectivo contado',m.efectivoContado);
+    t+=L('Diferencia',m.diferencia);
+  }
+  t+=L('Transfer esperada',m.transferenciaEsperada);
+  t+=L('Saldo caja+banco',m.dineroOperado);
+  t+=sep+'\n';
+  // E. UTILIDAD DEL NEGOCIO
+  t+=`  E. UTILIDAD DEL NEGOCIO\n`;
+  t+=L('Productos vendidos',m.productosTotal);
+  t+=L('- Gastos totales',m.gastosTotal);
+  t+=L('= Utilidad prod.',m.utilidadBrutaProductos);
+  t+=sep+'\n';
+  if(m.warnings.length){
+    t+=`  ! REVISAR (${m.warnings.length}):\n`;
+    m.warnings.slice(0,6).forEach(wn=>{t+=`  - ${wn.folio?('#'+wn.folio+' '):''}${wn.detail}\n`;});
     t+=sep+'\n';
-    t+=`  ENVIOS / MANDADITOS\n`;
-    t+=`  Efectivo:         ${fmt(enviosEf).padStart(10)}\n`;
-    t+=`  Transferencia:    ${fmt(enviosTr).padStart(10)}\n`;
-    if(enviosMx>0)t+=`  Pago mixto:       ${fmt(enviosMx).padStart(10)}\n`;
-    t+=`  Total envios:     ${fmt(enviosCobrados).padStart(10)}\n`;
   }
-  t+=sep+'\n';
-  t+=`  TOTAL TICKETS/SERVICIOS\n`;
-  t+=`  Efectivo real:    ${fmt(efectivoIngresos).padStart(10)}\n`;
-  t+=`  Transfer real:    ${fmt(transferenciaTotal).padStart(10)}\n`;
-  t+=`  Total cobrado:    ${fmt(totalServicios).padStart(10)}\n`;
-  t+=sep+'\n';
-  t+=`  GASTOS\n`;
-  t+=`  Gastos efectivo:  ${fmt(_gastosEfectivo(jornada)).padStart(10)}\n`;
-  t+=`  Total gastos:     ${fmt(totalG).padStart(10)}\n`;
-  t+=sep+'\n';
-  t+=`  CONCILIACION\n`;
-  t+=`  Caja efectivo esp:${fmt(esperado).padStart(10)}\n`;
-  if(jornada.totalEfectivo!=null){
-    t+=`  Efectivo contado: ${fmt(jornada.totalEfectivo).padStart(10)}\n`;
-    const dif=(jornada.totalEfectivo||0)-esperado;
-    t+=`  Diferencia:       ${fmt(dif).padStart(10)}\n`;
-  }
-  t+=`  Transferencias:   ${fmt(transferenciaTotal).padStart(10)}\n`;
-  t+=`  Dinero total:     ${fmt(dineroTotal).padStart(10)}\n`;
-  t+=sep+'\n';
-  t+=`  Utilidad (prod):  ${fmt(util).padStart(10)}\n`;
-  t+=`  Pedidos: ${pedidosOk} ok`;
-  if(pedidosCan>0)t+=` / ${pedidosCan} cancel`;
-  t+='\n';
-  t+=sep+'\n';
   if(jornada.observaciones)t+=`  Obs: ${jornada.observaciones}\n${sep}\n`;
   t+=`  ${NEGOCIO.nombre}\n`;
   t+=`  ${NEGOCIO.direccion}\n`;
@@ -1933,26 +2117,9 @@ function _buildCierreText(jornada){
 }
 
 function buildCierreHTML(jornada){
-  const desg=buildCierreDesglose(jornada);
-  const vEf=desg.totals.productosEfectivo;
-  const vTr=desg.totals.productosTransfer;
-  const vMx=desg.totals.productosMixto;
-  const totalV=desg.totals.productos;
-  const totalG=calcGastosTotal(jornada.gastos);
-  const gEf=_gastosEfectivo(jornada);
-  const enviosEf=desg.totals.enviosEfectivo;
-  const enviosTr=desg.totals.enviosTransfer;
-  const enviosMx=desg.totals.enviosMixto;
-  const enviosCobrados=desg.totals.envios;
-  const esperado=_calcEsperadoCaja(jornada);
-  const transferenciaTotal=desg.totals.transferenciaTotal;
-  const efectivoIngresos=desg.totals.efectivoIngresos;
-  const totalServicios=desg.totals.servicios;
-  const dineroTotal=esperado+transferenciaTotal;
-  const pedidosOk=(jornada.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
-  const util=totalV-totalG;
-  const dif=jornada.totalEfectivo!=null?(jornada.totalEfectivo-esperado):null;
-  const metAbbr=m=>m==='efectivo'?'EF':m==='transferencia'?'TR':m==='mixto'?'MX':'--';
+  const m=buildCajaModel(jornada);
+  const metAbbr=x=>x==='efectivo'?'EF':x==='transferencia'?'TR':x==='mixto'?'MX':'--';
+  const R=(label,val,cls='')=>`<div class="r ${cls}"><span>${label}</span><span>${fmt(val)}</span></div>`;
   let h=`<html><head><title>Corte</title><style>
     *{margin:0;padding:0}body{font-family:monospace;font-size:12px;width:80mm;padding:5mm}
     .c{text-align:center}.b{font-weight:bold}.s{border-top:1px dashed #000;margin:4px 0}
@@ -1964,12 +2131,20 @@ function buildCierreHTML(jornada){
   h+=`<div class="c sm">${jornada.fecha}</div>`;
   h+=`<div class="r"><span>Apertura</span><span>${jornada.horaApertura||'--'}</span></div>`;
   h+=`<div class="r"><span>Cierre</span><span>${jornada.horaCierre||'--'}</span></div>`;
+  // A. COBROS DEL DIA (unico bloque con etiqueta "real")
   h+=`<div class="s"></div>`;
-  h+=`<div class="r"><span>Fondo inicial</span><span class="b">${fmt(jornada.fondoInicial)}</span></div>`;
+  h+=`<div class="c b" style="margin:2px 0">A. COBROS DEL DIA</div>`;
+  h+=R('Efectivo real recibido',m.cobrosEfectivo);
+  h+=R('Transferencia real recibida',m.cobrosTransferencia);
+  h+=R('Total cobrado a clientes',m.cobrosTotal,'b');
+  // B. DESGLOSE OPERATIVO
   h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">DESGLOSE POR PEDIDO</div>`;
-  h+=`<div class="r sm" style="font-weight:bold"><span>#  Met</span><span>Prod  Env  Total</span></div>`;
-  desg.rows.forEach(r=>{
+  h+=`<div class="c b" style="margin:2px 0">B. DESGLOSE OPERATIVO</div>`;
+  h+=R('Productos vendidos',m.productosTotal,'b');
+  h+=R('Envios/servicios cobrados',m.enviosTotal);
+  h+=`<div class="r sm"><span>Pedidos</span><span>${m.countCobrados} cobr · ${m.countPendientes} pend · ${m.countCancelados} canc</span></div>`;
+  h+=`<div class="r sm" style="font-weight:bold;margin-top:2px"><span>#  Met</span><span>Prod  Env  Total</span></div>`;
+  m.rows.forEach(r=>{
     const folio='#'+String(r.folio).padStart(3,'0');
     if(r.cancelado){
       h+=`<div class="r sm" style="color:#b91c1c"><span>${folio} CANCELADO</span><span>no suma</span></div>`;
@@ -1979,42 +2154,44 @@ function buildCierreHTML(jornada){
       h+=`<div class="r sm"><span>${folio} ${metAbbr(r.metodo)}</span><span>${fmt(r.productos)} ${r.envio>0?'+'+fmt(r.envio):'·'} = ${fmt(r.total)}</span></div>`;
     }
   });
+  h+=`<div class="sm" style="margin-top:3px">Productos por tipo de pedido (ref.):</div>`;
+  h+=`<div class="r sm"><span>· pedidos efectivo</span><span>${fmt(m.productosEfectivo)}</span></div>`;
+  h+=`<div class="r sm"><span>· pedidos transferencia</span><span>${fmt(m.productosTransfer)}</span></div>`;
+  if(m.productosMixto>0)h+=`<div class="r sm"><span>· pedidos mixtos</span><span>${fmt(m.productosMixto)}</span></div>`;
+  // C. GASTOS
   h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">VENTAS DE PRODUCTOS</div>`;
-  h+=`<div class="r"><span>Efectivo</span><span>${fmt(vEf)}</span></div>`;
-  h+=`<div class="r"><span>Transferencia</span><span>${fmt(vTr)}</span></div>`;
-  if(vMx>0)h+=`<div class="r"><span>Pago mixto</span><span>${fmt(vMx)}</span></div>`;
-  h+=`<div class="r b"><span>Total productos</span><span>${fmt(totalV)}</span></div>`;
-  if(enviosCobrados>0){
+  h+=`<div class="c b" style="margin:2px 0">C. GASTOS</div>`;
+  h+=R('Salen de caja (efectivo)',m.gastosCaja);
+  if(m.gastosOtroMedio>0)h+=R('Por otro medio',m.gastosOtroMedio);
+  h+=R('Total gastos',m.gastosTotal,'b');
+  // D. CONCILIACION DE CAJA FISICA (formula visible)
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">D. CONCILIACION DE CAJA</div>`;
+  h+=R('Fondo inicial',m.fondoInicial);
+  h+=R('+ Efectivo real recibido',m.cobrosEfectivo);
+  h+=R('− Gastos desde caja',m.gastosCaja);
+  if(m.mandaditosPagadosEfectivo>0)h+=R('− Pagado a repartidores',m.mandaditosPagadosEfectivo);
+  if(m.salidasCaja>0)h+=R('− Salidas de caja',m.salidasCaja);
+  if(m.entradasCaja>0)h+=R('+ Entradas de caja',m.entradasCaja);
+  h+=R('= Caja esperada',m.cajaEsperada,'b');
+  if(m.efectivoContado!=null){
+    h+=R('Efectivo contado',m.efectivoContado,'b');
+    h+=`<div class="r b" style="color:${m.diferencia===0?'#000':m.diferencia>0?'green':'red'}"><span>Diferencia</span><span>${fmt(m.diferencia)}</span></div>`;
+  }
+  h+=R('Transferencia esperada (banco)',m.transferenciaEsperada);
+  h+=R('Saldo esperado caja+banco',m.dineroOperado,'b');
+  // E. UTILIDAD DEL NEGOCIO
+  h+=`<div class="s"></div>`;
+  h+=`<div class="c b" style="margin:2px 0">E. UTILIDAD DEL NEGOCIO</div>`;
+  h+=R('Productos vendidos',m.productosTotal);
+  h+=R('− Gastos totales',m.gastosTotal);
+  h+=`<div class="r b"><span>= Utilidad productos</span><span style="color:${m.utilidadBrutaProductos>=0?'green':'red'}">${fmt(m.utilidadBrutaProductos)}</span></div>`;
+  h+=`<div class="s"></div>`;
+  if(m.warnings.length){
+    h+=`<div class="sm" style="color:#b45309"><b>Revisar (${m.warnings.length}):</b></div>`;
+    m.warnings.slice(0,6).forEach(wn=>{h+=`<div class="sm" style="color:#b45309">- ${wn.folio?('#'+wn.folio+' '):''}${wn.detail}</div>`;});
     h+=`<div class="s"></div>`;
-    h+=`<div class="c b" style="margin:2px 0;color:#7c3aed">ENVIOS / MANDADITOS</div>`;
-    h+=`<div class="r"><span>Efectivo</span><span>${fmt(enviosEf)}</span></div>`;
-    h+=`<div class="r"><span>Transferencia</span><span>${fmt(enviosTr)}</span></div>`;
-    if(enviosMx>0)h+=`<div class="r"><span>Pago mixto</span><span>${fmt(enviosMx)}</span></div>`;
-    h+=`<div class="r b" style="color:#7c3aed"><span>Total envios</span><span>${fmt(enviosCobrados)}</span></div>`;
   }
-  h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">TOTAL TICKETS/SERVICIOS</div>`;
-  h+=`<div class="r"><span>Efectivo real</span><span>${fmt(efectivoIngresos)}</span></div>`;
-  h+=`<div class="r"><span>Transfer real</span><span>${fmt(transferenciaTotal)}</span></div>`;
-  h+=`<div class="r b"><span>Total cobrado</span><span>${fmt(totalServicios)}</span></div>`;
-  h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">GASTOS</div>`;
-  h+=`<div class="r"><span>En efectivo</span><span>${fmt(gEf)}</span></div>`;
-  h+=`<div class="r b"><span>Total gastos</span><span>${fmt(totalG)}</span></div>`;
-  h+=`<div class="s"></div>`;
-  h+=`<div class="c b" style="margin:2px 0">CONCILIACION</div>`;
-  h+=`<div class="r"><span>Caja efectivo esperada</span><span class="b">${fmt(esperado)}</span></div>`;
-  if(jornada.totalEfectivo!=null){
-    h+=`<div class="r"><span>Efectivo contado</span><span class="b">${fmt(jornada.totalEfectivo)}</span></div>`;
-    h+=`<div class="r b" style="color:${dif===0?'#000':dif>0?'green':'red'}"><span>Diferencia</span><span>${fmt(dif)}</span></div>`;
-  }
-  h+=`<div class="r"><span>Transferencias recibidas</span><span class="b">${fmt(transferenciaTotal)}</span></div>`;
-  h+=`<div class="r b"><span>Dinero total del dia</span><span>${fmt(dineroTotal)}</span></div>`;
-  h+=`<div class="s"></div>`;
-  h+=`<div class="r b"><span>Utilidad (solo productos)</span><span style="color:${util>=0?'green':'red'}">${fmt(util)}</span></div>`;
-  h+=`<div class="r"><span>Pedidos completados</span><span>${pedidosOk}</span></div>`;
-  h+=`<div class="s"></div>`;
   if(jornada.observaciones)h+=`<div class="sm" style="margin:4px 0">Obs: ${jornada.observaciones}</div><div class="s"></div>`;
   h+=`<div class="c sm" style="margin-top:6px">${NEGOCIO.direccion}</div>`;
   h+=`<div class="c sm">Tel.: ${NEGOCIO.telefono}</div>`;
@@ -2209,35 +2386,45 @@ function AbrirJornadaModal({open,onClose,onAbrir}){
     </div></Modal>);
 }
 
-function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
+function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onEliminarAjuste,onPagarRepartidor,onPagarTodosRepartidores}){
   const [efectivo,setEfectivo]=useState('');const [obs,setObs]=useState('');
   if(!jornada)return null;
-  const desg=buildCierreDesglose(jornada);
-  const totalG=calcGastosTotal(jornada.gastos);
-  const vEf=desg.totals.productosEfectivo;
-  const vTr=desg.totals.productosTransfer;
-  const vMx=desg.totals.productosMixto;
-  const totalV=desg.totals.productos;
-  const util=totalV-totalG;
-  const enviosEf=desg.totals.enviosEfectivo;
-  const enviosTr=desg.totals.enviosTransfer;
-  const enviosMx=desg.totals.enviosMixto;
-  const enviosCobrados=desg.totals.envios;
-  const esperado=_calcEsperadoCaja(jornada);const dif=(Number(efectivo)||0)-esperado;
-  const transferenciaTotal=desg.totals.transferenciaTotal;
-  const efectivoIngresos=desg.totals.efectivoIngresos;
-  const totalServicios=desg.totals.servicios;
-  const dineroTotal=esperado+transferenciaTotal;
-  const metAbbr=m=>pagoLabel(m);
-  const pedidosRecoger=(jornada.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
-  const pedidosEnvio=(jornada.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
+  const m=buildCajaModel(jornada);
+  const esperado=m.cajaEsperada;
+  const dif=(Number(efectivo)||0)-esperado;
+  const metAbbr=x=>pagoLabel(x);
   return(<Modal open={open} onClose={onClose} title="🔴 Corte de Caja">
     <div className="flex flex-col gap-4">
+      {m.warnings.length>0&&<div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[12px] text-amber-800">
+        <p className="font-bold mb-1">⚠️ Revisar antes de cerrar ({m.warnings.length})</p>
+        <ul className="list-disc pl-4 space-y-0.5">
+          {m.warnings.slice(0,6).map((wn,i)=><li key={i}>{wn.folio?`#${wn.folio} `:''}{wn.detail}</li>)}
+        </ul>
+        <p className="opacity-60 mt-1">Solo es un aviso. No modifica datos.</p>
+      </div>}
+
+      {/* A. RESUMEN DE COBROS DEL DIA — unico bloque con etiqueta "real" */}
       <div className="bg-white border border-gray-200 rounded-2xl p-4">
-        <h3 className="font-bold text-gray-700 text-sm mb-2">Desglose por pedido ({desg.totals.countCobrados} cobrados{desg.totals.canceladas.length>0?`, ${desg.totals.canceladas.length} cancelados`:''})</h3>
-        <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-x-2 gap-y-1 text-[12px] max-h-56 overflow-y-auto">
+        <h3 className="font-bold text-gray-700 text-sm mb-2">A · Cobros del día</h3>
+        <div className="space-y-1 text-sm">
+          <div className="flex justify-between"><span className="text-gray-500">💵 Efectivo real recibido</span><span className="font-bold">{fmt(m.cobrosEfectivo)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">📱 Transferencia real recibida</span><span className="font-bold">{fmt(m.cobrosTransferencia)}</span></div>
+          <div className="border-t my-1"/>
+          <div className="flex justify-between font-black"><span>🧾 Total cobrado a clientes</span><span>{fmt(m.cobrosTotal)}</span></div>
+        </div>
+      </div>
+
+      {/* B. DESGLOSE OPERATIVO */}
+      <div className="bg-gray-50 rounded-2xl p-4">
+        <h3 className="font-bold text-gray-700 text-sm mb-2">B · Desglose operativo</h3>
+        <div className="space-y-1 text-sm mb-2">
+          <div className="flex justify-between"><span className="text-gray-500">🍲 Productos vendidos</span><span className="font-bold text-green-600">{fmt(m.productosTotal)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500">🛵 Envíos/servicios cobrados</span><span className="font-bold text-purple-600">{fmt(m.enviosTotal)}</span></div>
+          <div className="flex justify-between text-xs text-gray-400"><span>Pedidos</span><span>{m.countCobrados} cobrados · {m.countPendientes} pendientes · {m.countCancelados} cancelados</span></div>
+        </div>
+        <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-x-2 gap-y-1 text-[12px] max-h-44 overflow-y-auto border-t pt-2">
           <div className="font-bold text-gray-400">#</div><div className="font-bold text-gray-400">Mét</div><div className="font-bold text-gray-400 text-right">Prod</div><div className="font-bold text-gray-400 text-right">Env</div><div className="font-bold text-gray-400 text-right">Total</div>
-          {desg.rows.map(r=>(<React.Fragment key={r.folio}>
+          {m.rows.map(r=>(<React.Fragment key={r.folio}>
             <div className="text-gray-600">#{String(r.folio).padStart(3,'0')}</div>
             {r.cancelado
               ? <div className="col-span-4 text-red-500 italic">cancelado · no suma a caja</div>
@@ -2251,43 +2438,57 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
                   </React.Fragment>}
           </React.Fragment>))}
         </div>
-        <div className="border-t mt-2 pt-2 grid grid-cols-2 gap-1 text-[12px]">
-          <span className="text-gray-500">💵 Efectivo real cobrado</span><span className="text-right font-bold">{fmt(efectivoIngresos)}</span>
-          <span className="text-gray-500">📱 Transferencia real cobrada</span><span className="text-right font-bold">{fmt(transferenciaTotal)}</span>
-          <span className="text-gray-500">🧾 Total tickets/servicios</span><span className="text-right font-black">{fmt(totalServicios)}</span>
+        <div className="border-t mt-2 pt-2 text-[11px] text-gray-400 space-y-0.5">
+          <p className="font-semibold text-gray-500">Productos por tipo de pedido (referencia, no es banco)</p>
+          <div className="flex justify-between"><span>· pedidos de efectivo</span><span>{fmt(m.productosEfectivo)}</span></div>
+          <div className="flex justify-between"><span>· pedidos de transferencia</span><span>{fmt(m.productosTransfer)}</span></div>
+          {m.productosMixto>0&&<div className="flex justify-between"><span>· pedidos mixtos</span><span>{fmt(m.productosMixto)}</span></div>}
         </div>
       </div>
-      <div className="bg-gray-50 rounded-2xl p-4 space-y-2">
-        <h3 className="font-bold text-gray-700 text-sm mb-1">Negocio (utilidad)</h3>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">💰 Ventas de productos</span><span className="font-bold text-green-600">{fmt(totalV)}</span></div>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">  💵 Productos en efectivo</span><span>{fmt(vEf)}</span></div>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">  📱 Productos por transferencia</span><span>{fmt(vTr)}</span></div>
-        {vMx>0&&<div className="flex justify-between text-sm"><span className="text-gray-500">  💵📱 Productos con pago mixto</span><span>{fmt(vMx)}</span></div>}
-        <div className="border-t my-2"/>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">💸 Total Gastos</span><span className="font-bold text-red-500">{fmt(totalG)}</span></div>
-        <div className="flex justify-between text-sm font-bold"><span>Utilidad bruta (solo productos)</span><span className={util>=0?'text-green-600':'text-red-500'}>{fmt(util)}</span></div>
+
+      {/* C. GASTOS */}
+      <div className="bg-gray-50 rounded-2xl p-4 space-y-1 text-sm">
+        <h3 className="font-bold text-gray-700 text-sm mb-1">C · Gastos</h3>
+        <div className="flex justify-between"><span className="text-gray-500">💸 Salen de caja (efectivo)</span><span>{fmt(m.gastosCaja)}</span></div>
+        {m.gastosOtroMedio>0&&<div className="flex justify-between"><span className="text-gray-500">🏦 Por otro medio (no caja)</span><span>{fmt(m.gastosOtroMedio)}</span></div>}
+        <div className="border-t my-1"/>
+        <div className="flex justify-between font-bold"><span>Total gastos</span><span className="text-red-500">{fmt(m.gastosTotal)}</span></div>
       </div>
-      <div className="bg-blue-50 rounded-2xl p-4 space-y-2">
-        <h3 className="font-bold text-gray-700 text-sm mb-1">Conciliación de dinero</h3>
-        <div className="flex justify-between text-sm"><span className="text-gray-500">Fondo inicial</span><span>{fmt(jornada.fondoInicial)}</span></div>
-        {enviosCobrados>0&&<React.Fragment>
-          <div className="flex justify-between text-sm"><span className="text-gray-500">🛵 Envíos cobrados ({pedidosEnvio})</span><span className="font-bold text-purple-600">{fmt(enviosCobrados)}</span></div>
-          <div className="flex justify-between text-xs text-gray-500"><span>  💵 Envíos en efectivo</span><span>{fmt(enviosEf)}</span></div>
-          <div className="flex justify-between text-xs text-gray-500"><span>  📱 Envíos por transferencia</span><span>{fmt(enviosTr)}</span></div>
-          {enviosMx>0&&<div className="flex justify-between text-xs text-gray-500"><span>  💵📱 Envíos con pago mixto</span><span>{fmt(enviosMx)}</span></div>}
-        </React.Fragment>}
-        <div className="border-t my-2"/>
-        <div className="flex justify-between text-sm font-bold"><span className="text-gray-600">💵 Caja esperada (efectivo)</span><span>{fmt(esperado)}</span></div>
-        <div className="text-[11px] text-gray-400 -mt-1">Fondo + efectivo real cobrado − gastos efectivo</div>
-        <div className="flex justify-between text-sm font-bold"><span className="text-gray-600">📱 Transferencias recibidas</span><span className="text-blue-700">{fmt(transferenciaTotal)}</span></div>
-        {transferenciaTotal>0&&<div className="text-[11px] text-gray-400 -mt-1">Transferencia capturada en pedidos: {fmt(transferenciaTotal)}</div>}
-        <div className="border-t my-2"/>
-        <div className="flex justify-between text-sm font-black"><span>Dinero total del día</span><span>{fmt(dineroTotal)}</span></div>
-        <div className="flex justify-between text-xs text-gray-400"><span>🏃 Pasan a recoger</span><span>{pedidosRecoger} clientes</span></div>
+
+      {/* Reconciliación: pagos a repartidor (salen de caja) + ajustes de caja */}
+      <CajaReconciliacion jornada={jornada} model={m}
+        onPagarRepartidor={onPagarRepartidor} onPagarTodosRepartidores={onPagarTodosRepartidores}
+        onRegistrarAjuste={onRegistrarAjuste} onEliminarAjuste={onEliminarAjuste}/>
+
+      {/* D. CONCILIACION DE CAJA FISICA — formula visible */}
+      <div className="bg-blue-50 rounded-2xl p-4 space-y-1 text-sm">
+        <h3 className="font-bold text-gray-700 text-sm mb-1">D · Conciliación de caja física</h3>
+        <div className="flex justify-between"><span className="text-gray-500">Fondo inicial</span><span>{fmt(m.fondoInicial)}</span></div>
+        <div className="flex justify-between"><span className="text-gray-500">+ Efectivo real recibido</span><span>{fmt(m.cobrosEfectivo)}</span></div>
+        <div className="flex justify-between"><span className="text-gray-500">− Gastos pagados desde caja</span><span>{fmt(m.gastosCaja)}</span></div>
+        {m.mandaditosPagadosEfectivo>0&&<div className="flex justify-between"><span className="text-gray-500">− Pagado a repartidores (efvo)</span><span>{fmt(m.mandaditosPagadosEfectivo)}</span></div>}
+        {m.salidasCaja>0&&<div className="flex justify-between"><span className="text-gray-500">− Salidas de caja</span><span>{fmt(m.salidasCaja)}</span></div>}
+        {m.entradasCaja>0&&<div className="flex justify-between"><span className="text-gray-500">+ Entradas de caja</span><span>{fmt(m.entradasCaja)}</span></div>}
+        <div className="border-t my-1"/>
+        <div className="flex justify-between font-bold text-gray-700"><span>= Caja esperada</span><span>{fmt(m.cajaEsperada)}</span></div>
+        <div className="border-t my-1"/>
+        <div className="flex justify-between text-gray-500"><span>📱 Transferencia esperada (banco)</span><span className="text-blue-700 font-semibold">{fmt(m.transferenciaEsperada)}</span></div>
+        <div className="flex justify-between text-xs text-gray-400"><span>Saldo esperado caja + banco</span><span>{fmt(m.dineroOperado)}</span></div>
       </div>
+
       <Input label="Efectivo real contado" type="number" placeholder="0" prefix="$" value={efectivo} onChange={setEfectivo}/>
-      {efectivo&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
+      {efectivo!==''&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
         {dif===0?'✅ Caja cuadrada':dif>0?`📈 Sobrante: ${fmt(dif)}`:`📉 Faltante: ${fmt(Math.abs(dif))}`}</div>}
+
+      {/* E. UTILIDAD DEL NEGOCIO */}
+      <div className="bg-gray-50 rounded-2xl p-4 space-y-1 text-sm">
+        <h3 className="font-bold text-gray-700 text-sm mb-1">E · Utilidad del negocio</h3>
+        <div className="flex justify-between"><span className="text-gray-500">🍲 Productos vendidos</span><span>{fmt(m.productosTotal)}</span></div>
+        <div className="flex justify-between"><span className="text-gray-500">− Gastos totales</span><span>{fmt(m.gastosTotal)}</span></div>
+        <div className="border-t my-1"/>
+        <div className="flex justify-between font-bold"><span>= Utilidad productos</span><span className={m.utilidadBrutaProductos>=0?'text-green-600':'text-red-500'}>{fmt(m.utilidadBrutaProductos)}</span></div>
+      </div>
+
       <Input label="Observaciones (opcional)" value={obs} onChange={setObs} placeholder="Notas del dia..."/>
       <Btn full color="red" size="lg" disabled={efectivo===''} onClick={()=>{onCerrar(efectivo,obs);onClose();}}>🔴 Cerrar y Guardar Jornada</Btn>
       <Btn full color="gray" size="sm" disabled={efectivo===''} onClick={()=>{
@@ -2296,6 +2497,102 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada}){
         printCierreCaja(snap);
       }}>🖨️ Previsualizar impresion de cierre</Btn>
     </div></Modal>);
+}
+
+// ─── RECONCILIACION DE CAJA (pagos a repartidor + ajustes) ──────────
+// Registra movimientos REALES de efectivo que reducen/aumentan la caja
+// fisica. Opt-in: nada es automatico. Todo persiste via las acciones del
+// store y alimenta buildCajaModel (fuente unica).
+function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosRepartidores,onRegistrarAjuste,onEliminarAjuste}){
+  const [repId,setRepId]=useState('');
+  const [repMonto,setRepMonto]=useState('');
+  const [aTipo,setATipo]=useState('salida');
+  const [aMonto,setAMonto]=useState('');
+  const [aMotivo,setAMotivo]=useState('');
+  const [askAll,setAskAll]=useState(false);
+  const mandaditos=jornada.mandaditos||[];
+  const ajustes=jornada.ajustesCaja||[];
+  const envios=(model.rows||[]).filter(r=>r.cobrado&&r.envio>0);
+  const conPago=r=>Number((mandaditos.find(x=>x.pedidoId===r.pedidoId)||{}).pagoRepartidorEfectivo)||0;
+  const pagados=envios.map(r=>({...r,pago:conPago(r)})).filter(r=>r.pago>0);
+  // Pendientes: envios cobrados (envio>0) sin pago al repartidor todavia.
+  const pendientes=envios.filter(r=>!(conPago(r)>0));
+  const totalPendiente=_roundMoney(pendientes.reduce((s,r)=>s+r.envio,0));
+  const canPago=!!repId;
+  const canAjuste=(Number(aMonto)||0)>0&&!!aMotivo.trim();
+  const guardarPago=()=>{ if(!canPago)return; onPagarRepartidor&&onPagarRepartidor(repId,Number(repMonto)||0); setRepId('');setRepMonto(''); };
+  const addAjuste=()=>{ if(!canAjuste)return; onRegistrarAjuste&&onRegistrarAjuste({tipo:aTipo,monto:Number(aMonto),motivo:aMotivo.trim()}); setAMonto('');setAMotivo(''); };
+  const confirmarTodos=()=>{ onPagarTodosRepartidores&&onPagarTodosRepartidores(); setAskAll(false); };
+  const selStyle="w-full rounded-xl border border-[rgba(221,192,161,.55)] bg-[rgba(255,250,244,.9)] px-3 py-2 text-sm";
+  return(<div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-4 text-sm">
+    <h3 className="font-bold text-gray-700">Movimientos de efectivo (opcional)</h3>
+
+    {/* Pago a repartidor: efectivo del cajon entregado al repartidor */}
+    <div className="space-y-2">
+      <p className="font-semibold text-gray-600">🛵 Pagado al repartidor (sale de caja)</p>
+
+      {/* Pago masivo de todos los envios pendientes */}
+      {envios.length>0&&(pendientes.length>0
+        ? (!askAll
+            ? <button type="button" onClick={()=>setAskAll(true)} className="w-full py-2.5 rounded-xl bg-orange-100 border border-orange-300 text-orange-800 font-bold text-sm card-press">
+                Pagar todos los envíos pendientes · {fmt(totalPendiente)}
+              </button>
+            : <div className="rounded-xl bg-white/80 border border-orange-300 p-3 space-y-2">
+                <p className="text-xs text-gray-700">Se marcarán <b>{pendientes.length}</b> envío{pendientes.length===1?'':'s'} como pagados al repartidor.</p>
+                <p className="text-xs text-gray-700">Saldrá del cajón: <b className="text-orange-700">{fmt(totalPendiente)}</b> en efectivo.</p>
+                <p className="text-[11px] text-amber-700">⚠️ Esto bajará la caja esperada porque se pagará desde efectivo.</p>
+                <div className="flex gap-2">
+                  <Btn color="orange" size="sm" onClick={confirmarTodos}>Confirmar pago</Btn>
+                  <Btn color="gray" size="sm" onClick={()=>setAskAll(false)}>Cancelar</Btn>
+                </div>
+              </div>)
+        : <p className="text-xs text-gray-400">No hay envíos pendientes de pago al repartidor.</p>)}
+
+      {envios.length===0
+        ? <p className="text-xs text-gray-400">No hay envíos cobrados en esta jornada.</p>
+        : <React.Fragment>
+            <p className="text-[11px] text-gray-400 pt-1">…o registra un envío puntual:</p>
+            <select className={selStyle} value={repId} onChange={e=>{const v=e.target.value;setRepId(v);const r=envios.find(x=>x.pedidoId===v);setRepMonto(r?String(r.envio):'');}}>
+              <option value="">Selecciona un envío…</option>
+              {envios.map(r=><option key={r.pedidoId} value={r.pedidoId}>#{String(r.folio).padStart(3,'0')} {r.cliente||''} · envío {fmt(r.envio)}</option>)}
+            </select>
+            <div className="flex gap-2">
+              <Input label="" type="number" prefix="$" placeholder="Efectivo pagado" value={repMonto} onChange={setRepMonto}/>
+              <Btn color="orange" size="sm" disabled={!canPago} onClick={guardarPago}>Registrar</Btn>
+            </div>
+          </React.Fragment>}
+      {pagados.length>0&&<div className="space-y-1">
+        {pagados.map(r=><div key={r.pedidoId} className="flex justify-between items-center text-xs bg-white/70 rounded-lg px-2 py-1">
+          <span>#{String(r.folio).padStart(3,'0')} {r.cliente||''}</span>
+          <span className="flex items-center gap-2"><b className="text-orange-700">{fmt(r.pago)}</b>
+            <button className="text-gray-400 hover:text-red-500" onClick={()=>onPagarRepartidor&&onPagarRepartidor(r.pedidoId,0)} title="Quitar">✕</button></span>
+        </div>)}
+        <div className="flex justify-between text-xs font-bold text-gray-600 pt-1"><span>Total pagado a repartidores</span><span>{fmt(model.mandaditosPagadosEfectivo)}</span></div>
+      </div>}
+    </div>
+
+    <div className="border-t border-amber-200"/>
+
+    {/* Ajustes de caja: salida (-) / entrada (+), motivo obligatorio */}
+    <div className="space-y-2">
+      <p className="font-semibold text-gray-600">💵 Salida / entrada de caja (motivo obligatorio)</p>
+      <div className="grid grid-cols-2 gap-2">
+        <button type="button" onClick={()=>setATipo('salida')} className={`py-2 rounded-xl border text-center text-xs font-bold ${aTipo==='salida'?'bg-red-100 border-red-300 text-red-700':'bg-white/70 border-gray-200 text-gray-500'}`}>➖ Salida (resta)</button>
+        <button type="button" onClick={()=>setATipo('entrada')} className={`py-2 rounded-xl border text-center text-xs font-bold ${aTipo==='entrada'?'bg-green-100 border-green-300 text-green-700':'bg-white/70 border-gray-200 text-gray-500'}`}>➕ Entrada (suma)</button>
+      </div>
+      <Input label="" type="number" prefix="$" placeholder="Monto" value={aMonto} onChange={setAMonto}/>
+      <Input label="" placeholder="Motivo (obligatorio): compra, cambio, retiro…" value={aMotivo} onChange={setAMotivo}/>
+      <Btn full color={aTipo==='salida'?'red':'green'} size="sm" disabled={!canAjuste} onClick={addAjuste}>
+        {aTipo==='salida'?'Registrar salida':'Registrar entrada'}{(Number(aMonto)||0)>0?` ${fmt(Number(aMonto))}`:''}</Btn>
+      {!aMotivo.trim()&&(Number(aMonto)||0)>0&&<p className="text-[11px] text-amber-700">Sin motivo no se registra; el cierre lo reportaría como faltante.</p>}
+      {ajustes.length>0&&<div className="space-y-1 pt-1">
+        {ajustes.map(a=><div key={a.id} className="flex justify-between items-center text-xs bg-white/70 rounded-lg px-2 py-1">
+          <span className={a.tipo==='entrada'?'text-green-700':'text-red-700'}>{a.tipo==='entrada'?'+':'−'}{fmt(a.monto)} · {a.motivo}</span>
+          <button className="text-gray-400 hover:text-red-500" onClick={()=>onEliminarAjuste&&onEliminarAjuste(a.id)} title="Eliminar">✕</button>
+        </div>)}
+      </div>}
+    </div>
+  </div>);
 }
 
 // ─── PRODUCT SELECTOR (shared by Create & Edit) ─────────────────────
@@ -2381,7 +2678,7 @@ function DeliverySelector({tipo,setTipo}){
 }
 
 // ─── DASHBOARD ──────────────────────────────────────────────────────
-function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
+function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEliminarAjuste,onPagarRepartidor,onPagarTodosRepartidores}){
   const [showAbrir,setShowAbrir]=useState(false);const [showCerrar,setShowCerrar]=useState(false);
   const ja=state.jornadaActiva;
   const totalV=ja?calcVentasTotal(ja.ventas):0;const totalG=ja?calcGastosTotal(ja.gastos):0;const util=totalV-totalG;
@@ -2482,7 +2779,9 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar}){
           <p className="text-xs text-[var(--text-muted)]">Abre tu primera jornada para comenzar</p></div>)}
     </div>
     <AbrirJornadaModal open={showAbrir} onClose={()=>setShowAbrir(false)} onAbrir={onAbrir}/>
-    <CerrarJornadaModal open={showCerrar} onClose={()=>setShowCerrar(false)} onCerrar={onCerrar} jornada={ja}/>
+    <CerrarJornadaModal open={showCerrar} onClose={()=>setShowCerrar(false)} onCerrar={onCerrar} jornada={ja}
+      onRegistrarAjuste={onRegistrarAjuste} onEliminarAjuste={onEliminarAjuste} onPagarRepartidor={onPagarRepartidor}
+      onPagarTodosRepartidores={onPagarTodosRepartidores}/>
   </div>);
 }
 
@@ -2735,6 +3034,7 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
   const [modo,setModo]=useState('efectivo');
   const [efectivo,setEfectivo]=useState('');
   const [transferencia,setTransferencia]=useState('');
+  const [recibido,setRecibido]=useState('');
   useEffect(()=>{
     if(open&&pedido){
       const pagos=normalizePagos(pedido.pagos,Number(pedido.total)||0,pedido.metodoPago||'efectivo');
@@ -2742,13 +3042,22 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
       setModo(metodo||'efectivo');
       setEfectivo(pagos.efectivo?String(pagos.efectivo):'');
       setTransferencia(pagos.transferencia?String(pagos.transferencia):'');
+      setRecibido(pedido.montoRecibido?String(pedido.montoRecibido):'');
     }
   },[open,pedido]);
   if(!pedido)return null;
   const total=Number(pedido.total)||0;
   const pagoMixto={efectivo:Number(efectivo)||0,transferencia:Number(transferencia)||0};
   const mixtoOk=sumPagos(pagoMixto)===_roundMoney(total);
-  const cobrarSimple=metodo=>onCobrar({metodoPago:metodo,pagos:normalizePagos(null,total,metodo)});
+  // Cambio: auxiliar operativo. La caja usa SIEMPRE el neto (total), nunca el
+  // bruto recibido. montoRecibido/cambioDevuelto solo se guardan para el registro.
+  const recibidoNum=Number(recibido)||0;
+  const cambio=recibido!==''&&recibidoNum>=total?_roundMoney(recibidoNum-total):null;
+  const cobrarSimple=metodo=>{
+    const pago={metodoPago:metodo,pagos:normalizePagos(null,total,metodo)};
+    if(metodo==='efectivo'&&recibido!==''&&recibidoNum>=total){pago.montoRecibido=recibidoNum;pago.cambioDevuelto=_roundMoney(recibidoNum-total);}
+    onCobrar(pago);
+  };
   const cobrarMixto=()=>{if(mixtoOk)onCobrar({metodoPago:'mixto',pagos:pagoMixto});};
   return(<Modal open={open} onClose={onClose} title={`💰 Cobrar #${String(pedido.numero).padStart(3,'0')}`}>
     <div className="space-y-4">
@@ -2766,6 +3075,13 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
         <button onClick={()=>setModo('mixto')} className={`${modo==='mixto'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
           <div className="text-3xl mb-2">💵📱</div><p className="font-black text-[#7040a0]">Mixto</p><p className="text-[11px] text-[#786482] mt-1">Parte y parte</p></button>
       </div>
+      {modo==='efectivo'&&<div className="surface-card space-y-2">
+        <Input label="Efectivo recibido del cliente (opcional)" type="number" value={recibido} onChange={setRecibido} prefix="$" placeholder="Para calcular el cambio"/>
+        {recibido!==''&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${recibidoNum<total?'bg-red-50 text-red-600':cambio>0?'bg-blue-50 text-blue-700':'bg-green-50 text-green-700'}`}>
+          {recibidoNum<total?`Faltan ${fmt(total-recibidoNum)}`:cambio>0?`💵 Cambio a devolver: ${fmt(cambio)}`:'Pago exacto, sin cambio'}
+        </div>}
+        <p className="text-[11px] text-[#698170]">La caja recibe el neto ({fmt(total)}); el cambio no altera el efectivo esperado.</p>
+      </div>}
       {modo==='mixto'&&<div className="surface-card space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <Input label="Efectivo recibido" type="number" value={efectivo} onChange={setEfectivo} prefix="$" placeholder="0"/>
@@ -3726,6 +4042,7 @@ function App(){
   const [page,_setPage]=useState('dashboard');
   const setPage=useCallback(p=>{_setPage(p);window.scrollTo(0,0);},[]);
   const {state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+    registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
@@ -3754,7 +4071,11 @@ function App(){
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
       onAbrir={(f,d)=>{abrirJornada(f,d);showToast('🟢 Jornada abierta');}}
-      onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('🔴 Jornada cerrada','red');}}/>}
+      onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('🔴 Jornada cerrada','red');}}
+      onRegistrarAjuste={(a)=>{registrarAjusteCaja(a);showToast(a.tipo==='entrada'?'➕ Entrada de caja':'➖ Salida de caja','orange');}}
+      onEliminarAjuste={eliminarAjusteCaja}
+      onPagarRepartidor={registrarPagoRepartidor}
+      onPagarTodosRepartidores={()=>{pagarRepartidoresPendientes();showToast('🛵 Repartidores pagados desde caja','orange');}}/>}
     {page==='pedidos'&&<PedidosPage state={state}
       onCrearPedido={(i,t,c,dir,n)=>{const p=crearPedido(i,t,c,dir,n);showToast(`📋 Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
       onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
