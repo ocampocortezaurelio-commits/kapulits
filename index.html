@@ -194,6 +194,9 @@ const PRODUCTOS_DEFAULT = [
   {id:'coca',nombre:'Coca-Cola',precio:30,costo:14,cat:'bebida',emoji:'🥤',activo:true},
   {id:'jamaica',nombre:'Jamaica',precio:35,costo:7,cat:'bebida',emoji:'🍹',activo:true},
   {id:'horchata',nombre:'Horchata',precio:35,costo:9,cat:'bebida',emoji:'🥛',activo:true},
+  // Descriptor especial: sin precio/costo fijos. Cada linea captura su propio
+  // nombre y precio (ver esVariado). No se edita como producto ordinario.
+  {id:'variado',nombre:'Producto variado',precio:0,costo:0,cat:'variado',emoji:'🧪',activo:true,esVariado:true},
 ];
 
 const COMBO_DESC = {
@@ -639,6 +642,18 @@ function migrateProducts(prods){
   const ids=prods.map(p=>p.id);
   const missing=PRODUCTOS_DEFAULT.filter(d=>!ids.includes(d.id));
   return missing.length?[...prods,...missing]:prods;
+}
+// ID unico por linea de "producto variado": permite varios variados distintos
+// en un mismo pedido sin colisionar por productoId.
+function lineaUid(){return'var_'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
+// Nombre normalizado para agrupar variados en el reporte (trim, espacios, caja).
+function normVariadoNombre(n){return String(n||'').trim().replace(/\s+/g,' ').toLowerCase();}
+// Forma persistida de una linea del carrito. El variado conserva su id de linea,
+// la marca esVariado, nombre y precio capturados, y costo 0.
+function buildItem(i){
+  const it={productoId:i.productoId||i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji};
+  if(i.esVariado){it.esVariado=true;it.id=i.id;it.costo=0;}
+  return it;
 }
 function localISODate(d=new Date()){
   const y=d.getFullYear();
@@ -1469,10 +1484,18 @@ function sanitize(text){
 
 function getProductoStats(jornadas,productos){
   const stats={};
-  productos.forEach(p=>{stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cantidad:0,revenue:0};});
+  // El descriptor variado no genera fila base: cada variante se agrupa abajo
+  // por nombre normalizado, no como un unico producto de precio fijo.
+  productos.forEach(p=>{if(p.esVariado)return;stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cantidad:0,revenue:0};});
   jornadas.forEach(j=>{ventasActivas(j.ventas).filter(v=>!v.esReversa).forEach(v=>{v.items.forEach(item=>{
-    if(stats[item.productoId]){stats[item.productoId].cantidad+=item.cantidad;stats[item.productoId].revenue+=item.subtotal;}
+    if(item.esVariado||item.productoId==='variado'){
+      const key='variado::'+normVariadoNombre(item.nombre);
+      if(!stats[key])stats[key]={id:key,nombre:(String(item.nombre||'').trim()||'Variado'),precio:0,costo:0,emoji:item.emoji||'🧪',cantidad:0,revenue:0,esVariado:true};
+      stats[key].cantidad+=item.cantidad;stats[key].revenue+=item.subtotal;
+    }else if(stats[item.productoId]){stats[item.productoId].cantidad+=item.cantidad;stats[item.productoId].revenue+=item.subtotal;}
   });});});
+  // Precio representativo del variado = promedio real cobrado (costo 0 => 100% margen).
+  Object.values(stats).forEach(s=>{if(s.esVariado&&s.cantidad>0)s.precio=_roundMoney(s.revenue/s.cantidad);});
   return Object.values(stats).sort((a,b)=>b.revenue-a.revenue);
 }
 
@@ -2601,6 +2624,17 @@ function ProductSelector({productos,cart,setCart}){
   const platillos=prods.filter(p=>p.cat==='platillo');
   const combos=prods.filter(p=>p.cat==='combo');
   const bebidas=prods.filter(p=>p.cat==='bebida');
+  const variadoDesc=prods.find(p=>p.esVariado);
+  const [varNombre,setVarNombre]=useState('');const [varPrecio,setVarPrecio]=useState('');
+  const varPrecioNum=Number(varPrecio)||0;
+  const varOk=varNombre.trim().length>0&&varPrecioNum>0;
+  const addVariado=()=>{
+    if(!varOk)return;
+    const lid=lineaUid();
+    setCart(c=>({...c,[lid]:{id:lid,productoId:'variado',esVariado:true,nombre:varNombre.trim(),
+      precio:varPrecioNum,costo:0,emoji:variadoDesc?.emoji||'🧪',cantidad:1,subtotal:varPrecioNum}}));
+    setVarNombre('');setVarPrecio('');
+  };
   const add=p=>setCart(c=>({...c,[p.id]:{...p,productoId:p.id,cantidad:(c[p.id]?.cantidad||0)+1,subtotal:((c[p.id]?.cantidad||0)+1)*p.precio}}));
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
 
@@ -2637,6 +2671,20 @@ function ProductSelector({productos,cart,setCart}){
           <p className="text-orange-600 font-black text-xs">{fmt(p.precio)}</p>
         </button>);})}
     </div>
+    {variadoDesc&&(<React.Fragment>
+      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">{variadoDesc.emoji} Producto variado</p>
+      <div className="bg-white rounded-xl p-3 shadow-sm border-2 border-gray-100 space-y-2">
+        <p className="text-[11px] text-gray-400 leading-snug">Captura nombre y precio. Puedes agregar varios distintos.</p>
+        <input value={varNombre} onChange={e=>setVarNombre(e.target.value)} placeholder="Nombre del producto"
+          className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Nombre producto variado"/>
+        <div className="flex gap-2">
+          <input value={varPrecio} onChange={e=>setVarPrecio(e.target.value)} type="number" inputMode="decimal" placeholder="Precio"
+            className="flex-1 rounded-lg border border-gray-200 px-3 py-2 text-sm" aria-label="Precio producto variado"/>
+          <button onClick={addVariado} disabled={!varOk}
+            className={`px-4 rounded-lg font-black text-sm text-white ${varOk?'bg-orange-500':'bg-gray-300'}`}>+ Agregar</button>
+        </div>
+      </div>
+    </React.Fragment>)}
   </React.Fragment>);
 }
 
@@ -2926,11 +2974,11 @@ function CrearPedidoModal({open,onClose,productos,impresora,onCrear}){
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
-  const add=p=>setCart(c=>({...c,[p.id]:{...p,productoId:p.id,cantidad:(c[p.id]?.cantidad||0)+1,subtotal:((c[p.id]?.cantidad||0)+1)*p.precio}}));
+  const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   const crear=()=>{
     if(!items.length)return;
-    const its=items.map(i=>({productoId:i.id||i.productoId,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji}));
+    const its=items.map(i=>buildItem(i));
     onCrear(its,tipo,cliente,direccion,notas);setCart({});setCliente('');setDireccion('');setNotas('');};
   return(<Modal open={open} onClose={onClose} title="📋 Nuevo Pedido" fullScreen>
     <div className="space-y-4">
@@ -2949,7 +2997,7 @@ function CrearPedidoModal({open,onClose,productos,impresora,onCrear}){
 function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const [cart,setCart]=useState(()=>{
     const c={};
-    pedido.items.forEach(i=>{c[i.productoId]={...i,id:i.productoId};});
+    pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
     return c;
   });
   const [tipo,setTipo]=useState(pedido.tipoEntrega);
@@ -2962,7 +3010,7 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   useEffect(()=>{
     if(!open)return;
     const c={};
-    pedido.items.forEach(i=>{c[i.productoId]={...i,id:i.productoId};});
+    pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
     setCart(c);
     setTipo(pedido.tipoEntrega);
     setCliente(pedido.cliente||'');
@@ -2977,11 +3025,11 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
-  const add=p=>setCart(c=>({...c,[p.id||p.productoId]:{...p,productoId:p.id||p.productoId,cantidad:(c[p.id||p.productoId]?.cantidad||0)+1,subtotal:((c[p.id||p.productoId]?.cantidad||0)+1)*p.precio}}));
+  const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   const guardar=()=>{
     if(!items.length)return;
-    const its=items.map(i=>({productoId:i.productoId||i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji}));
+    const its=items.map(i=>buildItem(i));
     const pagoSimple=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
     onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
@@ -3558,7 +3606,7 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
           <p className="font-bold">💡 Rentabilidad por producto</p>
           <p className="text-xs mt-1 opacity-70">Estos costos se usan para calcular el margen. Actualízalos desde la pestaña Importar.</p></div>
         <div className="md:grid md:grid-cols-2 md:gap-4 space-y-4 md:space-y-0">
-        {state.productos.map(p=>{const margen=p.precio>0?(((p.precio-p.costo)/p.precio)*100):0;
+        {state.productos.filter(p=>!p.esVariado).map(p=>{const margen=p.precio>0?(((p.precio-p.costo)/p.precio)*100):0;
           const s=productStats.find(x=>x.id===p.id);
           return(<div key={p.id} className="surface-card">
             <div className="flex items-center justify-between mb-2">
@@ -3586,7 +3634,7 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
           <Btn color="orange" onClick={()=>setShowAddProd(true)}>+ Agregar producto</Btn>
         </div>
         <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
-          {state.productos.map(p=>(<div key={p.id} className="surface-card flex items-center justify-between gap-3">
+          {state.productos.filter(p=>!p.esVariado).map(p=>(<div key={p.id} className="surface-card flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
               <span className="text-2xl shrink-0">{p.emoji}</span>
               <div className="min-w-0">
