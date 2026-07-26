@@ -306,6 +306,10 @@ async function cloudLoad(){
   }catch(e){return null;}
 }
 let _saveTimer=null;
+// Contador de generaciones de guardado local. Un sync que termina despues de
+// que hubo un save() mas nuevo NO debe pisar el estado/localStorage con su
+// resultado (el debounce pendiente subira y reflejara la version mas nueva).
+let _saveSeq=0;
 
 // ─── MERGE HELPERS ──────────────────────────────────────────────────
 // Permite que multiples dispositivos creen/editen pedidos al mismo tiempo
@@ -702,25 +706,10 @@ function pagoBadgeColor(metodo){
 function ventasActivas(ventas=[]){
   return ventas.filter(v=>!v.anulada);
 }
-function calcVentasEfectivo(ventas=[]){
-  return ventasActivas(ventas).filter(v=>v.metodoPago==='efectivo').reduce((s,v)=>s+calcVentaCobrada(v),0);
-}
-function calcVentasTransferencia(ventas=[]){
-  return ventasActivas(ventas).filter(v=>v.metodoPago==='transferencia').reduce((s,v)=>s+calcVentaCobrada(v),0);
-}
-// ─── MANDADITOS / ENVIOS: dinero fisico cobrado, por metodo de pago ──
-// El envio NO es venta del negocio (no entra en utilidad), pero SI es
-// dinero real que pasa por la caja (efectivo) o por el banco (transferencia).
-// Por eso se concilia por separado y por metodo de pago.
-function calcMandaditosCobrados(mandaditos=[]){
-  return (mandaditos||[]).filter(m=>m&&m.cobrado).reduce((s,m)=>s+(Number(m.tarifa)||0),0);
-}
-function calcMandaditosEfectivo(mandaditos=[]){
-  return (mandaditos||[]).filter(m=>m&&m.cobrado&&m.metodoPago==='efectivo').reduce((s,m)=>s+(Number(m.tarifa)||0),0);
-}
-function calcMandaditosTransferencia(mandaditos=[]){
-  return (mandaditos||[]).filter(m=>m&&m.cobrado&&m.metodoPago==='transferencia').reduce((s,m)=>s+(Number(m.tarifa)||0),0);
-}
+// NOTA MANDADITOS / ENVIOS: el envio NO es venta del negocio (no entra en
+// utilidad), pero SI es dinero real de caja/banco. Todo su desglose por metodo
+// de pago sale de buildCajaModel (enviosEfectivo/Transfer/Mixto/Total); las
+// funciones de conteo directo sobre el ledger se eliminaron al migrar.
 function _backfillMandaditoMetodo(j){
   // Completa (sin sobrescribir) el metodo de pago de un envio cobrado tomandolo
   // de la venta del mismo pedido. Garantiza que el desglose efectivo/transferencia
@@ -893,9 +882,17 @@ function useStore(){
   const syncNow=useCallback(async(mode,stateOverride=null)=>{
     const strategy=mode||(deviceInfo.role==='primary'?'replace':'merge');
     const sourceState=stateOverride||state;
+    const seqAtStart=_saveSeq;
     setSyncStatus('syncing');
     try{
       const merged=await cloudSave(sourceState,{strategy,deviceInfo});
+      if(_saveSeq!==seqAtStart){
+        // Hubo un save() local mas nuevo mientras subiamos: no sobrescribir
+        // estado ni localStorage con datos viejos. El debounce pendiente
+        // sincronizara la version mas reciente.
+        setLastCloudAt(new Date().toISOString());
+        return{ok:true,strategy,stale:true};
+      }
       const refreshed=hydrateState(merged);
       persistLocal(refreshed,new Date().toISOString(),false);
       setState(refreshed);
@@ -947,6 +944,7 @@ function useStore(){
     return true;
   },[persistLocal]);
   const save=useCallback(ns=>{
+    _saveSeq++;
     persistLocal(ns,new Date().toISOString(),true);
     setState(ns);
     setSyncStatus('syncing');
@@ -1103,7 +1101,9 @@ function useStore(){
 
   const registrarGasto=useCallback((categoria,descripcion,monto,enEfectivo=true)=>{
     if(!state.jornadaActiva)return;
-    const gasto={id:uid(),hora:now(),categoria,descripcion,monto:Number(monto),enEfectivo};
+    const m=Number(monto);
+    if(!(m>0))return; // backstop: nunca persistir gastos negativos, cero o NaN
+    const gasto={id:uid(),hora:now(),categoria,descripcion,monto:m,enEfectivo};
     const ja={...state.jornadaActiva,gastos:[...state.jornadaActiva.gastos,gasto]};
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:ja});
@@ -1118,6 +1118,7 @@ function useStore(){
 
   const actualizarGasto=useCallback((gastoId,cambios)=>{
     if(!state.jornadaActiva)return;
+    if(cambios.monto!=null&&!(Number(cambios.monto)>0))return; // backstop anti monto invalido
     const ja={...state.jornadaActiva,gastos:state.jornadaActiva.gastos.map(g=>g.id===gastoId?{
       ...g,
       ...cambios,
@@ -1221,23 +1222,25 @@ const fmtDate=iso=>{if(!iso)return'';const d=new Date(iso+'T12:00:00');return d.
 const fmtDateShort=iso=>{if(!iso)return'';const d=new Date(iso+'T12:00:00');return d.toLocaleDateString('es-MX',{day:'numeric',month:'short'});};
 const fmtDateTime=iso=>{if(!iso)return'Sin registro';const d=new Date(iso);return d.toLocaleString('es-MX',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'});};
 const pct=(a,b)=>b>0?((a/b)*100).toFixed(1)+'%':'0%';
-const calcVentasTotal=(ventas=[])=>ventasActivas(ventas).reduce((s,v)=>s+calcVentaCobrada(v),0);
-const calcGastosTotal=(gastos=[])=>gastos.reduce((s,g)=>s+g.monto,0);
-const calcMandaditosTotal=(mandaditos=[])=>mandaditos.reduce((s,m)=>s+m.tarifa,0);
+const calcGastosTotal=(gastos=[])=>gastos.reduce((s,g)=>s+(Number(g.monto)||0),0);
 
 // ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
 function analyzeHistorico(jornadas,productos){
   const cerradas=jornadas.filter(j=>j.estado==='cerrada');
   if(!cerradas.length)return null;
 
+  // Cifras desde buildCajaModel: misma fuente que dashboard, modal de cierre
+  // y ticket. No usar el ledger de ventas directo aqui.
+  const models=new Map(cerradas.map(j=>[j.id,buildCajaModel(j)]));
   // Analisis por dia de la semana
   const porDia={};
   cerradas.forEach(j=>{
     const d=new Date(j.fecha+'T12:00:00');
     const dia=d.toLocaleDateString('es-MX',{weekday:'long'});
     if(!porDia[dia])porDia[dia]={ventas:0,pedidos:0,count:0};
-    porDia[dia].ventas+=calcVentasTotal(j.ventas);
-    porDia[dia].pedidos+=(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
+    const mj=models.get(j.id);
+    porDia[dia].ventas+=mj.productosTotal;
+    porDia[dia].pedidos+=mj.countCobrados;
     porDia[dia].count++;
   });
 
@@ -1250,8 +1253,8 @@ function analyzeHistorico(jornadas,productos){
   // Tendencia (ultimas 3 vs anteriores)
   const ultimas3=cerradas.slice(-3);
   const anteriores=cerradas.slice(0,-3);
-  const promUlt=ultimas3.length?ultimas3.reduce((s,j)=>s+calcVentasTotal(j.ventas),0)/ultimas3.length:0;
-  const promAnt=anteriores.length?anteriores.reduce((s,j)=>s+calcVentasTotal(j.ventas),0)/anteriores.length:0;
+  const promUlt=ultimas3.length?ultimas3.reduce((s,j)=>s+models.get(j.id).productosTotal,0)/ultimas3.length:0;
+  const promAnt=anteriores.length?anteriores.reduce((s,j)=>s+models.get(j.id).productosTotal,0)/anteriores.length:0;
   const tendencia=promAnt>0?((promUlt-promAnt)/promAnt*100):0;
 
   // Productos top por volumen y por rentabilidad
@@ -1275,9 +1278,12 @@ function analyzeHistorico(jornadas,productos){
   const totalEnvios=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length,0);
   const tasaEnvio=totalPedidos>0?(totalEnvios/totalPedidos*100):0;
 
-  // Ticket promedio (solo ventas reales, sin reversas ni anuladas)
-  const allVentas=cerradas.flatMap(j=>ventasActivas(j.ventas).filter(v=>!v.esReversa));
-  const ticketProm=allVentas.length?allVentas.reduce((s,v)=>s+calcVentaCobrada(v),0)/allVentas.length:0;
+  // Ticket promedio = dinero cobrado real / pedidos cobrados. Excluye
+  // cancelados (aunque su venta original siga activa junto a la reversa) y
+  // pendientes; incluye envio porque es lo que realmente pago el cliente.
+  const totCobrado=cerradas.reduce((s,j)=>s+models.get(j.id).cobrosTotal,0);
+  const totTickets=cerradas.reduce((s,j)=>s+models.get(j.id).countCobrados,0);
+  const ticketProm=totTickets>0?totCobrado/totTickets:0;
 
   // Generar insights inteligentes
   const insights=[];
@@ -1369,23 +1375,29 @@ function generarPDF(tipo,jornadas,productos){
     addPageFooter();doc.save(`kapulits_${tipo}_${localISODate(now)}.pdf`);return;
   }
 
-  // Financial summary
-  const tv=cerradas.reduce((s,j)=>s+calcVentasTotal(j.ventas),0);
-  const tg=cerradas.reduce((s,j)=>s+calcGastosTotal(j.gastos),0);
-  const tu=tv-tg;
-  const tvEf=cerradas.reduce((s,j)=>s+calcVentasEfectivo(j.ventas),0);
-  const tvTr=cerradas.reduce((s,j)=>s+calcVentasTransferencia(j.ventas),0);
-  const tmEf=cerradas.reduce((s,j)=>s+calcMandaditosEfectivo(j.mandaditos||[]),0);
-  const tmTr=cerradas.reduce((s,j)=>s+calcMandaditosTransferencia(j.mandaditos||[]),0);
-  const tm=cerradas.reduce((s,j)=>s+calcMandaditosCobrados(j.mandaditos||[]),0);
-  const tTransfer=tvTr+tmTr;
+  // Financial summary — TODO desde buildCajaModel (misma fuente que el
+  // dashboard, el modal de cierre y el ticket). No usar el ledger directo.
+  const models=cerradas.map(j=>buildCajaModel(j));
+  const S=f=>_roundMoney(models.reduce((s,m)=>s+f(m),0));
+  const tv=S(m=>m.productosTotal);
+  const tg=S(m=>m.gastosTotal);
+  const tu=_roundMoney(tv-tg);
+  const tvEf=S(m=>m.productosEfectivo);
+  const tvTr=S(m=>m.productosTransfer);
+  const tvMx=S(m=>m.productosMixto);
+  const tmEf=S(m=>m.enviosEfectivo);
+  const tmTr=S(m=>m.enviosTransfer);
+  const tmMx=S(m=>m.enviosMixto);
+  const tm=S(m=>m.enviosTotal);
+  const tTransfer=S(m=>m.cobrosTransferencia);
   const margen=tv>0?((tu/tv)*100).toFixed(1):'0';
-  const totalPedidos=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length,0);
+  const totalPedidos=models.reduce((s,m)=>s+m.countCobrados,0);
 
   addSection('Resumen del Negocio (utilidad)');
   addRow('Ventas de productos',fmt(tv),{bold:true});
-  addRow('  Productos en efectivo',fmt(tvEf),{indent:ML+4});
-  addRow('  Productos por transferencia',fmt(tvTr),{indent:ML+4});
+  addRow('  Productos en pedidos de efectivo',fmt(tvEf),{indent:ML+4});
+  addRow('  Productos en pedidos de transferencia',fmt(tvTr),{indent:ML+4});
+  if(tvMx>0)addRow('  Productos en pedidos mixtos',fmt(tvMx),{indent:ML+4});
   addDivider();
   addRow('Total gastos del periodo',fmt(tg),{bold:true,color:[202,77,44]});
   addDivider();
@@ -1397,22 +1409,24 @@ function generarPDF(tipo,jornadas,productos){
   addRow('Total envios cobrados',fmt(tm),{bold:true,color:[112,63,186]});
   addRow('  Envios en efectivo',fmt(tmEf),{indent:ML+4});
   addRow('  Envios por transferencia',fmt(tmTr),{indent:ML+4});
+  if(tmMx>0)addRow('  Envios en pedidos mixtos',fmt(tmMx),{indent:ML+4});
   y+=3;
 
   addSection('Dinero Recibido (conciliacion)');
   addRow('Transferencias recibidas (prod + envios)',fmt(tTransfer),{bold:true,color:[72,118,168]});
   addRow('Promedio ventas por jornada',fmt(tv/cerradas.length));
-  addRow('Total pedidos completados',String(totalPedidos));
+  addRow('Total pedidos cobrados',String(totalPedidos));
   y+=3;
 
-  // Per-jornada detail
+  // Per-jornada detail (buildCajaModel por jornada)
   addSection('Detalle por Jornada');
-  cerradas.forEach(j=>{
+  cerradas.forEach((j,idx)=>{
     checkPage(20);
-    const v=calcVentasTotal(j.ventas);const g=calcGastosTotal(j.gastos);const u=v-g;
-    const vEf=calcVentasEfectivo(j.ventas);const vTr=calcVentasTransferencia(j.ventas);
-    const peds=(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length;
-    const manda=calcMandaditosCobrados(j.mandaditos||[]);
+    const mj=models[idx];
+    const v=mj.productosTotal;const g=mj.gastosTotal;const u=mj.utilidadBrutaProductos;
+    const vEf=mj.cobrosEfectivo;const vTr=mj.cobrosTransferencia;
+    const peds=mj.countCobrados;
+    const manda=mj.enviosTotal;
     doc.setFillColor(248,244,238);doc.roundedRect(ML-1,y-3,MR-ML+2,18,1.5,1.5,'F');
     doc.setFont('helvetica','bold');doc.setFontSize(9);
     doc.text(j.fecha+' ('+j.horaApertura+' - '+(j.horaCierre||'?')+')',ML+1,y+1);
@@ -1487,7 +1501,13 @@ function getProductoStats(jornadas,productos){
   // El descriptor variado no genera fila base: cada variante se agrupa abajo
   // por nombre normalizado, no como un unico producto de precio fijo.
   productos.forEach(p=>{if(p.esVariado)return;stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cantidad:0,revenue:0};});
-  jornadas.forEach(j=>{ventasActivas(j.ventas).filter(v=>!v.esReversa).forEach(v=>{v.items.forEach(item=>{
+  jornadas.forEach(j=>{
+    // Excluir la venta original de pedidos cancelados: su reversa activa la
+    // neutraliza en dinero, pero los items solo viven en la original y sin
+    // este filtro inflarian cantidades e ingreso por producto.
+    const act=ventasActivas(j.ventas);
+    const revIds=new Set(act.filter(v=>v.esReversa).map(v=>v.ventaOrigId));
+    act.filter(v=>!v.esReversa&&!revIds.has(v.id)).forEach(v=>{v.items.forEach(item=>{
     if(item.esVariado||item.productoId==='variado'){
       const key='variado::'+normVariadoNombre(item.nombre);
       if(!stats[key])stats[key]={id:key,nombre:(String(item.nombre||'').trim()||'Variado'),precio:0,costo:0,emoji:item.emoji||'🧪',cantidad:0,revenue:0,esVariado:true};
@@ -1502,10 +1522,12 @@ function getProductoStats(jornadas,productos){
 function calcProjections(jornadas){
   const cerradas=jornadas.filter(j=>j.estado==='cerrada');
   if(!cerradas.length)return null;
-  const revenues=cerradas.map(j=>calcVentasTotal(j.ventas));
-  const expenses=cerradas.map(j=>calcGastosTotal(j.gastos));
-  const profits=revenues.map((r,i)=>r-expenses[i]);
-  const mandas=cerradas.map(j=>calcMandaditosCobrados(j.mandaditos||[]));
+  // Series desde buildCajaModel (fuente unica de cifras contables).
+  const models=cerradas.map(j=>buildCajaModel(j));
+  const revenues=models.map(m=>m.productosTotal);
+  const expenses=models.map(m=>m.gastosTotal);
+  const profits=models.map(m=>m.utilidadBrutaProductos);
+  const mandas=models.map(m=>m.enviosTotal);
   const recoger=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length);
   const envios=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length);
   const avg=a=>a.reduce((s,v)=>s+v,0)/a.length;
@@ -2045,7 +2067,7 @@ function _validarCaja(jornada,desg,gastos){
   const byOrig=new Map();
   ventas.filter(v=>v.esReversa&&!v.anulada&&v.ventaOrigId).forEach(v=>byOrig.set(v.ventaOrigId,(byOrig.get(v.ventaOrigId)||0)+1));
   for(const [oid,c] of byOrig){if(c>1)w.push({code:'reversa_duplicada',detail:`${c} reversas activas para venta ${oid}`});}
-  (gastos||[]).forEach((g,i)=>{const m=Number(g.monto);if(!(m>0))w.push({code:'gasto_invalido',detail:`gasto "${g.concepto||g.categoria||('#'+(i+1))}" sin monto válido`});});
+  (gastos||[]).forEach((g,i)=>{const m=Number(g.monto);if(!(m>0))w.push({code:'gasto_invalido',detail:`gasto "${g.descripcion||g.categoria||('#'+(i+1))}" sin monto válido`});});
   // Ajustes de caja: motivo OBLIGATORIO. Una salida/entrada sin motivo no es
   // auditable; se reporta para que el operador la complete o la elimine.
   (jornada?.ajustesCaja||[]).forEach((a,i)=>{
@@ -2537,7 +2559,14 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
   const ajustes=jornada.ajustesCaja||[];
   const envios=(model.rows||[]).filter(r=>r.cobrado&&r.envio>0);
   const conPago=r=>Number((mandaditos.find(x=>x.pedidoId===r.pedidoId)||{}).pagoRepartidorEfectivo)||0;
-  const pagados=envios.map(r=>({...r,pago:conPago(r)})).filter(r=>r.pago>0);
+  // Pagados: TODOS los mandaditos con pago registrado, aunque el pedido se haya
+  // cancelado despues. Si no, el pago seguiria restando de caja (el dinero ya
+  // salio del cajon) pero seria invisible e imposible de quitar desde la UI.
+  const pagados=mandaditos.filter(m=>(Number(m.pagoRepartidorEfectivo)||0)>0).map(m=>{
+    const r=(model.rows||[]).find(x=>x.pedidoId===m.pedidoId);
+    return{pedidoId:m.pedidoId,folio:r?.folio??m.pedidoNum??'?',cliente:m.cliente||r?.cliente||'',
+      pago:Number(m.pagoRepartidorEfectivo)||0,cancelado:!!r?.cancelado};
+  });
   // Pendientes: envios cobrados (envio>0) sin pago al repartidor todavia.
   const pendientes=envios.filter(r=>!(conPago(r)>0));
   const totalPendiente=_roundMoney(pendientes.reduce((s,r)=>s+r.envio,0));
@@ -2586,7 +2615,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
           </React.Fragment>}
       {pagados.length>0&&<div className="space-y-1">
         {pagados.map(r=><div key={r.pedidoId} className="flex justify-between items-center text-xs bg-white/70 rounded-lg px-2 py-1">
-          <span>#{String(r.folio).padStart(3,'0')} {r.cliente||''}</span>
+          <span>#{String(r.folio).padStart(3,'0')} {r.cliente||''}{r.cancelado?' · pedido cancelado':''}</span>
           <span className="flex items-center gap-2"><b className="text-orange-700">{fmt(r.pago)}</b>
             <button className="text-gray-400 hover:text-red-500" onClick={()=>onPagarRepartidor&&onPagarRepartidor(r.pedidoId,0)} title="Quitar">✕</button></span>
         </div>)}
@@ -3051,7 +3080,7 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
     onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
   const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
-  const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||sumPagos(pagoEditado)===_roundMoney(totalFinal);
+  const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||(pagoEditado.efectivo>=0&&pagoEditado.transferencia>=0&&sumPagos(pagoEditado)===_roundMoney(totalFinal));
   return(<Modal open={open} onClose={onClose} title={`✏️ Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
@@ -3113,7 +3142,8 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
   if(!pedido)return null;
   const total=Number(pedido.total)||0;
   const pagoMixto={efectivo:Number(efectivo)||0,transferencia:Number(transferencia)||0};
-  const mixtoOk=sumPagos(pagoMixto)===_roundMoney(total);
+  // Ambas partes >= 0: un monto negativo podria "sumar" el total y corromper caja.
+  const mixtoOk=pagoMixto.efectivo>=0&&pagoMixto.transferencia>=0&&sumPagos(pagoMixto)===_roundMoney(total);
   // Cambio: auxiliar operativo. La caja usa SIEMPRE el neto (total), nunca el
   // bruto recibido. montoRecibido/cambioDevuelto solo se guardan para el registro.
   const recibidoNum=Number(recibido)||0;
@@ -3231,10 +3261,11 @@ function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
   };
 
   const intentarRegistrar=()=>{
-    if(!monto||!desc)return;
+    const m=Number(monto);
+    if(!(m>0)||!desc)return; // monto positivo obligatorio (bloquea negativos y NaN)
     // Si la categoria no existe aun, crearla al vuelo
     const catId=nuevaCat.trim()?nuevaCat.trim().toLowerCase().replace(/\s+/g,'_'):catSel;
-    setShowConfirmAdd({cat:catId,desc,monto:Number(monto),enEfectivo});
+    setShowConfirmAdd({cat:catId,desc,monto:m,enEfectivo});
   };
 
   const confirmarRegistro=()=>{
@@ -3353,7 +3384,7 @@ function EditarGastoModal({open,gasto,cats,onClose,onGuardar}){
         <button onClick={()=>setEnEfectivo(!enEfectivo)} className={`w-12 h-6 rounded-full transition-colors ${enEfectivo?'bg-green-500':'bg-[#d8c6bd]'} relative`}>
           <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${enEfectivo?'right-0.5':'left-0.5'}`}/></button>
       </div>
-      <Btn full color="green" disabled={!descripcion||!monto} onClick={()=>onGuardar({categoria,descripcion,monto:Number(monto),enEfectivo})}>Guardar gasto</Btn>
+      <Btn full color="green" disabled={!descripcion||!(Number(monto)>0)} onClick={()=>onGuardar({categoria,descripcion,monto:Number(monto),enEfectivo})}>Guardar gasto</Btn>
     </div>
   </Modal>);
 }
@@ -3366,7 +3397,10 @@ function ReportesPage({state}){
   const jActual=jornadaSel?state.jornadas.find(j=>j.id===jornadaSel):(state.jornadaActiva||null);
   const proj=calcProjections(state.jornadas);const stats=getProductoStats(state.jornadas,state.productos);const recs=getRecomendaciones(proj,stats);
   const productSales=useMemo(()=>{if(!jActual)return[];const m={};
-    jActual.ventas.forEach(v=>v.items.forEach(i=>{m[i.nombre]=(m[i.nombre]||0)+i.subtotal;}));
+    // Sin reversas ni originales de pedidos cancelados (misma regla que getProductoStats).
+    const act=ventasActivas(jActual.ventas||[]);
+    const revIds=new Set(act.filter(v=>v.esReversa).map(v=>v.ventaOrigId));
+    act.filter(v=>!v.esReversa&&!revIds.has(v.id)).forEach(v=>v.items.forEach(i=>{m[i.nombre]=(m[i.nombre]||0)+i.subtotal;}));
     return Object.entries(m).sort((a,b)=>b[1]-a[1]);},[jActual]);
   return(<div className="safe-bottom"><TopBar title="Reportes"/>
     <div className="app-shell">
@@ -3390,13 +3424,14 @@ function ReportesPage({state}){
               {[...cerradas].reverse().map(j=>(
                 <button key={j.id} onClick={()=>setJornadaSel(j.id)}
                   className={`flex-shrink-0 px-3.5 py-2.5 rounded-2xl text-xs font-bold border ${jornadaSel===j.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.9)] text-[#6f564a]'}`}>{fmtDateShort(j.fecha)}</button>))}</div></div>
-          {jActual&&(()=>{const tv=calcVentasTotal(jActual.ventas);const tg=calcGastosTotal(jActual.gastos);const ut=tv-tg;
-            const mg=tv>0?((ut/tv)*100).toFixed(1):0;const manda=calcMandaditosCobrados(jActual.mandaditos||[]);
+          {jActual&&(()=>{const mj=buildCajaModel(jActual);
+            const tv=mj.productosTotal;const tg=mj.gastosTotal;const ut=mj.utilidadBrutaProductos;
+            const mg=tv>0?((ut/tv)*100).toFixed(1):0;const manda=mj.enviosTotal;
             const pRecoger=(jActual.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
             const pEnvio=(jActual.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
             return(<div className="space-y-4">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <MetricCard icon="💰" label="Ventas" value={fmt(tv)} color="green"/>
+                <MetricCard icon="💰" label="Ventas" value={fmt(tv)} color="green" sub={`Cobrado total: ${fmt(mj.cobrosTotal)}`}/>
                 <MetricCard icon="💸" label="Gastos" value={fmt(tg)} color="red"/>
                 <MetricCard icon="📈" label="Utilidad" value={fmt(ut)} color={ut>=0?'green':'red'} sub={`Margen: ${mg}%`}/>
                 <MetricCard icon="🧾" label="Pedidos" value={(jActual.pedidos||[]).length} color="orange" sub={`${pRecoger} recogen · ${pEnvio} envios`}/>
@@ -3411,8 +3446,9 @@ function ReportesPage({state}){
 
       {tab==='mensual'&&(<div className="space-y-5">
         {cerradas.length===0&&<EmptyState emoji="📅" title="Sin jornadas cerradas" sub="Cierra al menos una jornada"/>}
-        {cerradas.length>0&&(()=>{const tv=cerradas.reduce((s,j)=>s+calcVentasTotal(j.ventas),0);
-          const tg=cerradas.reduce((s,j)=>s+calcGastosTotal(j.gastos),0);const tu=tv-tg;
+        {cerradas.length>0&&(()=>{const ms=cerradas.map(j=>buildCajaModel(j));
+          const tv=_roundMoney(ms.reduce((s,m)=>s+m.productosTotal,0));
+          const tg=_roundMoney(ms.reduce((s,m)=>s+m.gastosTotal,0));const tu=_roundMoney(tv-tg);
           return(<div className="space-y-5">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <MetricCard icon="📅" label="Jornadas" value={cerradas.length} sub="registradas" color="blue"/>
@@ -3557,16 +3593,22 @@ function ReportesPage({state}){
 function MandaditosReport({jornadas,jornadaActiva}){
   const todas=[...jornadas.filter(j=>j.estado==='cerrada')];
   if(jornadaActiva)todas.push(jornadaActiva);
-  const totalManda=todas.reduce((s,j)=>s+calcMandaditosCobrados(j.mandaditos||[]),0);
-  const totalMandaEf=todas.reduce((s,j)=>s+calcMandaditosEfectivo(j.mandaditos||[]),0);
-  const totalMandaTr=todas.reduce((s,j)=>s+calcMandaditosTransferencia(j.mandaditos||[]),0);
+  // Totales desde buildCajaModel: incluye el desglose de envios en pedidos
+  // mixtos, que el conteo por metodoPago del ledger dejaba fuera de Ef/Tr.
+  const models=todas.map(j=>buildCajaModel(j));
+  const totalManda=_roundMoney(models.reduce((s,m)=>s+m.enviosTotal,0));
+  const totalMandaEf=_roundMoney(models.reduce((s,m)=>s+m.enviosEfectivo,0));
+  const totalMandaTr=_roundMoney(models.reduce((s,m)=>s+m.enviosTransfer,0));
+  const totalMandaMx=_roundMoney(models.reduce((s,m)=>s+m.enviosMixto,0));
   const totalEnvios=todas.reduce((s,j)=>s+(j.mandaditos||[]).length,0);
   const totalRecoger=todas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length,0);
   const totalClientes=totalEnvios+totalRecoger;
   const porTipo={};
-  todas.forEach(j=>(j.mandaditos||[]).forEach(m=>{
+  // Solo envios cobrados: asi el desglose por tipo cuadra con "Envios cobrados"
+  // y no suma envios de pedidos cancelados o pendientes.
+  todas.forEach(j=>(j.mandaditos||[]).filter(m=>m&&m.cobrado).forEach(m=>{
     if(!porTipo[m.tipo])porTipo[m.tipo]={cant:0,total:0};
-    porTipo[m.tipo].cant++;porTipo[m.tipo].total+=m.tarifa;
+    porTipo[m.tipo].cant++;porTipo[m.tipo].total+=(Number(m.tarifa)||0);
   }));
   return(<div className="space-y-5">
     {totalClientes===0&&<EmptyState emoji="🛵" title="Sin datos de envios" sub="Los mandaditos apareceran aqui"/>}
@@ -3580,7 +3622,8 @@ function MandaditosReport({jornadas,jornadaActiva}){
       {totalManda>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
         <h3 className="font-black text-gray-800 mb-3 text-sm">Envios por metodo de pago</h3>
         <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600">💵 Efectivo (esta en caja)</span><span className="font-bold text-sm text-green-600">{fmt(totalMandaEf)}</span></div>
-        <div className="flex justify-between items-center py-2"><span className="text-sm text-gray-600">📱 Transferencia (esta en banco)</span><span className="font-bold text-sm text-blue-600">{fmt(totalMandaTr)}</span></div>
+        <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600">📱 Transferencia (esta en banco)</span><span className="font-bold text-sm text-blue-600">{fmt(totalMandaTr)}</span></div>
+        {totalMandaMx>0&&<div className="flex justify-between items-center py-2"><span className="text-sm text-gray-600">💵📱 En pedidos mixtos</span><span className="font-bold text-sm text-purple-600">{fmt(totalMandaMx)}</span></div>}
       </div>)}
       {Object.keys(porTipo).length>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
         <h3 className="font-black text-gray-800 mb-3 text-sm">Desglose por tipo de envio</h3>
