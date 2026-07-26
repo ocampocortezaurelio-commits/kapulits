@@ -211,18 +211,28 @@ const PRODUCTOS_DEFAULT = [
   {id:'quesabirria_harina',nombre:'Quesabirria Harina',precio:60,costo:22,cat:'platillo',emoji:'🥙',activo:true},
   {id:'quesabirria_mano',nombre:'Quesabirria Mano',precio:60,costo:24,cat:'platillo',emoji:'🫔',activo:true},
   {id:'torta',nombre:'Torta',precio:85,costo:31,cat:'platillo',emoji:'🥪',activo:true},
+  // Mulita: costo real pendiente de capturar por el dueño en Admin (no inventar).
+  {id:'mulita',nombre:'Mulita',precio:55,costo:0,cat:'platillo',emoji:'🥩',activo:true},
   {id:'birriamen',nombre:'BIRRIAMEN',precio:145,costo:52,cat:'platillo',emoji:'🍜',activo:true},
   {id:'combo_jarocho',nombre:'Combo Jarocho',precio:415,costo:162,cat:'combo',emoji:'🎉',activo:true},
   {id:'combo_clasico',nombre:'Combo Clásico',precio:265,costo:100,cat:'combo',emoji:'🌟',activo:true},
   {id:'combo_2x2',nombre:'Combo 2+2',precio:290,costo:0,cat:'combo',emoji:'🥤',activo:true},
   {id:'guacamole',nombre:'Guacamole',precio:45,costo:45,cat:'platillo',emoji:'🥑',activo:true},
-  {id:'coca',nombre:'Coca-Cola',precio:30,costo:14,cat:'bebida',emoji:'🥤',activo:true},
+  {id:'coca',nombre:'Coca-Cola',precio:35,costo:14,cat:'bebida',emoji:'🥤',activo:true},
   {id:'jamaica',nombre:'Jamaica',precio:35,costo:7,cat:'bebida',emoji:'🍹',activo:true},
   {id:'horchata',nombre:'Horchata',precio:35,costo:9,cat:'bebida',emoji:'🥛',activo:true},
   // Descriptor especial: sin precio/costo fijos. Cada linea captura su propio
   // nombre y precio (ver esVariado). No se edita como producto ordinario.
   {id:'variado',nombre:'Producto variado',precio:0,costo:0,cat:'variado',emoji:'🧪',activo:true,esVariado:true},
 ];
+
+// ─── VERSION DE CATALOGO ────────────────────────────────────────────
+// Subir este numero cuando un cambio de menu (precios/altas) deba aplicarse
+// tambien a instalaciones EXISTENTES (state.productos ya sembrado). Cada paso
+// versionado en migrateProducts corre UNA sola vez por estado: al terminar,
+// hydrateState estampa state.catalogVersion = CATALOG_VERSION, de modo que
+// ediciones manuales posteriores del dueño nunca se revierten.
+const CATALOG_VERSION = 1;
 
 const COMBO_DESC = {
   combo_jarocho:'4 Quesabirrias Mano + 2 Coca 600ml + 1 Consome',
@@ -272,6 +282,7 @@ const ESTADO_PEDIDO = {
 const INITIAL_STATE = {
   jornadas:[],
   jornadaActiva:null,
+  catalogVersion:CATALOG_VERSION,
   productos:PRODUCTOS_DEFAULT,
   costos:COSTOS_DEFAULT,
   empleados:EMPLEADOS_DEFAULT,
@@ -715,10 +726,27 @@ window.kapulitsRepairHistoricalData=()=>{
   return repaired;
 };
 
-function migrateProducts(prods){
-  const ids=prods.map(p=>p.id);
-  const missing=PRODUCTOS_DEFAULT.filter(d=>!ids.includes(d.id));
-  return missing.length?[...prods,...missing]:prods;
+// Nombre normalizado de producto (trim, espacios, caja) para comparar sin duplicar.
+function normNombreProducto(n){return String(n||'').trim().replace(/\s+/g,' ').toLowerCase();}
+// Migracion de catalogo. Dos partes, ambas idempotentes:
+//  1) ALTAS: agrega productos default ausentes. Match por id Y por nombre
+//     normalizado, para no duplicar si el dueño ya lo creo manualmente con
+//     otro id (p.ej. una "Mulita" propia).
+//  2) PASOS VERSIONADOS: cambios sobre productos existentes (p.ej. precio).
+//     Solo corren si catalogVersion < CATALOG_VERSION; despues de estampar la
+//     version, un precio editado manualmente por el dueño NO se revierte.
+// NUNCA toca jornadas/pedidos/ventas: los precios historicos viven congelados
+// en items[].precio/subtotal y en los totales de cada venta.
+function migrateProducts(prods,catalogVersion){
+  const ids=new Set(prods.map(p=>p.id));
+  const nombres=new Set(prods.map(p=>normNombreProducto(p.nombre)));
+  const missing=PRODUCTOS_DEFAULT.filter(d=>!ids.has(d.id)&&!nombres.has(normNombreProducto(d.nombre)));
+  let next=missing.length?[...prods,...missing]:prods;
+  if((Number(catalogVersion)||0)<1){
+    // v1 (2026-07): refrescos suben de $30 a $35 (menu oficial).
+    next=next.map(p=>!p.esVariado&&(p.id==='coca'||normNombreProducto(p.nombre)==='coca-cola')&&Number(p.precio)!==35?{...p,precio:35}:p);
+  }
+  return next;
 }
 // ID unico por linea de "producto variado": permite varios variados distintos
 // en un mismo pedido sin colisionar por productoId.
@@ -834,7 +862,8 @@ function _reconcileVentasFromPedidos(j){
 }
 function hydrateState(p){
   const base={...INITIAL_STATE,...p,
-    productos:migrateProducts(p?.productos||PRODUCTOS_DEFAULT),
+    productos:migrateProducts(p?.productos||PRODUCTOS_DEFAULT,p?.catalogVersion),
+    catalogVersion:CATALOG_VERSION,
     costos:p?.costos||COSTOS_DEFAULT,
     empleados:p?.empleados||EMPLEADOS_DEFAULT,
     impresora:{...INITIAL_STATE.impresora,...(p?.impresora||{}),conectada:false,reconectando:false}};
