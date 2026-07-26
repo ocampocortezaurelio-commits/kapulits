@@ -9,6 +9,13 @@
 <link rel="manifest" href="manifest.json"/>
 <link rel="apple-touch-icon" href="icon-192.png"/>
 <title>K'apul'Its</title>
+<!-- PONYTAIL / B3 — TECHO CONOCIDO DEL STACK:
+     Babel standalone + Tailwind CDN compilan en runtime (arranque mas lento y
+     dependencia de CDNs). Migrar a build precompilado esta FUERA DE ALCANCE de
+     este lote (reescritura de stack con riesgo sobre rutas de dinero en
+     produccion). Mitigacion vigente: el service worker (sw.js) precachea estos
+     CDNs y el index.html, por lo que la PWA abre y opera sin red. Si algun dia
+     se migra, hacerlo como lote propio con QA contable completa. -->
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -64,9 +71,9 @@
   .safe-bottom{padding-bottom:calc(env(safe-area-inset-bottom,0px) + 80px)}
   .bottom-nav{padding-bottom:env(safe-area-inset-bottom,0px)}
   ::-webkit-scrollbar{display:none}
-  .slide-up{animation:slideUp .3s cubic-bezier(.16,1,.3,1)}
-  @keyframes slideUp{from{transform:translateY(30px);opacity:0}to{transform:translateY(0);opacity:1}}
-  .fade-in{animation:fadeIn .25s ease}
+  .slide-up{animation:slideUp .25s cubic-bezier(.16,1,.3,1)}
+  @keyframes slideUp{from{transform:translateY(24px);opacity:0}to{transform:translateY(0);opacity:1}}
+  .fade-in{animation:fadeIn .2s ease-out}
   @keyframes fadeIn{from{opacity:0}to{opacity:1}}
   .pulse-dot{animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
@@ -132,6 +139,24 @@
     letter-spacing:0;
   }
   .divider-warm{border-color:rgba(221,192,161,.55)}
+  /* Accesibilidad: foco visible por teclado en todo control interactivo */
+  button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{
+    outline:2px solid var(--brand);
+    outline-offset:2px;
+    border-radius:6px;
+  }
+  button{cursor:pointer}
+  button:disabled{cursor:not-allowed}
+  /* Animaciones: rapidas, ease-out, solo transform/opacity (principios Emil
+     Kowalski). Y respeto total a prefers-reduced-motion. */
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{
+      animation-duration:.01ms !important;
+      animation-iteration-count:1 !important;
+      transition-duration:.01ms !important;
+      scroll-behavior:auto !important;
+    }
+  }
 </style>
 </head>
 <body>
@@ -294,8 +319,12 @@ function isDirtyFlagSet(){
 // ─── SUPABASE SYNC ──────────────────────────────────────────────────
 const SB_URL='https://rmzwczoxzemwdoalywfe.supabase.co';
 const SB_KEY='sb_publishable_2lfU9ISeLSrL5yuMgPnILA_N8CQsUoQ';
+// Modo QA sin nube: abrir con ?nocloud=1 desactiva por completo el cliente de
+// Supabase (ni lecturas ni escrituras). Permite probar con datos locales de
+// prueba sin riesgo alguno para los datos de produccion.
+const _QA_NO_CLOUD=(()=>{try{return new URLSearchParams(location.search).has('nocloud');}catch(e){return false;}})();
 let _sb=null;
-try{_sb=window.supabase?.createClient(SB_URL,SB_KEY);}catch(e){}
+try{if(!_QA_NO_CLOUD)_sb=window.supabase?.createClient(SB_URL,SB_KEY);}catch(e){}
 
 async function cloudLoad(){
   if(!_sb)return null;
@@ -321,11 +350,27 @@ function _mergeById(a,b){
     if(!x||!x.id)continue;
     const ex=m.get(x.id);
     if(!ex){m.set(x.id,x);continue;}
-    const exTs=ex._ts||ex.hora||'';
-    const xTs=x._ts||x.hora||'';
+    // B1 — CRITERIO DE MERGE:
+    // 1) Si AMBAS copias traen _ts (toda mutacion moderna lo escribe), gana la
+    //    edicion MAS RECIENTE, sin importar el "avance" de estado. Esto respeta
+    //    des-cancelaciones/re-cobros recientes: antes, una copia vieja con
+    //    estado "mayor" (cancelado/cobrado) podia revertir una restauracion
+    //    hecha despues en otro dispositivo.
+    // 2) Compatibilidad con datos legacy SIN _ts: se conserva el criterio
+    //    anterior (estado avanzado gana; hora como desempate), porque en esos
+    //    datos la hora del dia no es comparable entre dispositivos con reloj
+    //    distinto y perder un cobro seria peor que perder una restauracion.
+    const exTs=ex._ts||'';
+    const xTs=x._ts||'';
+    if(exTs&&xTs){
+      if(xTs>exTs)m.set(x.id,x);
+      continue;
+    }
+    const exTsLegacy=exTs||ex.hora||'';
+    const xTsLegacy=xTs||x.hora||'';
     const exState=(ex.estado==='entregado'||ex.estado==='cancelado'||ex.cobrado)?1:0;
     const xState=(x.estado==='entregado'||x.estado==='cancelado'||x.cobrado)?1:0;
-    if(xState>exState||xTs>exTs)m.set(x.id,x);
+    if(xState>exState||xTsLegacy>exTsLegacy)m.set(x.id,x);
   }
   return Array.from(m.values());
 }
@@ -539,22 +584,50 @@ function _cloudHasRealData(d){
 
 // cloudSave hace MERGE entre nube y local antes de subir. Asi multiples
 // dispositivos pueden agregar/editar pedidos al mismo tiempo sin perder nada.
+// M3 — CONCURRENCIA OPTIMISTA (sin cambiar el esquema de Supabase):
+// el updated_at leido en el load se usa como precondicion del write
+// (update ... eq('updated_at', <valor leido>)). Si otro dispositivo escribio
+// entre nuestro load y nuestro save, el update afecta 0 filas y se reintenta
+// el ciclo load→merge→save con backoff (max 3 intentos). Si se agota, se
+// lanza error con code='sync_conflict': el estado queda dirty y el SyncDot
+// lo reporta como cambios locales pendientes (el siguiente save reintenta).
+const SYNC_MAX_RETRIES=3;
 async function cloudSave(state,opts={}){
   if(!_sb)throw new Error('no client');
   const {strategy='merge',deviceInfo=null}=opts;
   try{_autoBackup(state);}catch(e){}
   const cloudSafePrinter={...INITIAL_STATE.impresora,...state.impresora,conectada:false,reconectando:false};
   const stamped={...state,impresora:cloudSafePrinter,__sync:{writerId:deviceInfo?.id||null,writerRole:deviceInfo?.role||null,writtenAt:new Date().toISOString(),strategy}};
-  let merged=stamped;
-  if(strategy==='merge'){
-    try{
-      const cloud=await cloudLoad();
-      if(cloud?.data)merged=_mergeStates(cloud.data,stamped);
-    }catch(e){/* sin red, subir state local como esta */}
+  for(let attempt=0;attempt<SYNC_MAX_RETRIES;attempt++){
+    let merged=stamped;
+    let baseTs=null; // updated_at leido: precondicion del write condicionado
+    if(strategy==='merge'){
+      try{
+        const cloud=await cloudLoad();
+        if(cloud?.data){merged=_mergeStates(cloud.data,stamped);baseTs=cloud.updated_at||null;}
+      }catch(e){/* sin red, subir state local como esta */}
+    }
+    const newTs=new Date().toISOString();
+    if(strategy==='merge'&&baseTs){
+      // Write condicionado: solo escribe si nadie movio la fila desde el load.
+      const{data,error}=await _sb.from('kapulits_state')
+        .update({data:merged,updated_at:newTs})
+        .eq('id','main').eq('updated_at',baseTs)
+        .select('id');
+      if(error)throw error;
+      if(data&&data.length)return merged; // escrito sin conflicto
+      // 0 filas afectadas => escritura concurrente. Backoff y reintento.
+      await new Promise(r=>setTimeout(r,250*Math.pow(2,attempt)));
+      continue;
+    }
+    // Fila inexistente o strategy=replace (accion explicita): upsert directo.
+    const{error}=await _sb.from('kapulits_state').upsert({id:'main',data:merged,updated_at:newTs},{onConflict:'id'});
+    if(error)throw error;
+    return merged; // devolver el merge para que el cliente refleje pedidos de otros dispositivos
   }
-  const{error}=await _sb.from('kapulits_state').upsert({id:'main',data:merged,updated_at:new Date().toISOString()},{onConflict:'id'});
-  if(error)throw error;
-  return merged; // devolver el merge para que el cliente refleje pedidos de otros dispositivos
+  const err=new Error('Conflicto de sincronización: otro dispositivo guardó al mismo tiempo. Se reintentará.');
+  err.code='sync_conflict';
+  throw err;
 }
 
 // Mantiene hasta 12 snapshots en localStorage (uno cada save).
@@ -654,9 +727,13 @@ function lineaUid(){return'var_'+Date.now().toString(36)+Math.random().toString(
 function normVariadoNombre(n){return String(n||'').trim().replace(/\s+/g,' ').toLowerCase();}
 // Forma persistida de una linea del carrito. El variado conserva su id de linea,
 // la marca esVariado, nombre y precio capturados, y costo 0.
+// B4: si una linea tiene id propio distinto del productoId (linea separada por
+// precio historico distinto al del catalogo), ese id se conserva para que al
+// reeditar el pedido las dos lineas no colisionen en el carrito.
 function buildItem(i){
   const it={productoId:i.productoId||i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji};
   if(i.esVariado){it.esVariado=true;it.id=i.id;it.costo=0;}
+  else if(i.id&&i.id!==it.productoId){it.id=i.id;}
   return it;
 }
 function localISODate(d=new Date()){
@@ -698,7 +775,7 @@ function metodoFromPagos(pagos,metodoFallback){
   return metodoFallback||null;
 }
 function pagoLabel(metodo){
-  return metodo==='mixto'?'💵📱':metodo==='transferencia'?'📱':metodo==='efectivo'?'💵':'—';
+  return metodo==='mixto'?'Mixto':metodo==='transferencia'?'Transferencia':metodo==='efectivo'?'Efectivo':'—';
 }
 function pagoBadgeColor(metodo){
   return metodo==='mixto'?'purple':metodo==='transferencia'?'blue':'green';
@@ -866,9 +943,14 @@ function useStore(){
           const localData=localRaw?JSON.parse(localRaw):null;
           const merged=localData?_mergeStates(cloudData,localData):cloudData;
           const ns=hydrateState(merged);
-          persistLocal(ns,cloudTs,false);
+          // M2: si habia cambios locales sin subir, CONSERVAR el dirty flag.
+          // El merge local los preserva, pero la nube aun no los tiene; el
+          // siguiente save/sync los subira. Antes se marcaba dirty=false y esos
+          // cambios podian quedarse sin subir para siempre.
+          const wasDirty=isDirtyFlagSet();
+          persistLocal(ns,cloudTs,wasDirty);
           setState(ns);
-          setSyncStatus('synced');
+          setSyncStatus(wasDirty?'local':'synced');
           if(deviceInfo.role==='mirror'){
             showRemoteNotice('Datos sincronizados');
           }else{
@@ -900,8 +982,12 @@ function useStore(){
       setSyncStatus('synced');
       return{ok:true,strategy};
     }catch(e){
-      setSyncStatus('offline');
-      return{ok:false,error:e.message||'Error de sync'};
+      // sync_conflict: los reintentos de concurrencia se agotaron. El estado
+      // local sigue dirty y el SyncDot lo muestra como pendiente local (no es
+      // un problema de red). El siguiente save() vuelve a intentar.
+      const conflict=e?.code==='sync_conflict';
+      setSyncStatus(conflict?'local':'offline');
+      return{ok:false,error:e.message||'Error de sync',conflict};
     }
   },[deviceInfo, persistLocal, state]);
 
@@ -969,7 +1055,9 @@ function useStore(){
   const today=()=>localISODate();
 
   const abrirJornada=useCallback((fondoInicial,fecha)=>{
-    const j={id:uid(),fecha:fecha||today(),estado:'abierta',fondoInicial:Number(fondoInicial)||0,
+    // B2: el fondo inicial nunca puede ser negativo (corromperia la caja esperada).
+    const fondo=Math.max(0,Number(fondoInicial)||0);
+    const j={id:uid(),fecha:fecha||today(),estado:'abierta',fondoInicial:fondo,
       ventas:[],gastos:[],pedidos:[],mandaditos:[],ajustesCaja:[],contadorPedido:1,
       horaApertura:now(),timestampApertura:Date.now(),horaCierre:null,totalEfectivo:null,diferencia:null,observaciones:''};
     save({...state,jornadas:[...state.jornadas,j],jornadaActiva:j});
@@ -977,10 +1065,13 @@ function useStore(){
 
   const cerrarJornada=useCallback((totalEfectivo,observaciones)=>{
     if(!state.jornadaActiva)return;
+    // B2: el efectivo contado no puede ser negativo (no existe conteo fisico < 0).
+    const contado=Number(totalEfectivo);
+    if(!(contado>=0))return;
     const ja={...state.jornadaActiva,estado:'cerrada',horaCierre:now(),
-      totalEfectivo:Number(totalEfectivo)||0,observaciones:observaciones||''};
+      totalEfectivo:contado,observaciones:observaciones||''};
     const esperado=_calcEsperadoCaja(ja);
-    ja.diferencia=(Number(totalEfectivo)||0)-esperado;
+    ja.diferencia=contado-esperado;
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:null});
   },[state,save]);
@@ -1224,6 +1315,93 @@ const fmtDateTime=iso=>{if(!iso)return'Sin registro';const d=new Date(iso);retur
 const pct=(a,b)=>b>0?((a/b)*100).toFixed(1)+'%':'0%';
 const calcGastosTotal=(gastos=[])=>gastos.reduce((s,g)=>s+(Number(g.monto)||0),0);
 
+// ─── SISTEMA DE ICONOS SVG (estilo lucide/feather, sin dependencias) ────────
+// Paths inline en grid 24px, stroke currentColor. La UI NO usa emojis; los
+// emojis de producto siguen viviendo en los DATOS (state.productos[].emoji)
+// y se representan con un icono neutro por categoria (ProductIcon).
+const ICONS={
+  home:<g><path d="M3 9.5 12 3l9 6.5V20a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M9 22v-8h6v8"/></g>,
+  orders:<g><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></g>,
+  wallet:<g><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></g>,
+  chart:<g><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/><line x1="6" y1="20" x2="6" y2="16"/></g>,
+  settings:<g><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></g>,
+  cash:<g><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01"/><path d="M18 12h.01"/></g>,
+  phone:<g><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M12 18h.01"/></g>,
+  printer:<g><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8" rx="1"/></g>,
+  receipt:<g><path d="M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/></g>,
+  chat:<g><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></g>,
+  edit:<g><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></g>,
+  x:<g><path d="M18 6 6 18"/><path d="m6 6 12 12"/></g>,
+  check:<g><path d="M20 6 9 17l-5-5"/></g>,
+  trash:<g><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></g>,
+  plus:<g><path d="M5 12h14"/><path d="M12 5v14"/></g>,
+  minus:<g><path d="M5 12h14"/></g>,
+  alert:<g><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></g>,
+  info:<g><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></g>,
+  cloud:<g><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"/></g>,
+  download:<g><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></g>,
+  upload:<g><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></g>,
+  bike:<g><circle cx="18.5" cy="17.5" r="3.5"/><circle cx="5.5" cy="17.5" r="3.5"/><circle cx="15" cy="5" r="1"/><path d="M12 17.5V14l-3-3 4-3 2 3h2"/></g>,
+  car:<g><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></g>,
+  bag:<g><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></g>,
+  pin:<g><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></g>,
+  note:<g><path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5L15.5 3Z"/><path d="M15 3v6h6"/></g>,
+  bowl:<g><path d="M12 21a9 9 0 0 0 9-9H3a9 9 0 0 0 9 9Z"/><path d="M7 21h10"/><path d="M9.5 9c0-1.5 1-2 1-3.5"/><path d="M14 9c0-1.5 1-2 1-3.5"/></g>,
+  cup:<g><path d="M17 8h1a4 4 0 1 1 0 8h-1"/><path d="M3 8h14v9a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4Z"/></g>,
+  star:<g><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></g>,
+  tag:<g><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></g>,
+  calendar:<g><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></g>,
+  clock:<g><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></g>,
+  trendUp:<g><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></g>,
+  trendDown:<g><polyline points="22 17 13.5 8.5 8.5 13.5 2 7"/><polyline points="16 17 22 17 22 11"/></g>,
+  sparkles:<g><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/></g>,
+  file:<g><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></g>,
+  users:<g><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></g>,
+  lock:<g><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></g>,
+  refresh:<g><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 21H3v-5"/></g>,
+  monitor:<g><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></g>,
+  lifebuoy:<g><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="4.93" y1="4.93" x2="9.17" y2="9.17"/><line x1="14.83" y1="14.83" x2="19.07" y2="19.07"/><line x1="14.83" y1="9.17" x2="19.07" y2="4.93"/><line x1="4.93" y1="19.07" x2="9.17" y2="14.83"/></g>,
+  search:<g><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></g>,
+  wrench:<g><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></g>,
+  sun:<g><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></g>,
+  bulb:<g><path d="M15 14c.2-1 .7-1.7 1.5-2.5A7 7 0 1 0 5 9c0 1 .5 2.5 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></g>,
+  box:<g><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></g>,
+  coins:<g><circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/><path d="m16.71 13.88.7.71-2.82 2.82"/></g>,
+  save:<g><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></g>,
+  chevronDown:<g><polyline points="6 9 12 15 18 9"/></g>,
+  chevronUp:<g><polyline points="18 15 12 9 6 15"/></g>,
+  bluetooth:<g><path d="m7 7 10 10-5 5V2l5 5L7 17"/></g>,
+  zap:<g><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></g>,
+  undo:<g><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></g>,
+  briefcase:<g><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></g>,
+};
+function Icon({name,size=18,className='',strokeWidth=2,label}){
+  const paths=ICONS[name];
+  if(!paths)return null;
+  return(<svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor"
+    strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round"
+    className={`inline-block align-[-0.18em] shrink-0 ${className}`}
+    aria-hidden={label?undefined:'true'} role={label?'img':undefined} aria-label={label}>{paths}</svg>);
+}
+// Etiqueta de metodo de pago: icono(s) + accesibilidad. Sustituye a los
+// emojis 💵/📱 en badges y listas.
+function PagoTag({metodo,size=13,withText=false}){
+  const label=metodo==='mixto'?'Mixto':metodo==='transferencia'?'Transferencia':metodo==='efectivo'?'Efectivo':'Sin método';
+  return(<span className="inline-flex items-center gap-1" role="img" aria-label={`Pago: ${label}`}>
+    {(metodo==='efectivo'||metodo==='mixto')&&<Icon name="cash" size={size}/>}
+    {(metodo==='transferencia'||metodo==='mixto')&&<Icon name="phone" size={size}/>}
+    {!metodo&&<span aria-hidden="true">—</span>}
+    {withText&&<span>{label}</span>}
+  </span>);
+}
+// Icono neutro por categoria de producto (el campo de datos emoji NO se borra;
+// simplemente la UI ya no lo pinta).
+function ProductIcon({cat,size=20,className=''}){
+  const name=cat==='bebida'?'cup':cat==='combo'?'star':cat==='variado'?'tag':'bowl';
+  return<Icon name={name} size={size} className={className} strokeWidth={1.7}/>;
+}
+const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car'};
+
 // ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
 function analyzeHistorico(jornadas,productos){
   const cerradas=jornadas.filter(j=>j.estado==='cerrada');
@@ -1287,15 +1465,17 @@ function analyzeHistorico(jornadas,productos){
 
   // Generar insights inteligentes
   const insights=[];
-  if(mejorDia)insights.push({icon:'📅',type:'info',text:`Tu mejor dia es ${mejorDia.dia} con promedio de ${fmt(mejorDia.promVentas)} en ventas.`});
-  if(peorDia&&peorDia.dia!==mejorDia?.dia)insights.push({icon:'📉',type:'warn',text:`${peorDia.dia} es tu dia mas bajo (${fmt(peorDia.promVentas)} prom). Considera promociones especiales.`});
-  if(tendencia>10)insights.push({icon:'🚀',type:'ok',text:`Tendencia positiva: ventas subieron ${tendencia.toFixed(0)}% vs jornadas anteriores.`});
-  else if(tendencia<-10)insights.push({icon:'⚠️',type:'warn',text:`Alerta: ventas bajaron ${Math.abs(tendencia).toFixed(0)}% en las ultimas jornadas.`});
-  if(topVolumen[0])insights.push({icon:'⭐',type:'info',text:`${topVolumen[0].emoji} ${topVolumen[0].nombre} es el mas pedido (${topVolumen[0].cantidad} pz). Nunca te quedes sin stock.`});
-  if(topRentable[0])insights.push({icon:'💎',type:'ok',text:`${topRentable[0].emoji} ${topRentable[0].nombre} tiene el mejor margen (${topRentable[0].margen.toFixed(0)}%). Promocionalo mas.`});
-  if(tasaEnvio>50)insights.push({icon:'🛵',type:'info',text:`${tasaEnvio.toFixed(0)}% de pedidos son envios. Evalua ajustar tarifas o agregar repartidor.`});
-  if(horaPico)insights.push({icon:'⏰',type:'info',text:`Hora pico: ${horaPico[0]}:00 hrs (${horaPico[1]} pedidos). Asegura personal suficiente.`});
-  if(ticketProm>0)insights.push({icon:'🧾',type:'info',text:`Ticket promedio: ${fmt(ticketProm)}. Considera combos para subirlo.`});
+  // icon = nombre de icono SVG (componente Icon); los textos no llevan emojis
+  // (tambien mejora el PDF: helvetica no puede pintar emojis).
+  if(mejorDia)insights.push({icon:'calendar',type:'info',text:`Tu mejor dia es ${mejorDia.dia} con promedio de ${fmt(mejorDia.promVentas)} en ventas.`});
+  if(peorDia&&peorDia.dia!==mejorDia?.dia)insights.push({icon:'trendDown',type:'warn',text:`${peorDia.dia} es tu dia mas bajo (${fmt(peorDia.promVentas)} prom). Considera promociones especiales.`});
+  if(tendencia>10)insights.push({icon:'trendUp',type:'ok',text:`Tendencia positiva: ventas subieron ${tendencia.toFixed(0)}% vs jornadas anteriores.`});
+  else if(tendencia<-10)insights.push({icon:'alert',type:'warn',text:`Alerta: ventas bajaron ${Math.abs(tendencia).toFixed(0)}% en las ultimas jornadas.`});
+  if(topVolumen[0])insights.push({icon:'star',type:'info',text:`${topVolumen[0].nombre} es el mas pedido (${topVolumen[0].cantidad} pz). Nunca te quedes sin stock.`});
+  if(topRentable[0])insights.push({icon:'sparkles',type:'ok',text:`${topRentable[0].nombre} tiene el mejor margen (${topRentable[0].margen.toFixed(0)}%). Promocionalo mas.`});
+  if(tasaEnvio>50)insights.push({icon:'bike',type:'info',text:`${tasaEnvio.toFixed(0)}% de pedidos son envios. Evalua ajustar tarifas o agregar repartidor.`});
+  if(horaPico)insights.push({icon:'clock',type:'info',text:`Hora pico: ${horaPico[0]}:00 hrs (${horaPico[1]} pedidos). Asegura personal suficiente.`});
+  if(ticketProm>0)insights.push({icon:'receipt',type:'info',text:`Ticket promedio: ${fmt(ticketProm)}. Considera combos para subirlo.`});
 
   return{porDia:dias,mejorDia,peorDia,tendencia,topVolumen,topRentable,topRevenue,horaPico,tasaEnvio,ticketProm,insights,totalJornadas:cerradas.length};
 }
@@ -1500,7 +1680,7 @@ function getProductoStats(jornadas,productos){
   const stats={};
   // El descriptor variado no genera fila base: cada variante se agrupa abajo
   // por nombre normalizado, no como un unico producto de precio fijo.
-  productos.forEach(p=>{if(p.esVariado)return;stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cantidad:0,revenue:0};});
+  productos.forEach(p=>{if(p.esVariado)return;stats[p.id]={id:p.id,nombre:p.nombre,precio:p.precio,costo:p.costo,emoji:p.emoji,cat:p.cat,cantidad:0,revenue:0};});
   jornadas.forEach(j=>{
     // Excluir la venta original de pedidos cancelados: su reversa activa la
     // neutraliza en dinero, pero los items solo viven en la original y sin
@@ -1510,7 +1690,7 @@ function getProductoStats(jornadas,productos){
     act.filter(v=>!v.esReversa&&!revIds.has(v.id)).forEach(v=>{v.items.forEach(item=>{
     if(item.esVariado||item.productoId==='variado'){
       const key='variado::'+normVariadoNombre(item.nombre);
-      if(!stats[key])stats[key]={id:key,nombre:(String(item.nombre||'').trim()||'Variado'),precio:0,costo:0,emoji:item.emoji||'🧪',cantidad:0,revenue:0,esVariado:true};
+      if(!stats[key])stats[key]={id:key,nombre:(String(item.nombre||'').trim()||'Variado'),precio:0,costo:0,emoji:item.emoji||'🧪',cat:'variado',cantidad:0,revenue:0,esVariado:true};
       stats[key].cantidad+=item.cantidad;stats[key].revenue+=item.subtotal;
     }else if(stats[item.productoId]){stats[item.productoId].cantidad+=item.cantidad;stats[item.productoId].revenue+=item.subtotal;}
   });});});
@@ -1542,16 +1722,16 @@ function calcProjections(jornadas){
 
 function getRecomendaciones(proj,stats){
   if(!proj)return[];const recs=[];
-  if(proj.margin<25)recs.push({type:'warn',icon:'⚠️',text:`Margen de utilidad: ${proj.margin.toFixed(1)}%. Revisa costos o ajusta precios.`});
-  else if(proj.margin>50)recs.push({type:'ok',icon:'🌟',text:`Excelente! Margen del ${proj.margin.toFixed(1)}%.`});
-  else recs.push({type:'ok',icon:'✅',text:`Margen de ${proj.margin.toFixed(1)}% saludable.`});
+  if(proj.margin<25)recs.push({type:'warn',icon:'alert',text:`Margen de utilidad: ${proj.margin.toFixed(1)}%. Revisa costos o ajusta precios.`});
+  else if(proj.margin>50)recs.push({type:'ok',icon:'sparkles',text:`Excelente! Margen del ${proj.margin.toFixed(1)}%.`});
+  else recs.push({type:'ok',icon:'check',text:`Margen de ${proj.margin.toFixed(1)}% saludable.`});
   const top=stats.filter(s=>s.cantidad>0).sort((a,b)=>b.cantidad-a.cantidad)[0];
-  if(top)recs.push({type:'info',icon:'⭐',text:`Producto estrella: ${top.emoji} ${top.nombre} (${top.cantidad} pz). Asegura stock!`});
+  if(top)recs.push({type:'info',icon:'star',text:`Producto estrella: ${top.nombre} (${top.cantidad} pz). Asegura stock!`});
   const mp=stats.filter(s=>s.cantidad>0&&s.precio>0).map(s=>({...s,m:(s.precio-s.costo)/s.precio*100})).sort((a,b)=>b.m-a.m)[0];
-  if(mp)recs.push({type:'info',icon:'💡',text:`Mayor rentabilidad: ${mp.emoji} ${mp.nombre} con ${mp.m.toFixed(0)}% margen. Promuevelo!`});
-  recs.push({type:'info',icon:'📈',text:`Proyeccion mensual (4 jornadas): ${fmt(proj.projRevenue)} ventas, ${fmt(proj.projProfit)} utilidad.`});
+  if(mp)recs.push({type:'info',icon:'bulb',text:`Mayor rentabilidad: ${mp.nombre} con ${mp.m.toFixed(0)}% margen. Promuevelo!`});
+  recs.push({type:'info',icon:'trendUp',text:`Proyeccion mensual (4 jornadas): ${fmt(proj.projRevenue)} ventas, ${fmt(proj.projProfit)} utilidad.`});
   if(proj.totalEnvios>0||proj.totalRecoger>0){
-    recs.push({type:'info',icon:'🛵',text:`Envios: ${proj.totalEnvios} - Recogen: ${proj.totalRecoger}. Mandaditos proyectados: ${fmt(proj.projMandaditos)}/mes.`});
+    recs.push({type:'info',icon:'bike',text:`Envios: ${proj.totalEnvios} - Recogen: ${proj.totalRecoger}. Mandaditos proyectados: ${fmt(proj.projMandaditos)}/mes.`});
   }
   return recs;
 }
@@ -1727,8 +1907,8 @@ function buildTicketHTML(pedido){
   h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
   h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
   if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
-  h+=`<div>Tipo: ${tarifa.emoji} ${tarifa.label}</div>`;
-  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>📍 ${pedido.direccion}</div>`;
+  h+=`<div>Tipo: ${tarifa.label}</div>`;
+  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>Dir: ${pedido.direccion}</div>`;
   h+=`<div class="s"></div>`;
   pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
   h+=`<div class="s"></div>`;
@@ -1737,7 +1917,7 @@ function buildTicketHTML(pedido){
   h+=`<div class="r b" style="font-size:14px"><span>TOTAL</span><span>${fmt(pedido.total)}</span></div>`;
   h+=`<div class="s"></div>`;
   if(pedido.notas){
-    h+=`<div class="b" style="margin-top:4px">📝 Notas:</div>`;
+    h+=`<div class="b" style="margin-top:4px">Notas:</div>`;
     h+=`<div>${pedido.notas}</div>`;
     h+=`<div class="s"></div>`;
   }
@@ -1764,7 +1944,7 @@ function buildTicketsHTML(pedidos=[]){
     h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
     h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
     if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
-    h+=`<div>Tipo: ${tarifa.emoji} ${tarifa.label}</div>`;
+    h+=`<div>Tipo: ${tarifa.label}</div>`;
     if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>${pedido.direccion}</div>`;
     h+=`<div class="s"></div>`;
     pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
@@ -2331,13 +2511,16 @@ function MetricCard({label,value,sub,color='orange',icon}){
     purple:'bg-[rgba(163,99,255,.10)] border-[rgba(163,99,255,.18)] text-[rgb(112,63,186)]'
   };
   return(<div className={`${c[color]||c.orange} rounded-[22px] border p-4 flex flex-col gap-1.5`}>
-    <div className="flex items-center gap-2">{icon&&<span className="text-lg">{icon}</span>}<span className="text-[11px] font-bold uppercase tracking-[0.14em] opacity-70">{label}</span></div>
+    <div className="flex items-center gap-2">{icon&&<Icon name={icon} size={16} className="opacity-80"/>}<span className="text-[11px] font-bold uppercase tracking-[0.14em] opacity-70">{label}</span></div>
     <p className="text-[28px] leading-none font-black tracking-tight">{value}</p>{sub&&<p className="text-[11px] opacity-60 leading-snug">{sub}</p>}</div>);
 }
+// Jerarquia de botones: solid = accion primaria/peligro segun color;
+// variant="outline" = accion secundaria. Estados hover/active/disabled/
+// focus-visible definidos; altura tactil minima 44px en todos los tamanos.
 function Btn(props){
   const {children,onClick,color='orange',size='md',full=false,disabled=false,variant='solid',...rest}=props;
-  const sz={sm:'px-3.5 py-2 text-[12px]',md:'px-5 py-3 text-[14px]',lg:'px-6 py-4 text-[15px]'};
-  const base=`${sz[size]} font-bold rounded-[18px] transition-all active:scale-[.98] ${full?'w-full':''} ${disabled?'opacity-40 pointer-events-none':''}`;
+  const sz={sm:'px-3.5 py-2 text-[12px] min-h-[44px]',md:'px-5 py-3 text-[14px] min-h-[44px]',lg:'px-6 py-4 text-[15px] min-h-[48px]'};
+  const base=`${sz[size]} font-bold rounded-[18px] inline-flex items-center justify-center transition-[transform,opacity,box-shadow] duration-150 ease-out active:scale-[.98] hover:brightness-[1.05] ${full?'w-full':''} ${disabled?'opacity-40 pointer-events-none':''}`;
   const vars={
     orange:{solid:'bg-[linear-gradient(135deg,#d76516,#eb8a1e)] text-white shadow-[0_12px_28px_rgba(174,74,13,.24)]'},
     green:{solid:'bg-[linear-gradient(135deg,#2d8b57,#4aa067)] text-white shadow-[0_12px_28px_rgba(45,139,87,.2)]'},
@@ -2367,12 +2550,12 @@ function Modal({open,onClose,title,children,fullScreen=false}){
         <div className="w-10 h-1 bg-[rgba(165,129,107,.34)] rounded-full mx-auto mb-3 md:hidden"/>
         <div className="flex items-center justify-between">
           <h2 className="text-[20px] font-black text-[var(--text)] tracking-tight">{title}</h2>
-          <button className="text-[var(--text-muted)] text-2xl leading-none hover:text-[var(--text)]" onClick={onClose} aria-label="Cerrar modal">✕</button></div></div>
+          <button className="text-[var(--text-muted)] hover:text-[var(--text)] w-11 h-11 -mr-2 flex items-center justify-center rounded-full transition-colors duration-150" onClick={onClose} aria-label="Cerrar modal"><Icon name="x" size={20}/></button></div></div>
       <div className="px-5 py-4">{children}</div></div></div>);
 }
-function EmptyState({emoji,title,sub}){
+function EmptyState({icon='info',title,sub}){
   return(<div className="surface-card flex flex-col items-center justify-center py-16 px-8 text-center fade-in">
-    <div className="w-20 h-20 bg-[rgba(242,191,90,.18)] rounded-full flex items-center justify-center mb-4"><span className="text-4xl">{emoji}</span></div>
+    <div className="w-20 h-20 bg-[rgba(242,191,90,.18)] rounded-full flex items-center justify-center mb-4 text-[var(--brand-strong)]"><Icon name={icon} size={34} strokeWidth={1.6}/></div>
     <h3 className="text-[20px] font-black text-[var(--text)] mb-2">{title}</h3>
     {sub&&<p className="text-sm text-[var(--text-soft)] leading-relaxed">{sub}</p>}</div>);
 }
@@ -2397,19 +2580,20 @@ function Skeleton({w='100%',h='20px',className=''}){
 // ─── BOTTOM NAV ─────────────────────────────────────────────────────
 function BottomNav({page,setPage,hasJornada,pedidosNuevos=0}){
   const tabs=[
-    {id:'dashboard',emoji:'🏠',label:'Inicio'},
-    {id:'pedidos',emoji:'📋',label:'Pedidos'},
-    {id:'gastos',emoji:'💸',label:'Gastos'},
-    {id:'reportes',emoji:'📊',label:'Reportes'},
-    {id:'admin',emoji:'⚙️',label:'Admin'},
+    {id:'dashboard',icon:'home',label:'Inicio'},
+    {id:'pedidos',icon:'orders',label:'Pedidos'},
+    {id:'gastos',icon:'wallet',label:'Gastos'},
+    {id:'reportes',icon:'chart',label:'Reportes'},
+    {id:'admin',icon:'settings',label:'Admin'},
   ];
   return(<div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[430px] md:max-w-[600px] z-40 bottom-nav px-4 pb-2">
     <div className="surface-card border px-2 py-2 shadow-[0_18px_40px_rgba(88,42,10,.16)]">
-      <div className="flex">{tabs.map(t=>{const active=page===t.id;
-      return(<button key={t.id} onClick={()=>setPage(t.id)}
-        className={`flex-1 flex flex-col items-center justify-center py-2 gap-1 rounded-[18px] transition-colors ${active?'bg-[rgba(242,191,90,.18)] text-[var(--brand-strong)]':'text-[var(--text-muted)]'}`}>
-        <span className="text-xl relative">{t.emoji}
-          {t.id==='pedidos'&&pedidosNuevos>0&&<span className="absolute -top-1 -right-2 bg-[var(--danger)] text-white text-[9px] font-black min-w-[16px] h-4 rounded-full flex items-center justify-center">{pedidosNuevos}</span>}
+      <div className="flex" role="tablist" aria-label="Navegación principal">{tabs.map(t=>{const active=page===t.id;
+      return(<button key={t.id} onClick={()=>setPage(t.id)} aria-label={t.label} aria-current={active?'page':undefined}
+        className={`flex-1 flex flex-col items-center justify-center py-2 gap-1 rounded-[18px] min-h-[52px] transition-colors duration-150 ${active?'bg-[rgba(242,191,90,.18)] text-[var(--brand-strong)]':'text-[var(--text-muted)]'}`}>
+        <span className="relative flex items-center justify-center">
+          <Icon name={t.icon} size={21} strokeWidth={active?2.2:1.8}/>
+          {t.id==='pedidos'&&pedidosNuevos>0&&<span className="absolute -top-1.5 -right-3 bg-[var(--danger)] text-white text-[9px] font-black min-w-[16px] h-4 rounded-full flex items-center justify-center" aria-label={`${pedidosNuevos} pedidos nuevos`}>{pedidosNuevos}</span>}
         </span>
         <span className={`text-[10px] md:text-[12px] font-bold ${active?'text-[var(--brand-strong)]':'text-[var(--text-muted)]'}`}>{t.label}</span>
       </button>);})}</div>
@@ -2420,14 +2604,18 @@ function BottomNav({page,setPage,hasJornada,pedidosNuevos=0}){
 // ─── MODALS ─────────────────────────────────────────────────────────
 function AbrirJornadaModal({open,onClose,onAbrir}){
   const [fondo,setFondo]=useState('');const [fecha,setFecha]=useState(localISODate());
-  return(<Modal open={open} onClose={onClose} title="🟢 Abrir Jornada">
+  // B2: el fondo inicial debe ser >= 0 (vacio equivale a 0).
+  const fondoInvalido=fondo!==''&&!(Number(fondo)>=0);
+  return(<Modal open={open} onClose={onClose} title="Abrir jornada">
     <div className="flex flex-col gap-5">
       <div className="bg-orange-50 rounded-2xl p-4 text-sm text-orange-700">
         <p className="font-bold mb-1">Todo listo para comenzar?</p>
         <p className="opacity-70">Registra el fondo inicial de la caja.</p></div>
       <Input label="Fecha de jornada" type="date" value={fecha} onChange={setFecha}/>
       <Input label="Fondo inicial en caja" type="number" placeholder="0" prefix="$" value={fondo} onChange={setFondo}/>
-      <Btn full color="green" size="lg" onClick={()=>{onAbrir(fondo,fecha);setFondo('');onClose();}}>🟢 Abrir Jornada</Btn>
+      {fondoInvalido&&<p className="text-xs font-bold text-[var(--danger)]" role="alert">El fondo inicial no puede ser negativo.</p>}
+      <Btn full color="green" size="lg" disabled={fondoInvalido} onClick={()=>{onAbrir(fondo,fecha);setFondo('');onClose();}}>
+        <Icon name="sun" size={18} className="mr-1.5"/>Abrir jornada</Btn>
     </div></Modal>);
 }
 
@@ -2437,11 +2625,13 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
   const m=buildCajaModel(jornada);
   const esperado=m.cajaEsperada;
   const dif=(Number(efectivo)||0)-esperado;
-  const metAbbr=x=>pagoLabel(x);
-  return(<Modal open={open} onClose={onClose} title="🔴 Corte de Caja">
+  // B2: el efectivo contado debe ser un numero >= 0 para poder cerrar.
+  const efectivoValido=efectivo!==''&&Number(efectivo)>=0;
+  const efectivoNegativo=efectivo!==''&&!(Number(efectivo)>=0);
+  return(<Modal open={open} onClose={onClose} title="Corte de caja">
     <div className="flex flex-col gap-4">
       {m.warnings.length>0&&<div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[12px] text-amber-800">
-        <p className="font-bold mb-1">⚠️ Revisar antes de cerrar ({m.warnings.length})</p>
+        <p className="font-bold mb-1"><Icon name="alert" size={14} className="mr-1"/>Revisar antes de cerrar ({m.warnings.length})</p>
         <ul className="list-disc pl-4 space-y-0.5">
           {m.warnings.slice(0,6).map((wn,i)=><li key={i}>{wn.folio?`#${wn.folio} `:''}{wn.detail}</li>)}
         </ul>
@@ -2452,10 +2642,10 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
       <div className="bg-white border border-gray-200 rounded-2xl p-4">
         <h3 className="font-bold text-gray-700 text-sm mb-2">A · Cobros del día</h3>
         <div className="space-y-1 text-sm">
-          <div className="flex justify-between"><span className="text-gray-500">💵 Efectivo real recibido</span><span className="font-bold">{fmt(m.cobrosEfectivo)}</span></div>
-          <div className="flex justify-between"><span className="text-gray-500">📱 Transferencia real recibida</span><span className="font-bold">{fmt(m.cobrosTransferencia)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500"><Icon name="cash" size={14} className="mr-1"/>Efectivo real recibido</span><span className="font-bold">{fmt(m.cobrosEfectivo)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500"><Icon name="phone" size={14} className="mr-1"/>Transferencia real recibida</span><span className="font-bold">{fmt(m.cobrosTransferencia)}</span></div>
           <div className="border-t my-1"/>
-          <div className="flex justify-between font-black"><span>🧾 Total cobrado a clientes</span><span>{fmt(m.cobrosTotal)}</span></div>
+          <div className="flex justify-between font-black"><span><Icon name="receipt" size={14} className="mr-1"/>Total cobrado a clientes</span><span>{fmt(m.cobrosTotal)}</span></div>
         </div>
       </div>
 
@@ -2463,8 +2653,8 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
       <div className="bg-gray-50 rounded-2xl p-4">
         <h3 className="font-bold text-gray-700 text-sm mb-2">B · Desglose operativo</h3>
         <div className="space-y-1 text-sm mb-2">
-          <div className="flex justify-between"><span className="text-gray-500">🍲 Productos vendidos</span><span className="font-bold text-green-600">{fmt(m.productosTotal)}</span></div>
-          <div className="flex justify-between"><span className="text-gray-500">🛵 Envíos/servicios cobrados</span><span className="font-bold text-purple-600">{fmt(m.enviosTotal)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500"><Icon name="bowl" size={14} className="mr-1"/>Productos vendidos</span><span className="font-bold text-green-600">{fmt(m.productosTotal)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-500"><Icon name="bike" size={14} className="mr-1"/>Envíos/servicios cobrados</span><span className="font-bold text-purple-600">{fmt(m.enviosTotal)}</span></div>
           <div className="flex justify-between text-xs text-gray-400"><span>Pedidos</span><span>{m.countCobrados} cobrados · {m.countPendientes} pendientes · {m.countCancelados} cancelados</span></div>
         </div>
         <div className="grid grid-cols-[auto_1fr_auto_auto_auto] gap-x-2 gap-y-1 text-[12px] max-h-44 overflow-y-auto border-t pt-2">
@@ -2474,9 +2664,9 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
             {r.cancelado
               ? <div className="col-span-4 text-red-500 italic">cancelado · no suma a caja</div>
               : !r.cobrado
-                ? <div className="col-span-4 text-yellow-600 italic">{metAbbr(r.metodo)} pendiente · no cobrado</div>
+                ? <div className="col-span-4 text-yellow-600 italic">pendiente · no cobrado</div>
                 : <React.Fragment>
-                    <div>{metAbbr(r.metodo)}</div>
+                    <div><PagoTag metodo={r.metodo}/></div>
                     <div className="text-right">{fmt(r.productos)}</div>
                     <div className="text-right text-purple-600">{r.envio>0?fmt(r.envio):'·'}</div>
                     <div className="text-right font-bold">{fmt(r.total)}</div>
@@ -2494,8 +2684,8 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
       {/* C. GASTOS */}
       <div className="bg-gray-50 rounded-2xl p-4 space-y-1 text-sm">
         <h3 className="font-bold text-gray-700 text-sm mb-1">C · Gastos</h3>
-        <div className="flex justify-between"><span className="text-gray-500">💸 Salen de caja (efectivo)</span><span>{fmt(m.gastosCaja)}</span></div>
-        {m.gastosOtroMedio>0&&<div className="flex justify-between"><span className="text-gray-500">🏦 Por otro medio (no caja)</span><span>{fmt(m.gastosOtroMedio)}</span></div>}
+        <div className="flex justify-between"><span className="text-gray-500"><Icon name="cash" size={14} className="mr-1"/>Salen de caja (efectivo)</span><span>{fmt(m.gastosCaja)}</span></div>
+        {m.gastosOtroMedio>0&&<div className="flex justify-between"><span className="text-gray-500"><Icon name="phone" size={14} className="mr-1"/>Por otro medio (no caja)</span><span>{fmt(m.gastosOtroMedio)}</span></div>}
         <div className="border-t my-1"/>
         <div className="flex justify-between font-bold"><span>Total gastos</span><span className="text-red-500">{fmt(m.gastosTotal)}</span></div>
       </div>
@@ -2517,30 +2707,31 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
         <div className="border-t my-1"/>
         <div className="flex justify-between font-bold text-gray-700"><span>= Caja esperada</span><span>{fmt(m.cajaEsperada)}</span></div>
         <div className="border-t my-1"/>
-        <div className="flex justify-between text-gray-500"><span>📱 Transferencia esperada (banco)</span><span className="text-blue-700 font-semibold">{fmt(m.transferenciaEsperada)}</span></div>
+        <div className="flex justify-between text-gray-500"><span><Icon name="phone" size={14} className="mr-1"/>Transferencia esperada (banco)</span><span className="text-blue-700 font-semibold">{fmt(m.transferenciaEsperada)}</span></div>
         <div className="flex justify-between text-xs text-gray-400"><span>Saldo esperado caja + banco</span><span>{fmt(m.dineroOperado)}</span></div>
       </div>
 
       <Input label="Efectivo real contado" type="number" placeholder="0" prefix="$" value={efectivo} onChange={setEfectivo}/>
-      {efectivo!==''&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
-        {dif===0?'✅ Caja cuadrada':dif>0?`📈 Sobrante: ${fmt(dif)}`:`📉 Faltante: ${fmt(Math.abs(dif))}`}</div>}
+      {efectivoNegativo&&<p className="text-xs font-bold text-[var(--danger)]" role="alert">El efectivo contado no puede ser negativo.</p>}
+      {efectivoValido&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
+        {dif===0?'Caja cuadrada':dif>0?`Sobrante: ${fmt(dif)}`:`Faltante: ${fmt(Math.abs(dif))}`}</div>}
 
       {/* E. UTILIDAD DEL NEGOCIO */}
       <div className="bg-gray-50 rounded-2xl p-4 space-y-1 text-sm">
         <h3 className="font-bold text-gray-700 text-sm mb-1">E · Utilidad del negocio</h3>
-        <div className="flex justify-between"><span className="text-gray-500">🍲 Productos vendidos</span><span>{fmt(m.productosTotal)}</span></div>
+        <div className="flex justify-between"><span className="text-gray-500"><Icon name="bowl" size={14} className="mr-1"/>Productos vendidos</span><span>{fmt(m.productosTotal)}</span></div>
         <div className="flex justify-between"><span className="text-gray-500">− Gastos totales</span><span>{fmt(m.gastosTotal)}</span></div>
         <div className="border-t my-1"/>
         <div className="flex justify-between font-bold"><span>= Utilidad productos</span><span className={m.utilidadBrutaProductos>=0?'text-green-600':'text-red-500'}>{fmt(m.utilidadBrutaProductos)}</span></div>
       </div>
 
       <Input label="Observaciones (opcional)" value={obs} onChange={setObs} placeholder="Notas del dia..."/>
-      <Btn full color="red" size="lg" disabled={efectivo===''} onClick={()=>{onCerrar(efectivo,obs);onClose();}}>🔴 Cerrar y Guardar Jornada</Btn>
-      <Btn full color="gray" size="sm" disabled={efectivo===''} onClick={()=>{
+      <Btn full color="red" size="lg" disabled={!efectivoValido} onClick={()=>{onCerrar(efectivo,obs);onClose();}}>Cerrar y guardar jornada</Btn>
+      <Btn full color="gray" size="sm" disabled={!efectivoValido} onClick={()=>{
         const snap={...jornada,estado:'cerrada',horaCierre:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),
           totalEfectivo:Number(efectivo)||0,diferencia:(Number(efectivo)||0)-esperado,observaciones:obs||''};
         printCierreCaja(snap);
-      }}>🖨️ Previsualizar impresion de cierre</Btn>
+      }}><Icon name="printer" size={15} className="mr-1.5"/>Previsualizar impresion de cierre</Btn>
     </div></Modal>);
 }
 
@@ -2581,7 +2772,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
 
     {/* Pago a repartidor: efectivo del cajon entregado al repartidor */}
     <div className="space-y-2">
-      <p className="font-semibold text-gray-600">🛵 Pagado al repartidor (sale de caja)</p>
+      <p className="font-semibold text-gray-600"><Icon name="bike" size={14} className="mr-1"/>Pagado al repartidor (sale de caja)</p>
 
       {/* Pago masivo de todos los envios pendientes */}
       {envios.length>0&&(pendientes.length>0
@@ -2592,7 +2783,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
             : <div className="rounded-xl bg-white/80 border border-orange-300 p-3 space-y-2">
                 <p className="text-xs text-gray-700">Se marcarán <b>{pendientes.length}</b> envío{pendientes.length===1?'':'s'} como pagados al repartidor.</p>
                 <p className="text-xs text-gray-700">Saldrá del cajón: <b className="text-orange-700">{fmt(totalPendiente)}</b> en efectivo.</p>
-                <p className="text-[11px] text-amber-700">⚠️ Esto bajará la caja esperada porque se pagará desde efectivo.</p>
+                <p className="text-[11px] text-amber-700"><Icon name="alert" size={12} className="mr-1"/>Esto bajará la caja esperada porque se pagará desde efectivo.</p>
                 <div className="flex gap-2">
                   <Btn color="orange" size="sm" onClick={confirmarTodos}>Confirmar pago</Btn>
                   <Btn color="gray" size="sm" onClick={()=>setAskAll(false)}>Cancelar</Btn>
@@ -2617,7 +2808,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
         {pagados.map(r=><div key={r.pedidoId} className="flex justify-between items-center text-xs bg-white/70 rounded-lg px-2 py-1">
           <span>#{String(r.folio).padStart(3,'0')} {r.cliente||''}{r.cancelado?' · pedido cancelado':''}</span>
           <span className="flex items-center gap-2"><b className="text-orange-700">{fmt(r.pago)}</b>
-            <button className="text-gray-400 hover:text-red-500" onClick={()=>onPagarRepartidor&&onPagarRepartidor(r.pedidoId,0)} title="Quitar">✕</button></span>
+            <button className="text-gray-400 hover:text-red-500 w-8 h-8 flex items-center justify-center" onClick={()=>onPagarRepartidor&&onPagarRepartidor(r.pedidoId,0)} title="Quitar" aria-label="Quitar pago al repartidor"><Icon name="x" size={14}/></button></span>
         </div>)}
         <div className="flex justify-between text-xs font-bold text-gray-600 pt-1"><span>Total pagado a repartidores</span><span>{fmt(model.mandaditosPagadosEfectivo)}</span></div>
       </div>}
@@ -2627,10 +2818,10 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
 
     {/* Ajustes de caja: salida (-) / entrada (+), motivo obligatorio */}
     <div className="space-y-2">
-      <p className="font-semibold text-gray-600">💵 Salida / entrada de caja (motivo obligatorio)</p>
+      <p className="font-semibold text-gray-600"><Icon name="cash" size={14} className="mr-1"/>Salida / entrada de caja (motivo obligatorio)</p>
       <div className="grid grid-cols-2 gap-2">
-        <button type="button" onClick={()=>setATipo('salida')} className={`py-2 rounded-xl border text-center text-xs font-bold ${aTipo==='salida'?'bg-red-100 border-red-300 text-red-700':'bg-white/70 border-gray-200 text-gray-500'}`}>➖ Salida (resta)</button>
-        <button type="button" onClick={()=>setATipo('entrada')} className={`py-2 rounded-xl border text-center text-xs font-bold ${aTipo==='entrada'?'bg-green-100 border-green-300 text-green-700':'bg-white/70 border-gray-200 text-gray-500'}`}>➕ Entrada (suma)</button>
+        <button type="button" onClick={()=>setATipo('salida')} className={`py-2.5 min-h-[44px] rounded-xl border text-center text-xs font-bold transition-colors duration-150 ${aTipo==='salida'?'bg-red-100 border-red-300 text-red-700':'bg-white/70 border-gray-200 text-gray-500'}`}><Icon name="minus" size={13} className="mr-1"/>Salida (resta)</button>
+        <button type="button" onClick={()=>setATipo('entrada')} className={`py-2.5 min-h-[44px] rounded-xl border text-center text-xs font-bold transition-colors duration-150 ${aTipo==='entrada'?'bg-green-100 border-green-300 text-green-700':'bg-white/70 border-gray-200 text-gray-500'}`}><Icon name="plus" size={13} className="mr-1"/>Entrada (suma)</button>
       </div>
       <Input label="" type="number" prefix="$" placeholder="Monto" value={aMonto} onChange={setAMonto}/>
       <Input label="" placeholder="Motivo (obligatorio): compra, cambio, retiro…" value={aMotivo} onChange={setAMotivo}/>
@@ -2640,7 +2831,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
       {ajustes.length>0&&<div className="space-y-1 pt-1">
         {ajustes.map(a=><div key={a.id} className="flex justify-between items-center text-xs bg-white/70 rounded-lg px-2 py-1">
           <span className={a.tipo==='entrada'?'text-green-700':'text-red-700'}>{a.tipo==='entrada'?'+':'−'}{fmt(a.monto)} · {a.motivo}</span>
-          <button className="text-gray-400 hover:text-red-500" onClick={()=>onEliminarAjuste&&onEliminarAjuste(a.id)} title="Eliminar">✕</button>
+          <button className="text-gray-400 hover:text-red-500 w-8 h-8 flex items-center justify-center" onClick={()=>onEliminarAjuste&&onEliminarAjuste(a.id)} title="Eliminar" aria-label="Eliminar ajuste de caja"><Icon name="x" size={14}/></button>
         </div>)}
       </div>}
     </div>
@@ -2664,16 +2855,36 @@ function ProductSelector({productos,cart,setCart}){
       precio:varPrecioNum,costo:0,emoji:variadoDesc?.emoji||'🧪',cantidad:1,subtotal:varPrecioNum}}));
     setVarNombre('');setVarPrecio('');
   };
-  const add=p=>setCart(c=>({...c,[p.id]:{...p,productoId:p.id,cantidad:(c[p.id]?.cantidad||0)+1,subtotal:((c[p.id]?.cantidad||0)+1)*p.precio}}));
+  // B4 — SEMANTICA SEGURA DE PRECIOS AL AGREGAR DESDE CATALOGO:
+  // Una linea existente conserva SU precio (el precio historico cobrado/pactado
+  // NUNCA se muta silenciosamente). Agregar desde catalogo:
+  //  - si existe una linea del producto con el MISMO precio del catalogo,
+  //    solo incrementa su cantidad;
+  //  - si el precio del catalogo cambio, crea una LINEA NUEVA separada con el
+  //    precio actual (id de linea propio), dejando intacta la linea original.
+  // Asi la contabilidad refleja exactamente que se vendio a que precio.
+  const add=p=>setCart(c=>{
+    const match=Object.values(c).find(l=>(l.productoId||l.id)===p.id&&!l.esVariado&&Number(l.precio)===Number(p.precio));
+    if(match){
+      const key=match.id||match.productoId;
+      const q=match.cantidad+1;
+      return{...c,[key]:{...match,cantidad:q,subtotal:q*match.precio}};
+    }
+    const exists=Object.values(c).some(l=>(l.productoId||l.id)===p.id&&!l.esVariado);
+    const key=exists?lineaUid():p.id;
+    return{...c,[key]:{...p,id:key,productoId:p.id,cantidad:1,subtotal:p.precio}};
+  });
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
+  // Cantidad total del producto en el carrito (puede haber lineas separadas por precio).
+  const qtyOf=pid=>Object.values(cart).reduce((s,l)=>((l.productoId||l.id)===pid&&!l.esVariado)?s+l.cantidad:s,0);
 
   function ProdBtn({p,cols=2}){
-    const qty=cart[p.id]?.cantidad||0;
+    const qty=qtyOf(p.id);
     const desc=COMBO_DESC[p.id];
     return(<button key={p.id} onClick={()=>add(p)}
       className={`relative bg-white rounded-xl ${cols===1?'p-4 flex items-center gap-3':'p-3 text-left'} shadow-sm border-2 card-press ${qty>0?'border-orange-400 bg-orange-50':'border-gray-100'}`}>
       {qty>0&&<span className="absolute top-1 right-1 bg-orange-500 text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center">{qty}</span>}
-      <div className={cols===1?'text-3xl':'text-2xl mb-1'}>{p.emoji}</div>
+      <div className={`text-[var(--brand-strong)] opacity-80 ${cols===1?'':'mb-1'}`}><ProductIcon cat={p.cat} size={cols===1?28:22}/></div>
       <div className={cols===1?'flex-1':''}>
         <p className="text-xs font-bold text-gray-800 leading-tight">{p.nombre}</p>
         {desc&&<p className="text-[10px] text-gray-400 mt-0.5 leading-snug">{desc}</p>}
@@ -2684,24 +2895,24 @@ function ProductSelector({productos,cart,setCart}){
 
   return(<React.Fragment>
     {combos.length>0&&(<React.Fragment>
-      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">🎉 Combos</p>
+      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider"><Icon name="star" size={13} className="mr-1"/>Combos</p>
       <div className="grid grid-cols-1 gap-2">{combos.map(p=><ProdBtn key={p.id} p={p} cols={1}/>)}</div>
     </React.Fragment>)}
-    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">🥩 Platillos</p>
+    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider"><Icon name="bowl" size={13} className="mr-1"/>Platillos</p>
     <div className="grid grid-cols-2 gap-2">{platillos.map(p=><ProdBtn key={p.id} p={p}/>)}</div>
-    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">🥤 Bebidas</p>
+    <p className="text-xs font-bold text-gray-500 uppercase tracking-wider"><Icon name="cup" size={13} className="mr-1"/>Bebidas</p>
     <div className="grid grid-cols-3 gap-2">
-      {bebidas.map(p=>{const qty=cart[p.id]?.cantidad||0;
+      {bebidas.map(p=>{const qty=qtyOf(p.id);
         return(<button key={p.id} onClick={()=>add(p)}
           className={`relative bg-white rounded-xl p-2 text-center shadow-sm border-2 card-press ${qty>0?'border-orange-400 bg-orange-50':'border-gray-100'}`}>
           {qty>0&&<span className="absolute top-0 right-0 bg-orange-500 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">{qty}</span>}
-          <div className="text-xl">{p.emoji}</div>
+          <div className="text-[var(--brand-strong)] opacity-80"><ProductIcon cat={p.cat} size={20}/></div>
           <p className="text-[10px] font-bold text-gray-700">{p.nombre}</p>
           <p className="text-orange-600 font-black text-xs">{fmt(p.precio)}</p>
         </button>);})}
     </div>
     {variadoDesc&&(<React.Fragment>
-      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider">{variadoDesc.emoji} Producto variado</p>
+      <p className="text-xs font-bold text-gray-500 uppercase tracking-wider"><Icon name="tag" size={13} className="mr-1"/>Producto variado</p>
       <div className="bg-white rounded-xl p-3 shadow-sm border-2 border-gray-100 space-y-2">
         <p className="text-[11px] text-gray-400 leading-snug">Captura nombre y precio. Puedes agregar varios distintos.</p>
         <input value={varNombre} onChange={e=>setVarNombre(e.target.value)} placeholder="Nombre del producto"
@@ -2724,16 +2935,16 @@ function CartSummary({cart,costoEnvio,onAdd,onRem}){
   if(!items.length)return null;
   return(<div className="bg-orange-50 rounded-2xl p-3 space-y-1">
     {items.map(i=>(<div key={i.id||i.productoId} className="flex items-center justify-between">
-      <span className="text-xs text-gray-600">{i.emoji} {i.nombre}</span>
+      <span className="text-xs text-gray-600">{i.nombre}{items.some(o=>o!==i&&(o.productoId||o.id)===(i.productoId||i.id)&&!i.esVariado)?` (${fmt(i.precio)})`:''}</span>
       <div className="flex items-center gap-2">
-        <button onClick={()=>onRem(i.id||i.productoId)} className="w-6 h-6 rounded-full bg-gray-200 text-gray-700 font-black text-xs flex items-center justify-center">-</button>
+        <button onClick={()=>onRem(i.id||i.productoId)} aria-label={`Quitar uno de ${i.nombre}`} className="w-8 h-8 rounded-full bg-gray-200 text-gray-700 font-black text-xs flex items-center justify-center transition-transform duration-150 active:scale-90"><Icon name="minus" size={12}/></button>
         <span className="font-black text-xs w-4 text-center">{i.cantidad}</span>
-        <button onClick={()=>onAdd(i)} className="w-6 h-6 rounded-full bg-orange-500 text-white font-black text-xs flex items-center justify-center">+</button>
+        <button onClick={()=>onAdd(i)} aria-label={`Agregar uno de ${i.nombre}`} className="w-8 h-8 rounded-full bg-orange-500 text-white font-black text-xs flex items-center justify-center transition-transform duration-150 active:scale-90"><Icon name="plus" size={12}/></button>
         <span className="font-bold text-xs w-12 text-right">{fmt(i.subtotal)}</span>
       </div></div>))}
     <div className="border-t border-orange-200 pt-2 mt-2 space-y-1">
       <div className="flex justify-between text-xs"><span className="text-gray-600">Productos</span><span className="font-bold">{fmt(totalProd)}</span></div>
-      {costoEnvio>0&&<div className="flex justify-between text-xs"><span className="text-purple-600">🛵 Costo envio</span><span className="font-bold text-purple-600">{fmt(costoEnvio)}</span></div>}
+      {costoEnvio>0&&<div className="flex justify-between text-xs"><span className="text-purple-600"><Icon name="bike" size={13} className="mr-1"/>Costo envio</span><span className="font-bold text-purple-600">{fmt(costoEnvio)}</span></div>}
       <div className="flex justify-between"><span className="font-black text-gray-800">TOTAL</span><span className="text-xl font-black text-orange-600">{fmt(totalFinal)}</span></div>
     </div>
   </div>);
@@ -2744,9 +2955,9 @@ function DeliverySelector({tipo,setTipo}){
     <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Tipo de pedido</p>
     <div className="grid grid-cols-3 gap-2">
       {Object.entries(TARIFAS_ENVIO).map(([k,v])=>(
-        <button key={k} onClick={()=>setTipo(k)}
-          className={`py-3 rounded-xl text-center border-2 card-press ${tipo===k?'border-orange-500 bg-orange-50':'border-gray-200'}`}>
-          <div className="text-xl">{v.emoji}</div>
+        <button key={k} onClick={()=>setTipo(k)} aria-pressed={tipo===k}
+          className={`py-3 min-h-[64px] rounded-xl text-center border-2 card-press ${tipo===k?'border-orange-500 bg-orange-50':'border-gray-200'}`}>
+          <div className={tipo===k?'text-orange-600':'text-gray-400'}><Icon name={TIPO_ENVIO_ICON[k]||'bag'} size={20}/></div>
           <p className="text-[10px] font-bold text-gray-700">{v.label}</p>
           {v.precio>0&&<p className="text-[10px] font-bold text-purple-600">+{fmt(v.precio)}</p>}
         </button>))}
@@ -2774,11 +2985,11 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
     <div className="app-shell space-y-5">
       {!ja?(
         <div className="surface-card-strong p-6 text-center fade-in">
-          <div className="w-20 h-20 bg-[rgba(242,191,90,.18)] rounded-full flex items-center justify-center mx-auto mb-4"><span className="text-4xl">🌅</span></div>
+          <div className="w-20 h-20 bg-[rgba(242,191,90,.18)] rounded-full flex items-center justify-center mx-auto mb-4 text-[var(--brand-strong)]"><Icon name="sun" size={36} strokeWidth={1.6}/></div>
           <p className="section-kicker mb-2">Operación del día</p>
           <h2 className="text-[28px] leading-tight font-black text-[var(--text)] mb-2">Todo listo para abrir jornada</h2>
           <p className="text-sm text-[var(--text-soft)] mb-5 leading-relaxed">Prepara caja, registra el fondo inicial y empieza a operar con una vista mucho más clara.</p>
-          <Btn full color="green" size="lg" onClick={()=>setShowAbrir(true)}>🟢 Abrir Jornada</Btn>
+          <Btn full color="green" size="lg" onClick={()=>setShowAbrir(true)}><Icon name="sun" size={18} className="mr-1.5"/>Abrir jornada</Btn>
         </div>
       ):(
         <div className="brand-panel p-5 fade-in">
@@ -2813,15 +3024,15 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
             </div>
             <div className="grid grid-cols-3 gap-3 mt-3">
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
-                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]">💵 Efectivo</p>
+                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]"><Icon name="cash" size={11} className="mr-1"/>Efectivo</p>
                 <p className="mt-1 text-[18px] font-black">{metEf.n} · {fmt(metEf.monto)}</p>
               </div>
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
-                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]">💵📱 Mixtos</p>
+                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]"><Icon name="cash" size={11}/><Icon name="phone" size={11} className="mr-1"/>Mixtos</p>
                 <p className="mt-1 text-[18px] font-black">{metMx.n} · {fmt(metMx.monto)}</p>
               </div>
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
-                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]">📱 Transferencia</p>
+                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]"><Icon name="phone" size={11} className="mr-1"/>Transferencia</p>
                 <p className="mt-1 text-[18px] font-black">{metTr.n} · {fmt(metTr.monto)}</p>
               </div>
             </div>
@@ -2843,7 +3054,7 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
                   <p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentaCobrada(v))}</p>
                   {(v.costoEnvio||0)>0&&<p className="text-[10px] text-purple-500">+{fmt(v.costoEnvio)} envío</p>}
                 </div>
-                <Badge color={pagoBadgeColor(v.metodoPago)}>{pagoLabel(v.metodoPago)}</Badge></div>
+                <Badge color={pagoBadgeColor(v.metodoPago)}><PagoTag metodo={v.metodoPago}/></Badge></div>
             </div>))}
         </div>)}
       {ultimasJ.length>0&&(
@@ -2860,15 +3071,15 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
                 <div className="text-right"><p className="font-black text-[15px] text-[var(--text)]">{fmt(mj.cobrosTotal)}</p>
                   <span className="text-[12px] font-bold text-[var(--text-muted)]">−{fmt(mj.gastosTotal)} gastos</span></div>
                 {j.estado==='cerrada'&&<React.Fragment>
-                  <button onClick={()=>printTicketsJornada(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Reimprimir todos los tickets" aria-label="Reimprimir todos los tickets del dia">🧾</button>
-                  <button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Imprimir cierre" aria-label="Imprimir cierre de caja">🖨️</button>
+                  <button onClick={()=>printTicketsJornada(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] w-10 h-10 flex items-center justify-center rounded-full transition-colors duration-150" title="Reimprimir todos los tickets" aria-label="Reimprimir todos los tickets del dia"><Icon name="receipt" size={18}/></button>
+                  <button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] w-10 h-10 flex items-center justify-center rounded-full transition-colors duration-150" title="Imprimir cierre" aria-label="Imprimir cierre de caja"><Icon name="printer" size={18}/></button>
                 </React.Fragment>}
               </div>
             </div>);})}</div>)}
       </div>
       {!ja&&!state.jornadas.length&&(
         <div className="surface-card p-5 text-center">
-          <div className="w-16 h-16 bg-[rgba(72,118,168,.10)] rounded-full flex items-center justify-center mx-auto mb-3"><span className="text-3xl">📊</span></div>
+          <div className="w-16 h-16 bg-[rgba(72,118,168,.10)] rounded-full flex items-center justify-center mx-auto mb-3 text-[var(--info)]"><Icon name="chart" size={28} strokeWidth={1.6}/></div>
           <p className="text-sm font-black text-[var(--text)] mb-1">Aquí aparecerán tus estadísticas</p>
           <p className="text-xs text-[var(--text-muted)]">Abre tu primera jornada para comenzar</p></div>)}
     </div>
@@ -2885,7 +3096,7 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
   const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
   const ja=state.jornadaActiva;
   if(!ja)return(<div className="safe-bottom"><TopBar title="Pedidos"/>
-    <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada para crear pedidos"/></div>);
+    <EmptyState icon="lock" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada para crear pedidos"/></div>);
   const pedidos=ja.pedidos||[];
   const nuevos=pedidos.filter(p=>p.estado==='nuevo');
   const entregados=pedidos.filter(p=>p.estado==='entregado'&&!p.cobrado);
@@ -2925,9 +3136,9 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
           <div key={p.id} className="rounded-[20px] p-3 border border-[rgba(202,77,44,.14)] bg-[rgba(202,77,44,.06)] flex justify-between items-center">
             <span className="text-[12px] font-bold text-[var(--text-muted)] line-through">#{String(p.numero).padStart(3,'0')} · {p.cliente||'—'} · {fmt(p.total)}</span>
             <button onClick={()=>onActualizarPedido(p.id,{estado:'nuevo'})}
-              className="text-[12px] font-bold text-[var(--brand-strong)] bg-[rgba(242,191,90,.12)] px-3 py-1.5 rounded-[14px] border border-[rgba(215,101,22,.16)]" aria-label="Restaurar pedido">↩ Restaurar</button>
+              className="text-[12px] font-bold text-[var(--brand-strong)] bg-[rgba(242,191,90,.12)] px-3 py-2.5 min-h-[44px] rounded-[14px] border border-[rgba(215,101,22,.16)] transition-colors duration-150" aria-label="Restaurar pedido"><Icon name="undo" size={13} className="mr-1"/>Restaurar</button>
           </div>))}</div></div>)}
-      {pedidos.length===0&&<EmptyState emoji="📋" title="Sin pedidos" sub="Crea tu primer pedido del dia"/>}
+      {pedidos.length===0&&<EmptyState icon="orders" title="Sin pedidos" sub="Crea tu primer pedido del dia"/>}
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
         impresora={state.impresora}
         onCrear={(items,tipo,cliente,dir,notas)=>{
@@ -2939,7 +3150,7 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
       {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos}
         onClose={()=>setShowEditar(null)}
         onGuardar={cambios=>{onActualizarPedido(showEditar.id,cambios);setShowEditar(null);}}/>}
-      <Modal open={!!confirmCancel} onClose={()=>setConfirmCancel(null)} title="⚠️ Cancelar pedido">
+      <Modal open={!!confirmCancel} onClose={()=>setConfirmCancel(null)} title="Cancelar pedido">
         {confirmCancel&&(<div className="space-y-4">
           <div className="bg-red-50 rounded-2xl p-4 text-center">
             <p className="font-black text-red-600 text-lg">#{String(confirmCancel.numero).padStart(3,'0')}</p>
@@ -2984,31 +3195,31 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWh
           <span className={`w-3 h-3 rounded-full ${est.dot}`}/>
           <span className="font-black text-[#251813] text-lg tracking-tight">#{String(pedido.numero).padStart(3,'0')}</span>
           <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${est.color}`}>{est.label}</span>
-          {pedido.cobrado&&<Badge color={pagoBadgeColor(pedido.metodoPago)}>{pagoLabel(pedido.metodoPago)}</Badge>}
+          {pedido.cobrado&&<Badge color={pagoBadgeColor(pedido.metodoPago)}><PagoTag metodo={pedido.metodoPago}/></Badge>}
         </div>
-        <p className="text-xs text-[#86695c] mt-1">{pedido.hora} · {tarifa.emoji} {tarifa.label}
+        <p className="text-xs text-[#86695c] mt-1">{pedido.hora} · <Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={13}/> {tarifa.label}
           {pedido.cliente&&` · ${pedido.cliente}`}</p>
-        {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<p className="text-xs text-[#86695c] mt-1">📍 {pedido.direccion}</p>}
+        {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<p className="text-xs text-[#86695c] mt-1"><Icon name="pin" size={12} className="mr-1"/>{pedido.direccion}</p>}
       </div>
       <div className="text-right">
         <p className="text-2xl font-black text-[#b24518] tracking-tight">{fmt(pedido.total)}</p>
         {pedido.costoEnvio>0&&<p className="text-[10px] text-[#7d5674] uppercase tracking-[0.18em] mt-1">envio {fmt(pedido.costoEnvio)}</p>}
-        {compact&&<p className="text-[10px] text-[var(--text-muted)] mt-1">{expanded?'▲ cerrar':'▼ ver mas'}</p>}
+        {compact&&<p className="text-[10px] text-[var(--text-muted)] mt-1"><Icon name={expanded?'chevronUp':'chevronDown'} size={11} className="mr-0.5"/>{expanded?'cerrar':'ver mas'}</p>}
       </div>
     </div>
     {(!compact||expanded)&&<div className="rounded-[22px] border border-[rgba(180,118,54,0.16)] bg-[rgba(255,251,246,0.96)] px-3 py-3">
       {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-1">
-        <span className="text-[#574239]">{i.emoji} {i.cantidad}x {i.nombre}</span>
+        <span className="text-[#574239]">{i.cantidad}x {i.nombre}</span>
         <span className="font-bold text-[#2f1d17]">{fmt(i.subtotal)}</span></div>))}
-      {pedido.notas&&<p className="text-xs text-[#b24518] mt-2 italic">📝 {pedido.notas}</p>}
+      {pedido.notas&&<p className="text-xs text-[#b24518] mt-2 italic"><Icon name="note" size={12} className="mr-1"/>{pedido.notas}</p>}
     </div>}
     <div className="flex gap-2 flex-wrap pt-1">
-      {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}>✅ Listo</Btn>}
-      {!pedido.cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}>💰 Cobrar</Btn>}
-      {onEditar&&<Btn size="sm" color="orange" variant="outline" onClick={onEditar}>✏️ Editar</Btn>}
-      {pedido.estado!=='cancelado'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar} aria-label="Cancelar pedido">✕</Btn>}
-      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint} aria-label="Imprimir ticket">🖨️</Btn>}
-      {onWhatsApp&&<Btn size="sm" color="green" variant="outline" onClick={onWhatsApp} aria-label="Compartir por WhatsApp">📲</Btn>}
+      {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}><Icon name="check" size={14} className="mr-1"/>Listo</Btn>}
+      {!pedido.cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}><Icon name="coins" size={14} className="mr-1"/>Cobrar</Btn>}
+      {onEditar&&<Btn size="sm" color="orange" variant="outline" onClick={onEditar}><Icon name="edit" size={13} className="mr-1"/>Editar</Btn>}
+      {pedido.estado!=='cancelado'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar} aria-label="Cancelar pedido"><Icon name="x" size={14}/></Btn>}
+      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint} aria-label="Imprimir ticket"><Icon name="printer" size={15}/></Btn>}
+      {onWhatsApp&&<Btn size="sm" color="green" variant="outline" onClick={onWhatsApp} aria-label="Compartir por WhatsApp"><Icon name="chat" size={15}/></Btn>}
     </div>
   </div>);
 }
@@ -3026,7 +3237,7 @@ function CrearPedidoModal({open,onClose,productos,impresora,onCrear}){
     if(!items.length)return;
     const its=items.map(i=>buildItem(i));
     onCrear(its,tipo,cliente,direccion,notas);setCart({});setCliente('');setDireccion('');setNotas('');};
-  return(<Modal open={open} onClose={onClose} title="📋 Nuevo Pedido" fullScreen>
+  return(<Modal open={open} onClose={onClose} title="Nuevo pedido" fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
       <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
@@ -3035,7 +3246,7 @@ function CrearPedidoModal({open,onClose,productos,impresora,onCrear}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        <Btn full color="green" size="lg" onClick={crear}>📋 Crear Pedido · {fmt(totalFinal)}</Btn>
+        <Btn full color="green" size="lg" onClick={crear}><Icon name="check" size={17} className="mr-1.5"/>Crear pedido · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
 }
@@ -3081,7 +3292,7 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   };
   const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
   const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||(pagoEditado.efectivo>=0&&pagoEditado.transferencia>=0&&sumPagos(pagoEditado)===_roundMoney(totalFinal));
-  return(<Modal open={open} onClose={onClose} title={`✏️ Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
+  return(<Modal open={open} onClose={onClose} title={`Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
       <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
@@ -3092,17 +3303,17 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
             <p className="font-black text-sm text-[var(--text)]">Metodo de pago</p>
             <p className="text-xs text-[var(--text-soft)] mt-1">Corrige si este pedido se registro como efectivo o transferencia.</p>
           </div>
-          <Badge color={pagoBadgeColor(metodoPago)}>{metodoPago==='mixto'?'💵📱 Mixto':metodoPago==='efectivo'?'💵 Efectivo':'📱 Transferencia'}</Badge>
+          <Badge color={pagoBadgeColor(metodoPago)}><PagoTag metodo={metodoPago} withText/></Badge>
         </div>
         <div className="grid grid-cols-3 gap-2">
-          <button type="button" onClick={()=>setMetodoPago('efectivo')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='efectivo'?'bg-[rgba(45,139,87,.12)] border-[rgba(45,139,87,.32)] shadow-[0_10px_24px_rgba(45,139,87,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
-            <div className="text-2xl mb-1">💵</div><p className="font-black text-sm text-[#2c7a54]">Efectivo</p>
+          <button type="button" onClick={()=>setMetodoPago('efectivo')} aria-pressed={metodoPago==='efectivo'} className={`py-4 min-h-[72px] rounded-[20px] border text-center transition-all duration-150 ${metodoPago==='efectivo'?'bg-[rgba(45,139,87,.12)] border-[rgba(45,139,87,.32)] shadow-[0_10px_24px_rgba(45,139,87,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
+            <div className="text-[#2c7a54] mb-1"><Icon name="cash" size={22}/></div><p className="font-black text-sm text-[#2c7a54]">Efectivo</p>
           </button>
-          <button type="button" onClick={()=>setMetodoPago('transferencia')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='transferencia'?'bg-[rgba(72,118,168,.12)] border-[rgba(72,118,168,.32)] shadow-[0_10px_24px_rgba(72,118,168,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
-            <div className="text-2xl mb-1">📱</div><p className="font-black text-sm text-[#255a7b]">Transferencia</p>
+          <button type="button" onClick={()=>setMetodoPago('transferencia')} aria-pressed={metodoPago==='transferencia'} className={`py-4 min-h-[72px] rounded-[20px] border text-center transition-all duration-150 ${metodoPago==='transferencia'?'bg-[rgba(72,118,168,.12)] border-[rgba(72,118,168,.32)] shadow-[0_10px_24px_rgba(72,118,168,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
+            <div className="text-[#255a7b] mb-1"><Icon name="phone" size={22}/></div><p className="font-black text-sm text-[#255a7b]">Transferencia</p>
           </button>
-          <button type="button" onClick={()=>setMetodoPago('mixto')} className={`py-4 rounded-[20px] border text-center transition-all ${metodoPago==='mixto'?'bg-[rgba(163,99,255,.12)] border-[rgba(163,99,255,.32)] shadow-[0_10px_24px_rgba(112,64,160,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
-            <div className="text-2xl mb-1">💵📱</div><p className="font-black text-sm text-[#7040a0]">Mixto</p>
+          <button type="button" onClick={()=>setMetodoPago('mixto')} aria-pressed={metodoPago==='mixto'} className={`py-4 min-h-[72px] rounded-[20px] border text-center transition-all duration-150 ${metodoPago==='mixto'?'bg-[rgba(163,99,255,.12)] border-[rgba(163,99,255,.32)] shadow-[0_10px_24px_rgba(112,64,160,.08)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.55)]'}`}>
+            <div className="text-[#7040a0] mb-1"><Icon name="cash" size={19}/><Icon name="phone" size={19}/></div><p className="font-black text-sm text-[#7040a0]">Mixto</p>
           </button>
         </div>
         {metodoPago==='mixto'&&<div className="space-y-3">
@@ -3119,7 +3330,7 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        <Btn full color="orange" size="lg" disabled={!pagoOk} onClick={guardar}>💾 Guardar Cambios · {fmt(totalFinal)}</Btn>
+        <Btn full color="orange" size="lg" disabled={!pagoOk} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cambios · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
 }
@@ -3154,7 +3365,7 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
     onCobrar(pago);
   };
   const cobrarMixto=()=>{if(mixtoOk)onCobrar({metodoPago:'mixto',pagos:pagoMixto});};
-  return(<Modal open={open} onClose={onClose} title={`💰 Cobrar #${String(pedido.numero).padStart(3,'0')}`}>
+  return(<Modal open={open} onClose={onClose} title={`Cobrar #${String(pedido.numero).padStart(3,'0')}`}>
     <div className="space-y-4">
       <div className="brand-panel text-center">
         <p className="text-[11px] uppercase tracking-[0.28em] text-[rgba(255,244,229,0.78)]">total a cobrar</p>
@@ -3163,17 +3374,17 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
         {pedido.cliente&&<p className="text-xs text-[rgba(255,244,229,0.72)] mt-2">{pedido.cliente}</p>}
       </div>
       <div className="grid grid-cols-3 gap-2">
-        <button onClick={()=>setModo('efectivo')} className={`${modo==='efectivo'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
-          <div className="text-3xl mb-2">💵</div><p className="font-black text-[#2c7a54]">Efectivo</p><p className="text-[11px] text-[#698170] mt-1">Entra directo a caja</p></button>
-        <button onClick={()=>setModo('transferencia')} className={`${modo==='transferencia'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
-          <div className="text-3xl mb-2">📱</div><p className="font-black text-[#255a7b]">Transferencia</p><p className="text-[11px] text-[#677987] mt-1">Pago digital confirmado</p></button>
-        <button onClick={()=>setModo('mixto')} className={`${modo==='mixto'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
-          <div className="text-3xl mb-2">💵📱</div><p className="font-black text-[#7040a0]">Mixto</p><p className="text-[11px] text-[#786482] mt-1">Parte y parte</p></button>
+        <button onClick={()=>setModo('efectivo')} aria-pressed={modo==='efectivo'} className={`${modo==='efectivo'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
+          <div className="text-[#2c7a54] mb-2"><Icon name="cash" size={26}/></div><p className="font-black text-[#2c7a54]">Efectivo</p><p className="text-[11px] text-[#698170] mt-1">Entra directo a caja</p></button>
+        <button onClick={()=>setModo('transferencia')} aria-pressed={modo==='transferencia'} className={`${modo==='transferencia'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
+          <div className="text-[#255a7b] mb-2"><Icon name="phone" size={26}/></div><p className="font-black text-[#255a7b]">Transferencia</p><p className="text-[11px] text-[#677987] mt-1">Pago digital confirmado</p></button>
+        <button onClick={()=>setModo('mixto')} aria-pressed={modo==='mixto'} className={`${modo==='mixto'?'surface-card-strong':'surface-card'} py-4 text-center card-press`}>
+          <div className="text-[#7040a0] mb-2"><Icon name="cash" size={22}/><Icon name="phone" size={22}/></div><p className="font-black text-[#7040a0]">Mixto</p><p className="text-[11px] text-[#786482] mt-1">Parte y parte</p></button>
       </div>
       {modo==='efectivo'&&<div className="surface-card space-y-2">
         <Input label="Efectivo recibido del cliente (opcional)" type="number" value={recibido} onChange={setRecibido} prefix="$" placeholder="Para calcular el cambio"/>
         {recibido!==''&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${recibidoNum<total?'bg-red-50 text-red-600':cambio>0?'bg-blue-50 text-blue-700':'bg-green-50 text-green-700'}`}>
-          {recibidoNum<total?`Faltan ${fmt(total-recibidoNum)}`:cambio>0?`💵 Cambio a devolver: ${fmt(cambio)}`:'Pago exacto, sin cambio'}
+          {recibidoNum<total?`Faltan ${fmt(total-recibidoNum)}`:cambio>0?`Cambio a devolver: ${fmt(cambio)}`:'Pago exacto, sin cambio'}
         </div>}
         <p className="text-[11px] text-[#698170]">La caja recibe el neto ({fmt(total)}); el cambio no altera el efectivo esperado.</p>
       </div>}
@@ -3195,7 +3406,7 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
 function TicketPreviewModal({open,pedido,onClose}){
   if(!open||!pedido)return null;
   const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
-  return(<Modal open={open} onClose={onClose} title={`🧾 Ticket #${String(pedido.numero).padStart(3,'0')}`}>
+  return(<Modal open={open} onClose={onClose} title={`Ticket #${String(pedido.numero).padStart(3,'0')}`}>
     <div className="bg-white border-2 border-dashed border-gray-300 rounded-2xl p-4 font-mono text-xs space-y-2">
       <div className="text-center font-black text-base">K'apul'Its</div>
       <div className="text-center text-gray-500 text-[10px]">Birria y algo mas</div>
@@ -3203,25 +3414,25 @@ function TicketPreviewModal({open,pedido,onClose}){
       <div className="text-center font-black">PEDIDO #{String(pedido.numero).padStart(3,'0')}</div>
       <div className="text-center text-gray-400">{pedido.fecha} · {pedido.hora}</div>
       {pedido.cliente&&<div className="font-bold">Cliente: {pedido.cliente}</div>}
-      <div>{tarifa.emoji} {tarifa.label}</div>
-      {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<div className="text-gray-500">📍 {pedido.direccion}</div>}
+      <div><Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={12} className="mr-1"/>{tarifa.label}</div>
+      {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<div className="text-gray-500"><Icon name="pin" size={11} className="mr-1"/>{pedido.direccion}</div>}
       <div className="border-t border-dashed border-gray-300"/>
       {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between"><span>{i.cantidad}x {i.nombre}</span><span className="font-bold">{fmt(i.subtotal)}</span></div>))}
       <div className="border-t border-dashed border-gray-300"/>
       {pedido.costoEnvio>0&&<div className="flex justify-between text-purple-600"><span>Envio</span><span className="font-bold">{fmt(pedido.costoEnvio)}</span></div>}
       <div className="flex justify-between font-black text-base"><span>TOTAL</span><span>{fmt(pedido.total)}</span></div>
       <div className="border-t border-dashed border-gray-300"/>
-      {pedido.notas&&<div className="text-orange-500 italic">📝 {pedido.notas}</div>}
+      {pedido.notas&&<div className="text-orange-500 italic"><Icon name="note" size={11} className="mr-1"/>{pedido.notas}</div>}
       <div className="text-center text-gray-400 text-[10px] pt-2">{NEGOCIO.direccion}<br/>Tel.: {NEGOCIO.telefono}</div>
       <div className="text-center font-bold pt-1">Gracias por tu compra!</div>
     </div>
     <div className="mt-4 flex gap-2">
-      <Btn full color="green" onClick={()=>shareWhatsApp(pedido)}>📲 Enviar por WhatsApp</Btn>
+      <Btn full color="green" onClick={()=>shareWhatsApp(pedido)}><Icon name="chat" size={15} className="mr-1.5"/>Enviar por WhatsApp</Btn>
       <Btn full color="gray" onClick={onClose}>Cerrar</Btn>
     </div>
     <div className="mt-3 bg-blue-50 rounded-xl p-3 text-xs text-blue-700">
-      <p className="font-bold">💡 Tip</p>
-      <p className="mt-1 opacity-70">Para imprimir tickets, usa el boton 🖨️ desde el telefono Android conectado a la impresora Bluetooth.</p>
+      <p className="font-bold"><Icon name="bulb" size={13} className="mr-1"/>Tip</p>
+      <p className="mt-1 opacity-70">Para imprimir tickets, usa el boton de impresora desde el telefono Android conectado a la impresora Bluetooth.</p>
     </div>
   </Modal>);
 }
@@ -3234,7 +3445,7 @@ function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
   const [editGasto,setEditGasto]=useState(null);
   const ja=state.jornadaActiva;
   if(!ja)return(<div className="safe-bottom"><TopBar title="Gastos"/>
-    <EmptyState emoji="🔒" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada"/></div>);
+    <EmptyState icon="lock" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada"/></div>);
   const totalG=calcGastosTotal(ja.gastos);
   const totalGEfectivo=_gastosEfectivo(ja);
   const totalGOtro=totalG-totalGEfectivo;
@@ -3287,7 +3498,7 @@ function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
         <div className="flex gap-2 overflow-x-auto pb-1">{catsUsadas.map(c=>(
           <button key={c.id} onClick={()=>{setCatSel(c.id);setNuevaCat('');}}
             className={`flex-shrink-0 flex items-center gap-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold border
-              ${catSel===c.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.08)]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.92)] text-[#6e5548]'}`}>{c.emoji} {c.label}</button>))}
+              ${catSel===c.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.08)]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.92)] text-[#6e5548]'}`}><Icon name="tag" size={12}/> {c.label}</button>))}
           <button onClick={()=>setNuevaCat(' ')}
             className="flex-shrink-0 flex items-center gap-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold border border-dashed border-[rgba(104,74,56,0.22)] text-[#8d7467]">+ Nueva</button>
         </div>
@@ -3302,7 +3513,7 @@ function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
       <div className="flex items-center gap-3 rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.9)] px-4 py-3">
         <button onClick={()=>setEnEfectivo(!enEfectivo)} className={`w-12 h-6 rounded-full transition-colors ${enEfectivo?'bg-green-500':'bg-[#d8c6bd]'} relative`}>
           <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${enEfectivo?'right-0.5':'left-0.5'}`}/></button>
-        <span className="text-sm text-[#5d463b] font-medium">{enEfectivo?'💵 Efectivo':'📱 Otro medio'}</span></div>
+        <span className="text-sm text-[#5d463b] font-medium"><Icon name={enEfectivo?'cash':'phone'} size={14} className="mr-1"/>{enEfectivo?'Efectivo':'Otro medio'}</span></div>
       <Btn full size="lg" onClick={intentarRegistrar} disabled={!desc||!monto}>+ Registrar Gasto</Btn>
       </div>
 
@@ -3312,12 +3523,12 @@ function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
           <h3 className="section-title mb-4">Gastos del día</h3>
           {[...ja.gastos].reverse().map(g=>{const cat=catsUsadas.find(c=>c.id===g.categoria);
             return(<div key={g.id} className="flex items-center justify-between py-2.5 border-b border-[rgba(104,74,56,0.08)] last:border-0">
-              <div className="flex items-center gap-2 min-w-0"><span className="text-lg shrink-0">{cat?.emoji||'💸'}</span>
+              <div className="flex items-center gap-2 min-w-0"><span className="shrink-0 text-[#a14017] opacity-80"><Icon name="tag" size={16}/></span>
                 <div className="min-w-0"><p className="text-sm font-bold text-[#2f1d17] truncate">{g.descripcion}</p>
                   <p className="text-xs text-[#8c7265]">{g.hora} · {cat?.label||g.categoria} · {g.enEfectivo!==false?'impacta caja':'otro medio'}</p></div></div>
               <div className="flex items-center gap-2 shrink-0"><span className="font-black text-[#b24518] text-sm">{fmt(g.monto)}</span>
                 <button onClick={()=>setEditGasto(g)} className="text-[#8c7265] text-xs font-bold px-2 py-1 rounded-lg bg-[rgba(121,87,67,.08)]" aria-label="Editar gasto">Editar</button>
-                <button onClick={()=>setConfirmDel(g)} className="text-[#c6a79a] text-lg" aria-label="Eliminar gasto">✕</button></div></div>);})}
+                <button onClick={()=>setConfirmDel(g)} className="text-[#c6a79a] hover:text-[var(--danger)] w-9 h-9 flex items-center justify-center rounded-full transition-colors duration-150" aria-label="Eliminar gasto"><Icon name="trash" size={15}/></button></div></div>);})}
           {confirmDel&&<div className="mt-3 bg-[rgba(255,239,236,0.95)] rounded-2xl p-3 flex items-center justify-between gap-3">
             <span className="text-xs text-[#a33f26]">Eliminar "{confirmDel.descripcion}" ({fmt(confirmDel.monto)})?</span>
             <div className="flex gap-2">
@@ -3334,18 +3545,18 @@ function GastosPage({state,onRegistrar,onEliminar,onActualizar}){
         </div>)}
       </div>{/* close md:grid */}
 
-      <Modal open={!!showConfirmAdd} onClose={()=>setShowConfirmAdd(false)} title="✅ Confirmar gasto">
+      <Modal open={!!showConfirmAdd} onClose={()=>setShowConfirmAdd(false)} title="Confirmar gasto">
         {showConfirmAdd&&(<div className="space-y-4">
           <div className="surface-card-strong space-y-2">
-            <div className="flex justify-between text-sm"><span className="text-[#80665a]">Categoria</span><span className="font-bold text-[#2f1d17]">{catActual.emoji} {showConfirmAdd.cat}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-[#80665a]">Categoria</span><span className="font-bold text-[#2f1d17]"><Icon name="tag" size={13} className="mr-1"/>{showConfirmAdd.cat}</span></div>
             <div className="flex justify-between text-sm gap-4"><span className="text-[#80665a]">Descripcion</span><span className="font-bold text-[#2f1d17] text-right">{showConfirmAdd.desc}</span></div>
             <div className="flex justify-between text-sm"><span className="text-[#80665a]">Monto</span><span className="font-black text-[#b24518] text-lg">{fmt(showConfirmAdd.monto)}</span></div>
-            <div className="flex justify-between text-sm"><span className="text-[#80665a]">Pago</span><span className="font-bold text-[#2f1d17]">{showConfirmAdd.enEfectivo?'💵 Efectivo':'📱 Otro'}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-[#80665a]">Pago</span><span className="font-bold text-[#2f1d17]"><Icon name={showConfirmAdd.enEfectivo?'cash':'phone'} size={13} className="mr-1"/>{showConfirmAdd.enEfectivo?'Efectivo':'Otro'}</span></div>
           </div>
           <p className="text-sm text-[#7a5f53] text-center">Verifica que la información sea correcta antes de registrar.</p>
           <div className="flex gap-3">
             <Btn full color="gray" onClick={()=>setShowConfirmAdd(false)}>Corregir</Btn>
-            <Btn full color="green" onClick={confirmarRegistro}>✅ Confirmar</Btn>
+            <Btn full color="green" onClick={confirmarRegistro}><Icon name="check" size={15} className="mr-1.5"/>Confirmar</Btn>
           </div>
         </div>)}
       </Modal>
@@ -3368,19 +3579,19 @@ function EditarGastoModal({open,gasto,cats,onClose,onGuardar}){
     setEnEfectivo(gasto.enEfectivo!==false);
   },[open,gasto]);
   if(!gasto)return null;
-  return(<Modal open={open} onClose={onClose} title="✏️ Editar gasto">
+  return(<Modal open={open} onClose={onClose} title="Editar gasto">
     <div className="space-y-4">
       <div>
         <p className="text-xs font-bold text-[#86695c] mb-2 uppercase tracking-[0.22em]">Categoria</p>
         <div className="flex gap-2 overflow-x-auto pb-1">{cats.map(c=>(
           <button key={c.id} onClick={()=>setCategoria(c.id)}
             className={`flex-shrink-0 flex items-center gap-1 px-3.5 py-2.5 rounded-2xl text-xs font-bold border
-              ${categoria===c.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.92)] text-[#6e5548]'}`}>{c.emoji} {c.label}</button>))}</div>
+              ${categoria===c.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.92)] text-[#6e5548]'}`}><Icon name="tag" size={12}/> {c.label}</button>))}</div>
       </div>
       <Input label="Descripcion" value={descripcion} onChange={setDescripcion}/>
       <Input label="Monto" type="number" value={monto} onChange={setMonto} prefix="$"/>
       <div className="flex items-center justify-between rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.9)] px-4 py-3">
-        <span className="text-sm text-[#5d463b] font-medium">{enEfectivo?'💵 Sale de caja':'📱 No sale de caja'}</span>
+        <span className="text-sm text-[#5d463b] font-medium"><Icon name={enEfectivo?'cash':'phone'} size={14} className="mr-1"/>{enEfectivo?'Sale de caja':'No sale de caja'}</span>
         <button onClick={()=>setEnEfectivo(!enEfectivo)} className={`w-12 h-6 rounded-full transition-colors ${enEfectivo?'bg-green-500':'bg-[#d8c6bd]'} relative`}>
           <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all ${enEfectivo?'right-0.5':'left-0.5'}`}/></button>
       </div>
@@ -3410,17 +3621,18 @@ function ReportesPage({state}){
         <p className="mt-2 text-sm text-[rgba(255,244,229,0.8)]">Ventas, utilidad y comportamiento del día, sin ruido técnico.</p>
       </div>
       <div className="flex rounded-[26px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 mb-1 overflow-x-auto gap-1 shadow-[0_16px_40px_rgba(90,53,33,0.08)]">
-        {[{id:'diario',l:'Diario',ld:'Diario'},{id:'mensual',l:'Mensual',ld:'Mensual'},{id:'mandaditos',l:'🛵',ld:'🛵 Mandaditos'},{id:'inteligencia',l:'🧠',ld:'🧠 Inteligencia'},{id:'pdf',l:'📄 PDF',ld:'📄 PDF'}].map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)}
-            className={`flex-shrink-0 flex-1 py-3 text-xs md:text-sm font-black rounded-[20px] transition-all ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}><span className="md:hidden">{t.l}</span><span className="hidden md:inline">{t.ld}</span></button>))}</div>
+        {[{id:'diario',l:'Diario',icon:null},{id:'mensual',l:'Mensual',icon:null},{id:'mandaditos',l:'Mandaditos',icon:'bike'},{id:'inteligencia',l:'Inteligencia',icon:'sparkles'},{id:'pdf',l:'PDF',icon:'file'}].map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} aria-label={t.l}
+            className={`flex-shrink-0 flex-1 py-3 min-h-[44px] text-xs md:text-sm font-black rounded-[20px] transition-all duration-150 ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>
+            <span className="md:hidden">{t.icon?<Icon name={t.icon} size={16} label={t.l}/>:t.l}</span><span className="hidden md:inline">{t.icon&&<Icon name={t.icon} size={14} className="mr-1"/>}{t.l}</span></button>))}</div>
 
       {tab==='diario'&&(<div className="space-y-5">
-        {state.jornadas.length===0&&<EmptyState emoji="📊" title="Sin jornadas aun" sub="Abre tu primera jornada"/>}
+        {state.jornadas.length===0&&<EmptyState icon="chart" title="Sin jornadas aun" sub="Abre tu primera jornada"/>}
         {state.jornadas.length>0&&(<React.Fragment>
           <div><p className="text-xs font-bold text-[#876a5d] mb-2 uppercase tracking-[0.22em]">Selecciona jornada</p>
             <div className="flex gap-2 overflow-x-auto pb-1">
               {state.jornadaActiva&&<button onClick={()=>setJornadaSel(null)}
-                className={`flex-shrink-0 px-3.5 py-2.5 rounded-2xl text-xs font-bold border ${!jornadaSel?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.9)] text-[#6f564a]'}`}>🟢 Hoy</button>}
+                className={`flex-shrink-0 px-3.5 py-2.5 rounded-2xl text-xs font-bold border ${!jornadaSel?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.9)] text-[#6f564a]'}`}><Icon name="sun" size={12} className="mr-1"/>Hoy</button>}
               {[...cerradas].reverse().map(j=>(
                 <button key={j.id} onClick={()=>setJornadaSel(j.id)}
                   className={`flex-shrink-0 px-3.5 py-2.5 rounded-2xl text-xs font-bold border ${jornadaSel===j.id?'border-[rgba(178,69,24,0.28)] bg-[rgba(255,240,228,0.98)] text-[#a14017]':'border-[rgba(104,74,56,0.14)] bg-[rgba(255,251,246,0.9)] text-[#6f564a]'}`}>{fmtDateShort(j.fecha)}</button>))}</div></div>
@@ -3431,12 +3643,12 @@ function ReportesPage({state}){
             const pEnvio=(jActual.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
             return(<div className="space-y-4">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <MetricCard icon="💰" label="Ventas" value={fmt(tv)} color="green" sub={`Cobrado total: ${fmt(mj.cobrosTotal)}`}/>
-                <MetricCard icon="💸" label="Gastos" value={fmt(tg)} color="red"/>
-                <MetricCard icon="📈" label="Utilidad" value={fmt(ut)} color={ut>=0?'green':'red'} sub={`Margen: ${mg}%`}/>
-                <MetricCard icon="🧾" label="Pedidos" value={(jActual.pedidos||[]).length} color="orange" sub={`${pRecoger} recogen · ${pEnvio} envios`}/>
+                <MetricCard icon="coins" label="Ventas" value={fmt(tv)} color="green" sub={`Cobrado total: ${fmt(mj.cobrosTotal)}`}/>
+                <MetricCard icon="wallet" label="Gastos" value={fmt(tg)} color="red"/>
+                <MetricCard icon="trendUp" label="Utilidad" value={fmt(ut)} color={ut>=0?'green':'red'} sub={`Margen: ${mg}%`}/>
+                <MetricCard icon="receipt" label="Pedidos" value={(jActual.pedidos||[]).length} color="orange" sub={`${pRecoger} recogen · ${pEnvio} envios`}/>
               </div>
-              {manda>0&&<MetricCard icon="🛵" label="Mandaditos" value={fmt(manda)} color="purple" sub={`${pEnvio} servicios de envio`}/>}
+              {manda>0&&<MetricCard icon="bike" label="Mandaditos" value={fmt(manda)} color="purple" sub={`${pEnvio} servicios de envio`}/>}
               {productSales.length>0&&(<div className="surface-card">
                 <p className="section-kicker mb-2">Detalle</p>
                 <h3 className="section-title mb-4">Ventas por producto</h3>
@@ -3445,16 +3657,16 @@ function ReportesPage({state}){
         </React.Fragment>)}</div>)}
 
       {tab==='mensual'&&(<div className="space-y-5">
-        {cerradas.length===0&&<EmptyState emoji="📅" title="Sin jornadas cerradas" sub="Cierra al menos una jornada"/>}
+        {cerradas.length===0&&<EmptyState icon="calendar" title="Sin jornadas cerradas" sub="Cierra al menos una jornada"/>}
         {cerradas.length>0&&(()=>{const ms=cerradas.map(j=>buildCajaModel(j));
           const tv=_roundMoney(ms.reduce((s,m)=>s+m.productosTotal,0));
           const tg=_roundMoney(ms.reduce((s,m)=>s+m.gastosTotal,0));const tu=_roundMoney(tv-tg);
           return(<div className="space-y-5">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-              <MetricCard icon="📅" label="Jornadas" value={cerradas.length} sub="registradas" color="blue"/>
-              <MetricCard icon="📊" label="Prom/Jornada" value={fmt(tv/cerradas.length)} color="orange"/>
-              <MetricCard icon="💰" label="Total Acumulado" value={fmt(tv)} color="green"/>
-              <MetricCard icon="📈" label="Utilidad Prom." value={fmt(tu/cerradas.length)} color={tu>=0?'green':'red'}/>
+              <MetricCard icon="calendar" label="Jornadas" value={cerradas.length} sub="registradas" color="blue"/>
+              <MetricCard icon="chart" label="Prom/Jornada" value={fmt(tv/cerradas.length)} color="orange"/>
+              <MetricCard icon="coins" label="Total Acumulado" value={fmt(tv)} color="green"/>
+              <MetricCard icon="trendUp" label="Utilidad Prom." value={fmt(tu/cerradas.length)} color={tu>=0?'green':'red'}/>
             </div>
             {proj&&cerradas.length>1&&(<div className="surface-card">
               <p className="section-kicker mb-2">Tendencia</p>
@@ -3475,7 +3687,7 @@ function ReportesPage({state}){
               <p className="section-kicker mb-2">Desempeño</p>
               <h3 className="section-title mb-3">Productos estrella</h3>
               {stats.filter(s=>s.cantidad>0).slice(0,6).map((s,i)=>(<div key={s.id} className="flex items-center gap-3 py-2 border-b border-[rgba(104,74,56,0.08)] last:border-0">
-                <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span><span className="text-xl">{s.emoji}</span>
+                <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span><span className="text-[var(--brand-strong)] opacity-80"><ProductIcon cat={s.cat} size={18}/></span>
                 <div className="flex-1"><p className="text-xs font-bold text-[#2f1d17]">{s.nombre}</p><p className="text-xs text-[#8b7265]">{s.cantidad} pz</p></div>
                 <div className="text-right"><p className="text-xs font-black">{fmt(s.revenue)}</p>
                   <p className="text-[10px] text-green-600 font-bold">{(((s.precio-s.costo)/s.precio)*100).toFixed(0)}%</p></div></div>))}</div>)}
@@ -3484,7 +3696,7 @@ function ReportesPage({state}){
               <h3 className="section-title mb-3">Recomendaciones</h3>
               <div className="space-y-3">{recs.map((r,i)=>(<div key={i} className={`rounded-2xl p-3 text-sm
                 ${r.type==='warn'?'bg-yellow-50 border border-yellow-200':r.type==='ok'?'bg-green-50 border border-green-200':'bg-blue-50 border border-blue-200'}`}>
-                <span className="mr-2">{r.icon}</span><span>{r.text}</span></div>))}</div></div>
+                <Icon name={r.icon} size={14} className="mr-2"/><span>{r.text}</span></div>))}</div></div>
           </div>);})()}
       </div>)}
 
@@ -3492,33 +3704,33 @@ function ReportesPage({state}){
 
       {tab==='inteligencia'&&(()=>{
         const intel=analyzeHistorico(state.jornadas,state.productos);
-        if(!intel)return<EmptyState emoji="🧠" title="Sin datos suficientes" sub="Cierra al menos 1 jornada para activar la inteligencia"/>;
+        if(!intel)return<EmptyState icon="sparkles" title="Sin datos suficientes" sub="Cierra al menos 1 jornada para activar la inteligencia"/>;
         return(<div className="space-y-5 fade-in">
           <div className="bg-gradient-to-br from-purple-500 to-indigo-600 rounded-3xl p-5 text-white shadow-lg">
-            <h3 className="font-black text-lg mb-1">🧠 Inteligencia K'apul'Its</h3>
+            <h3 className="font-black text-lg mb-1"><Icon name="sparkles" size={17} className="mr-1.5"/>Inteligencia K'apul'Its</h3>
             <p className="text-purple-200 text-xs">{intel.totalJornadas} jornadas analizadas</p>
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <MetricCard icon="🧾" label="Ticket Promedio" value={fmt(intel.ticketProm)} color="orange"/>
-            <MetricCard icon="🛵" label="Tasa de Envio" value={`${intel.tasaEnvio.toFixed(0)}%`} color="purple"/>
-            {intel.mejorDia&&<MetricCard icon="📅" label="Mejor Dia" value={intel.mejorDia.dia} sub={fmt(intel.mejorDia.promVentas)+' prom'} color="green"/>}
-            {intel.horaPico&&<MetricCard icon="⏰" label="Hora Pico" value={`${intel.horaPico[0]}:00`} sub={`${intel.horaPico[1]} pedidos`} color="blue"/>}
+            <MetricCard icon="receipt" label="Ticket Promedio" value={fmt(intel.ticketProm)} color="orange"/>
+            <MetricCard icon="bike" label="Tasa de Envio" value={`${intel.tasaEnvio.toFixed(0)}%`} color="purple"/>
+            {intel.mejorDia&&<MetricCard icon="calendar" label="Mejor Dia" value={intel.mejorDia.dia} sub={fmt(intel.mejorDia.promVentas)+' prom'} color="green"/>}
+            {intel.horaPico&&<MetricCard icon="clock" label="Hora Pico" value={`${intel.horaPico[0]}:00`} sub={`${intel.horaPico[1]} pedidos`} color="blue"/>}
           </div>
 
           {intel.tendencia!==0&&(
             <div className={`rounded-2xl p-4 border ${intel.tendencia>0?'bg-green-50 border-green-200':'bg-red-50 border-red-200'}`}>
-              <p className="font-black text-sm">{intel.tendencia>0?'📈 Tendencia positiva':'📉 Tendencia a la baja'}</p>
+              <p className="font-black text-sm"><Icon name={intel.tendencia>0?'trendUp':'trendDown'} size={14} className="mr-1"/>{intel.tendencia>0?'Tendencia positiva':'Tendencia a la baja'}</p>
               <p className="text-xs mt-1 opacity-70">Ventas {intel.tendencia>0?'subieron':'bajaron'} {Math.abs(intel.tendencia).toFixed(0)}% en las ultimas 3 jornadas vs anteriores.</p>
             </div>)}
 
           {intel.topVolumen.length>0&&(
             <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
-              <h3 className="font-black text-sm mb-3">🏆 Mas Pedidos (volumen)</h3>
+              <h3 className="font-black text-sm mb-3"><Icon name="star" size={14} className="mr-1"/>Mas Pedidos (volumen)</h3>
               {intel.topVolumen.map((s,i)=>(
                 <div key={s.id} className="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
                   <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span>
-                  <span>{s.emoji}</span>
+                  <span className="text-[var(--brand-strong)] opacity-80"><ProductIcon cat={s.cat} size={16}/></span>
                   <span className="flex-1 text-xs font-bold">{s.nombre}</span>
                   <span className="text-xs font-black text-orange-600">{s.cantidad} pz</span>
                 </div>))}
@@ -3526,11 +3738,11 @@ function ReportesPage({state}){
 
           {intel.topRentable.length>0&&(
             <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
-              <h3 className="font-black text-sm mb-3">💎 Mas Rentables (margen)</h3>
+              <h3 className="font-black text-sm mb-3"><Icon name="sparkles" size={14} className="mr-1"/>Mas Rentables (margen)</h3>
               {intel.topRentable.map((s,i)=>(
                 <div key={s.id} className="flex items-center gap-2 py-1.5 border-b border-gray-50 last:border-0">
                   <span className="text-xs font-black text-gray-400 w-4">#{i+1}</span>
-                  <span>{s.emoji}</span>
+                  <span className="text-[var(--brand-strong)] opacity-80"><ProductIcon cat={s.cat} size={16}/></span>
                   <span className="flex-1 text-xs font-bold">{s.nombre}</span>
                   <span className={`text-xs font-black ${s.margen>=40?'text-green-600':'text-yellow-600'}`}>{s.margen.toFixed(0)}%</span>
                 </div>))}
@@ -3538,16 +3750,16 @@ function ReportesPage({state}){
 
           {intel.insights.length>0&&(
             <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
-              <h3 className="font-black text-sm mb-3">💡 Recomendaciones</h3>
+              <h3 className="font-black text-sm mb-3"><Icon name="bulb" size={14} className="mr-1"/>Recomendaciones</h3>
               <div className="space-y-2">{intel.insights.map((r,i)=>(
                 <div key={i} className={`rounded-xl p-3 text-xs ${r.type==='warn'?'bg-yellow-50 border border-yellow-200':r.type==='ok'?'bg-green-50 border border-green-200':'bg-blue-50 border border-blue-200'}`}>
-                  <span className="mr-1">{r.icon}</span>{r.text}
+                  <Icon name={r.icon} size={13} className="mr-1.5"/>{r.text}
                 </div>))}</div>
             </div>)}
 
           {intel.porDia.length>1&&(
             <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
-              <h3 className="font-black text-sm mb-3">📊 Ventas por Dia de la Semana</h3>
+              <h3 className="font-black text-sm mb-3"><Icon name="chart" size={14} className="mr-1"/>Ventas por Dia de la Semana</h3>
               <BarChart labels={intel.porDia.map(d=>d.dia.substring(0,3))} values={intel.porDia.map(d=>d.promVentas)} color="#8b5cf6"/>
             </div>)}
         </div>);
@@ -3556,30 +3768,30 @@ function ReportesPage({state}){
       {tab==='pdf'&&(
         <div className="space-y-5 fade-in">
           <div className="surface-card-strong">
-            <h3 className="font-black text-lg mb-1">📄 Reportes PDF</h3>
+            <h3 className="font-black text-lg mb-1"><Icon name="file" size={17} className="mr-1.5"/>Reportes PDF</h3>
             <p className="text-sm text-[#7d6458]">Genera reportes profesionales para descargar o compartir</p>
           </div>
 
           <div className="surface-card">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-12 h-12 bg-orange-100 rounded-2xl flex items-center justify-center text-2xl">📅</div>
+              <div className="w-12 h-12 bg-orange-100 rounded-2xl flex items-center justify-center text-orange-600"><Icon name="calendar" size={22}/></div>
               <div><h4 className="font-black text-sm">Reporte Mensual</h4>
                 <p className="text-xs text-gray-400">Ventas, gastos, productos y recomendaciones del mes actual</p></div>
             </div>
-            <Btn full onClick={()=>generarPDF('mensual',state.jornadas,state.productos)}>📄 Generar PDF Mensual</Btn>
+            <Btn full onClick={()=>generarPDF('mensual',state.jornadas,state.productos)}><Icon name="file" size={15} className="mr-1.5"/>Generar PDF Mensual</Btn>
           </div>
 
           <div className="surface-card">
             <div className="flex items-center gap-3 mb-3">
-              <div className="w-12 h-12 bg-purple-100 rounded-2xl flex items-center justify-center text-2xl">📊</div>
+              <div className="w-12 h-12 bg-purple-100 rounded-2xl flex items-center justify-center text-purple-600"><Icon name="chart" size={22}/></div>
               <div><h4 className="font-black text-sm">Reporte Trimestral</h4>
                 <p className="text-xs text-gray-400">Analisis del trimestre actual con tendencias y proyecciones</p></div>
             </div>
-            <Btn full color="green" onClick={()=>generarPDF('trimestral',state.jornadas,state.productos)}>📄 Generar PDF Trimestral</Btn>
+            <Btn full color="green" onClick={()=>generarPDF('trimestral',state.jornadas,state.productos)}><Icon name="file" size={15} className="mr-1.5"/>Generar PDF Trimestral</Btn>
           </div>
 
           <div className="rounded-[24px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.9)] p-4 text-xs text-[#71584b]">
-            <p className="font-bold mb-1">💡 Como usar</p>
+            <p className="font-bold mb-1"><Icon name="bulb" size={13} className="mr-1"/>Como usar</p>
             <ul className="space-y-1 list-disc pl-4">
               <li>Los PDF se descargan automaticamente</li>
               <li>Incluyen recomendaciones inteligentes basadas en tu historico</li>
@@ -3611,30 +3823,30 @@ function MandaditosReport({jornadas,jornadaActiva}){
     porTipo[m.tipo].cant++;porTipo[m.tipo].total+=(Number(m.tarifa)||0);
   }));
   return(<div className="space-y-5">
-    {totalClientes===0&&<EmptyState emoji="🛵" title="Sin datos de envios" sub="Los mandaditos apareceran aqui"/>}
+    {totalClientes===0&&<EmptyState icon="bike" title="Sin datos de envios" sub="Los mandaditos apareceran aqui"/>}
     {totalClientes>0&&(<React.Fragment>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <MetricCard icon="🛵" label="Envios cobrados" value={fmt(totalManda)} color="purple" sub="Dinero separado del negocio"/>
-        <MetricCard icon="📦" label="Total Envios" value={totalEnvios} color="blue"/>
-        <MetricCard icon="🏃" label="Pasan a Recoger" value={totalRecoger} color="green"/>
-        <MetricCard icon="👥" label="Total Clientes" value={totalClientes} color="orange"/>
+        <MetricCard icon="bike" label="Envios cobrados" value={fmt(totalManda)} color="purple" sub="Dinero separado del negocio"/>
+        <MetricCard icon="box" label="Total Envios" value={totalEnvios} color="blue"/>
+        <MetricCard icon="bag" label="Pasan a Recoger" value={totalRecoger} color="green"/>
+        <MetricCard icon="users" label="Total Clientes" value={totalClientes} color="orange"/>
       </div>
       {totalManda>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
         <h3 className="font-black text-gray-800 mb-3 text-sm">Envios por metodo de pago</h3>
-        <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600">💵 Efectivo (esta en caja)</span><span className="font-bold text-sm text-green-600">{fmt(totalMandaEf)}</span></div>
-        <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600">📱 Transferencia (esta en banco)</span><span className="font-bold text-sm text-blue-600">{fmt(totalMandaTr)}</span></div>
-        {totalMandaMx>0&&<div className="flex justify-between items-center py-2"><span className="text-sm text-gray-600">💵📱 En pedidos mixtos</span><span className="font-bold text-sm text-purple-600">{fmt(totalMandaMx)}</span></div>}
+        <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600"><Icon name="cash" size={14} className="mr-1"/>Efectivo (esta en caja)</span><span className="font-bold text-sm text-green-600">{fmt(totalMandaEf)}</span></div>
+        <div className="flex justify-between items-center py-2 border-b border-gray-50"><span className="text-sm text-gray-600"><Icon name="phone" size={14} className="mr-1"/>Transferencia (esta en banco)</span><span className="font-bold text-sm text-blue-600">{fmt(totalMandaTr)}</span></div>
+        {totalMandaMx>0&&<div className="flex justify-between items-center py-2"><span className="text-sm text-gray-600"><Icon name="cash" size={14}/><Icon name="phone" size={14} className="mr-1"/>En pedidos mixtos</span><span className="font-bold text-sm text-purple-600">{fmt(totalMandaMx)}</span></div>}
       </div>)}
       {Object.keys(porTipo).length>0&&(<div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
         <h3 className="font-black text-gray-800 mb-3 text-sm">Desglose por tipo de envio</h3>
         {Object.entries(porTipo).map(([tipo,data])=>{const t=TARIFAS_ENVIO[tipo];
           return(<div key={tipo} className="flex justify-between items-center py-2 border-b border-gray-50 last:border-0">
-            <span className="text-sm text-gray-600">{t?.emoji} {t?.label||tipo}</span>
+            <span className="text-sm text-gray-600"><Icon name={TIPO_ENVIO_ICON[tipo]||'bag'} size={14} className="mr-1"/>{t?.label||tipo}</span>
             <div className="text-right"><p className="font-bold text-sm text-purple-600">{fmt(data.total)}</p>
               <p className="text-xs text-gray-400">{data.cant} servicios</p></div></div>);})}
       </div>)}
       <div className="bg-purple-50 rounded-2xl p-4 text-sm text-purple-700">
-        <p className="font-bold">📌 Nota: Mandaditos</p>
+        <p className="font-bold"><Icon name="info" size={13} className="mr-1"/>Nota: Mandaditos</p>
         <p className="text-xs mt-1 opacity-70">Este ingreso se contabiliza por separado del negocio. Es un servicio externo que no afecta la utilidad de ventas de productos.</p>
       </div>
     </React.Fragment>)}
@@ -3655,22 +3867,23 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
         <h2 className="section-title">Ajustes, sincronización y operación interna</h2>
       </div>
       <div className="flex rounded-[26px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 mb-1 gap-1 overflow-x-auto shadow-[0_16px_40px_rgba(90,53,33,0.08)]">
-        {[{id:'importar',l:'📥 Importar',ld:'📥 Importar'},{id:'costos',l:'Costos',ld:'💰 Costos'},{id:'productos',l:'Productos',ld:'🍖 Productos'},{id:'impresora',l:'🖨️',ld:'🖨️ Impresora'},{id:'config',l:'Config',ld:'⚙️ Config'}].map(t=>(
-          <button key={t.id} onClick={()=>setTab(t.id)}
-            className={`flex-shrink-0 flex-1 py-3 text-xs md:text-sm font-black rounded-[20px] ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}><span className="md:hidden">{t.l}</span><span className="hidden md:inline">{t.ld}</span></button>))}</div>
+        {[{id:'importar',l:'Importar',icon:'download'},{id:'costos',l:'Costos',icon:'coins'},{id:'productos',l:'Productos',icon:'bowl'},{id:'impresora',l:'Impresora',icon:'printer'},{id:'config',l:'Config',icon:'settings'}].map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} aria-label={t.l}
+            className={`flex-shrink-0 flex-1 py-3 min-h-[44px] text-xs md:text-sm font-black rounded-[20px] transition-all duration-150 ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>
+            <span className="md:hidden">{t.id==='impresora'||t.id==='importar'?<Icon name={t.icon} size={16} label={t.l}/>:t.l}</span><span className="hidden md:inline"><Icon name={t.icon} size={14} className="mr-1"/>{t.l}</span></button>))}</div>
 
       {tab==='importar'&&(<ImportarTab onImportarProductos={onImportarProductos} onImportarCostos={onImportarCostos} productos={state.productos} costos={state.costos}/>)}
 
       {tab==='costos'&&(<div className="space-y-4">
         <div className="rounded-[24px] border border-[rgba(178,69,24,0.16)] bg-[rgba(255,243,232,0.95)] p-4 text-sm text-[#a14017]">
-          <p className="font-bold">💡 Rentabilidad por producto</p>
+          <p className="font-bold"><Icon name="bulb" size={13} className="mr-1"/>Rentabilidad por producto</p>
           <p className="text-xs mt-1 opacity-70">Estos costos se usan para calcular el margen. Actualízalos desde la pestaña Importar.</p></div>
         <div className="md:grid md:grid-cols-2 md:gap-4 space-y-4 md:space-y-0">
         {state.productos.filter(p=>!p.esVariado).map(p=>{const margen=p.precio>0?(((p.precio-p.costo)/p.precio)*100):0;
           const s=productStats.find(x=>x.id===p.id);
           return(<div key={p.id} className="surface-card">
             <div className="flex items-center justify-between mb-2">
-              <div className="flex items-center gap-2"><span className="text-2xl">{p.emoji}</span><p className="font-bold text-sm text-[#2f1d17]">{p.nombre}</p></div>
+              <div className="flex items-center gap-2"><span className="text-[var(--brand-strong)] opacity-80"><ProductIcon cat={p.cat} size={20}/></span><p className="font-bold text-sm text-[#2f1d17]">{p.nombre}</p></div>
               <button onClick={()=>setEditProd(p)} className="text-xs text-[#a14017] font-bold border border-[rgba(178,69,24,0.2)] px-3 py-1.5 rounded-xl bg-[rgba(255,241,230,0.9)]">Editar</button></div>
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="bg-[rgba(255,251,246,0.92)] rounded-[18px] p-2.5"><p className="text-xs text-[#8a7063]">Precio</p><p className="font-black text-sm text-[#2f1d17]">{fmt(p.precio)}</p></div>
@@ -3689,14 +3902,14 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
           <div>
             <p className="section-kicker mb-1">Catalogo</p>
             <h3 className="section-title text-[22px]">Productos del menu</h3>
-            <p className="text-sm text-[var(--text-soft)] mt-1">Activa, desactiva o agrega productos manualmente con emoji, precio y costo.</p>
+            <p className="text-sm text-[var(--text-soft)] mt-1">Activa, desactiva o agrega productos manualmente con precio y costo.</p>
           </div>
           <Btn color="orange" onClick={()=>setShowAddProd(true)}>+ Agregar producto</Btn>
         </div>
         <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
           {state.productos.filter(p=>!p.esVariado).map(p=>(<div key={p.id} className="surface-card flex items-center justify-between gap-3">
             <div className="flex items-center gap-3 min-w-0">
-              <span className="text-2xl shrink-0">{p.emoji}</span>
+              <span className="shrink-0 text-[var(--brand-strong)] opacity-80"><ProductIcon cat={p.cat} size={22}/></span>
               <div className="min-w-0">
                 <p className="font-bold text-sm text-[#2f1d17] truncate">{p.nombre}</p>
                 <p className="text-xs text-[#7a6255] truncate">{fmt(p.precio)}{COMBO_DESC[p.id]?` · ${COMBO_DESC[p.id]}`:''}</p>
@@ -3722,7 +3935,7 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
 
     {editProd&&<Modal open={!!editProd} onClose={()=>setEditProd(null)} title={`Editar: ${editProd.nombre}`}>
       <EditProductoForm producto={editProd} onSave={d=>{onActualizarProducto(editProd.id,d);setEditProd(null);}}/></Modal>}
-    <Modal open={showAddProd} onClose={()=>setShowAddProd(false)} title="➕ Agregar producto">
+    <Modal open={showAddProd} onClose={()=>setShowAddProd(false)} title="Agregar producto">
       <ProductoForm onSave={d=>{onAgregarProducto(d);setShowAddProd(false);}}/>
     </Modal>
   </div>);
@@ -3736,9 +3949,9 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
   const [showAddEmp,setShowAddEmp]=useState(false);const [editEmp,setEditEmp]=useState(null);
   const [empNombre,setEmpNombre]=useState('');const [empRol,setEmpRol]=useState('');const [empSueldo,setEmpSueldo]=useState('');
   const [nuevoGF,setNuevoGF]=useState('');const [confirmDelEmp,setConfirmDelEmp]=useState(null);const [confirmDelGF,setConfirmDelGF]=useState(null);
-  const [backups,setBackups]=useState([]);const [syncMsg,setSyncMsg]=useState('');
+  const [backups,setBackups]=useState([]);const [syncMsg,setSyncMsg]=useState(null);
   const [confirmPull,setConfirmPull]=useState(false);const [confirmRestore,setConfirmRestore]=useState(null);
-  const [auditReport,setAuditReport]=useState(null);const [repairMsg,setRepairMsg]=useState('');
+  const [auditReport,setAuditReport]=useState(null);const [repairMsg,setRepairMsg]=useState(null);
 
   useEffect(()=>{setBackups(onListBackups());},[onListBackups]);
 
@@ -3751,41 +3964,42 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
   const iniciarEdicion=(e)=>{setEditEmp(e);setEmpNombre(e.nombre);setEmpRol(e.rol);setEmpSueldo(String(e.sueldo));setShowAddEmp(true);};
 
   const refreshBackups=()=>setBackups(onListBackups());
+  // Mensajes de estado como objetos {kind,text}: sin emojis en UI.
   const runSync=async()=>{
-    setSyncMsg('Sincronizando...');
+    setSyncMsg({kind:'info',text:'Sincronizando...'});
     const r=await onSyncNow();
-    setSyncMsg(r.ok?'✅ Cambios enviados a la nube':'❌ '+r.error);
+    setSyncMsg(r.ok?{kind:'ok',text:'Cambios enviados a la nube'}:{kind:'err',text:r.error});
     refreshBackups();
   };
   const runPull=async()=>{
     setConfirmPull(false);
-    setSyncMsg('Descargando nube...');
+    setSyncMsg({kind:'info',text:'Descargando nube...'});
     const r=await onPullFromCloud();
-    setSyncMsg(r.ok?'✅ Datos descargados desde la nube':'❌ '+r.error);
+    setSyncMsg(r.ok?{kind:'ok',text:'Datos descargados desde la nube'}:{kind:'err',text:r.error});
     refreshBackups();
   };
   const runRestore=ts=>{
     const ok=onRestoreBackup(ts);
     setConfirmRestore(null);
-    setSyncMsg(ok?'✅ Backup restaurado en este dispositivo':'❌ No se pudo restaurar');
+    setSyncMsg(ok?{kind:'ok',text:'Backup restaurado en este dispositivo'}:{kind:'err',text:'No se pudo restaurar'});
     refreshBackups();
   };
   const runAudit=()=>{
     const report=onAuditHistoricalData();
     setAuditReport(report);
-    setRepairMsg('');
+    setRepairMsg(null);
   };
   const runRepair=()=>{
     const repaired=onRepairHistoricalData();
     setAuditReport(repaired.report);
-    setRepairMsg(repaired.changed?'✅ Reparación histórica aplicada y guardada':'ℹ️ No se encontraron cambios históricos por aplicar');
+    setRepairMsg(repaired.changed?{kind:'ok',text:'Reparación histórica aplicada y guardada'}:{kind:'info',text:'No se encontraron cambios históricos por aplicar'});
     refreshBackups();
   };
 
   return(<div className="space-y-5 md:grid md:grid-cols-2 md:gap-5 md:space-y-0 md:items-start">
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-black text-gray-800 text-sm">☁️ Sync y Respaldo</h3>
+        <h3 className="font-black text-gray-800 text-sm"><Icon name="cloud" size={15} className="mr-1"/>Sync y Respaldo</h3>
         <Badge color={syncStatus==='synced'?'green':syncStatus==='syncing'?'yellow':syncStatus==='remote'?'blue':syncStatus==='offline'?'red':'orange'}>
           {syncStatus==='synced'?'Sincronizado':syncStatus==='syncing'?'Sincronizando':syncStatus==='remote'?'Remoto pendiente':syncStatus==='offline'?'Sin conexión':'Local pendiente'}
         </Badge>
@@ -3796,23 +4010,23 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
           <p className="mt-1"><b>Última actualización en nube:</b> {fmtDateTime(lastCloudAt)}</p>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <Btn size="sm" color={deviceInfo.role==='primary'?'green':'gray'} onClick={()=>onSetDeviceRole('primary')}>🖥️ Principal</Btn>
-          <Btn size="sm" color={deviceInfo.role==='mirror'?'blue':'gray'} onClick={()=>onSetDeviceRole('mirror')}>📱 Espejo</Btn>
+          <Btn size="sm" color={deviceInfo.role==='primary'?'green':'gray'} onClick={()=>onSetDeviceRole('primary')}><Icon name="monitor" size={14} className="mr-1"/>Principal</Btn>
+          <Btn size="sm" color={deviceInfo.role==='mirror'?'blue':'gray'} onClick={()=>onSetDeviceRole('mirror')}><Icon name="phone" size={14} className="mr-1"/>Espejo</Btn>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          <Btn size="sm" color="orange" onClick={runSync}>☁️ Enviar ahora</Btn>
-          <Btn size="sm" color="gray" onClick={()=>setConfirmPull(true)}>📥 Traer nube</Btn>
+          <Btn size="sm" color="orange" onClick={runSync}><Icon name="cloud" size={14} className="mr-1"/>Enviar ahora</Btn>
+          <Btn size="sm" color="gray" onClick={()=>setConfirmPull(true)}><Icon name="download" size={14} className="mr-1"/>Traer nube</Btn>
         </div>
         <div className="bg-blue-50 rounded-xl p-3 text-xs text-blue-700">
           Usa tu PC en modo <b>Principal</b> para capturar y cerrar caja. Deja los teléfonos en modo <b>Espejo</b> para recibir cambios sin meter conflictos raros.
         </div>
-        {syncMsg&&<div className={`rounded-xl p-3 text-sm font-bold ${syncMsg.startsWith('✅')?'bg-green-50 text-green-700':syncMsg.startsWith('❌')?'bg-red-50 text-red-600':'bg-yellow-50 text-yellow-700'}`}>{syncMsg}</div>}
+        {syncMsg&&<div role="status" className={`rounded-xl p-3 text-sm font-bold ${syncMsg.kind==='ok'?'bg-green-50 text-green-700':syncMsg.kind==='err'?'bg-red-50 text-red-600':'bg-yellow-50 text-yellow-700'}`}><Icon name={syncMsg.kind==='ok'?'check':syncMsg.kind==='err'?'alert':'info'} size={14} className="mr-1.5"/>{syncMsg.text}</div>}
       </div>
     </div>
 
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-black text-gray-800 text-sm">🛟 Backups locales</h3>
+        <h3 className="font-black text-gray-800 text-sm"><Icon name="lifebuoy" size={15} className="mr-1"/>Backups locales</h3>
         <button onClick={refreshBackups} className="text-xs font-bold text-orange-500">Actualizar</button>
       </div>
       <div className="space-y-2">
@@ -3830,16 +4044,16 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
     </div>
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-black text-gray-800 text-sm">🧪 Auditoría histórica</h3>
+        <h3 className="font-black text-gray-800 text-sm"><Icon name="search" size={15} className="mr-1"/>Auditoría histórica</h3>
         <button onClick={runAudit} className="text-xs font-bold text-orange-500">Analizar</button>
       </div>
       <div className="space-y-3">
         <p className="text-xs text-gray-500">Revisa y corrige ventas duplicadas históricas y diferencias de caja calculadas con la fórmula anterior.</p>
         <div className="grid grid-cols-2 gap-2">
-          <Btn size="sm" color="gray" onClick={runAudit}>🔎 Auditar</Btn>
-          <Btn size="sm" color="orange" onClick={runRepair}>🛠️ Reparar</Btn>
+          <Btn size="sm" color="gray" onClick={runAudit}><Icon name="search" size={14} className="mr-1"/>Auditar</Btn>
+          <Btn size="sm" color="orange" onClick={runRepair}><Icon name="wrench" size={14} className="mr-1"/>Reparar</Btn>
         </div>
-        {repairMsg&&<div className={`rounded-xl p-3 text-sm font-bold ${repairMsg.startsWith('✅')?'bg-green-50 text-green-700':'bg-blue-50 text-blue-700'}`}>{repairMsg}</div>}
+        {repairMsg&&<div role="status" className={`rounded-xl p-3 text-sm font-bold ${repairMsg.kind==='ok'?'bg-green-50 text-green-700':'bg-blue-50 text-blue-700'}`}><Icon name={repairMsg.kind==='ok'?'check':'info'} size={14} className="mr-1.5"/>{repairMsg.text}</div>}
         {auditReport&&<div className="rounded-2xl bg-gray-50 p-3 space-y-2">
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="rounded-xl bg-white p-2"><p className="text-gray-400">Jornadas</p><p className="font-black text-gray-700">{auditReport.summary.jornadas}</p></div>
@@ -3861,7 +4075,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
     </div>
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-black text-gray-800 text-sm">💼 Equipo</h3>
+        <h3 className="font-black text-gray-800 text-sm"><Icon name="briefcase" size={15} className="mr-1"/>Equipo</h3>
         <button onClick={()=>{setEditEmp(null);setEmpNombre('');setEmpRol('');setEmpSueldo('');setShowAddEmp(true);}}
           className="text-xs font-bold text-orange-500 bg-orange-50 px-3 py-1 rounded-lg border border-orange-200">+ Agregar</button>
       </div>
@@ -3869,26 +4083,26 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
         <div className="flex-1"><p className="font-bold text-sm">{e.nombre}</p><p className="text-xs text-gray-400">{e.rol}</p></div>
         <p className={`font-black text-sm mr-3 ${e.sueldo>0?'text-orange-600':'text-gray-400'}`}>{e.sueldo>0?fmt(e.sueldo):'Socio'}</p>
         <div className="flex gap-1">
-          <button onClick={()=>iniciarEdicion(e)} className="text-xs text-blue-500 bg-blue-50 px-2 py-1 rounded-lg">✏️</button>
-          <button onClick={()=>setConfirmDelEmp(e)} className="text-xs text-red-400 bg-red-50 px-2 py-1 rounded-lg">✕</button>
+          <button onClick={()=>iniciarEdicion(e)} className="text-blue-500 bg-blue-50 w-9 h-9 flex items-center justify-center rounded-lg" aria-label={`Editar empleado ${e.nombre}`}><Icon name="edit" size={14}/></button>
+          <button onClick={()=>setConfirmDelEmp(e)} className="text-red-400 bg-red-50 w-9 h-9 flex items-center justify-center rounded-lg" aria-label={`Eliminar empleado ${e.nombre}`}><Icon name="x" size={14}/></button>
         </div></div>))}
       <div className="mt-3 border-t pt-3 flex justify-between">
         <span className="font-bold text-sm">Total nomina/jornada</span>
         <span className="font-black text-orange-600">{fmt(state.empleados.reduce((s,e)=>s+e.sueldo,0))}</span></div>
       <div className="mt-2 bg-blue-50 rounded-xl p-2 text-[10px] text-blue-600">
-        💡 La nomina se puede registrar manualmente desde la pestaña Gastos.</div>
+        <Icon name="bulb" size={12} className="mr-1"/>La nomina se puede registrar manualmente desde la pestaña Gastos.</div>
     </div>
 
-    <Modal open={showAddEmp} onClose={()=>{setShowAddEmp(false);setEditEmp(null);}} title={editEmp?'✏️ Editar empleado':'👤 Agregar empleado'}>
+    <Modal open={showAddEmp} onClose={()=>{setShowAddEmp(false);setEditEmp(null);}} title={editEmp?'Editar empleado':'Agregar empleado'}>
       <div className="space-y-4">
         <Input label="Nombre completo" value={empNombre} onChange={setEmpNombre} placeholder="Nombre del empleado"/>
         <Input label="Rol / Puesto" value={empRol} onChange={setEmpRol} placeholder="Ej: Linea de Produccion"/>
         <Input label="Sueldo por jornada" type="number" prefix="$" value={empSueldo} onChange={setEmpSueldo} placeholder="0 = Socio"/>
-        <Btn full color="green" onClick={guardarEmpleado} disabled={!empNombre}>{editEmp?'💾 Guardar cambios':'👤 Agregar empleado'}</Btn>
+        <Btn full color="green" onClick={guardarEmpleado} disabled={!empNombre}><Icon name={editEmp?'save':'plus'} size={15} className="mr-1.5"/>{editEmp?'Guardar cambios':'Agregar empleado'}</Btn>
       </div>
     </Modal>
 
-    <Modal open={!!confirmDelEmp} onClose={()=>setConfirmDelEmp(null)} title="⚠️ Eliminar empleado">
+    <Modal open={!!confirmDelEmp} onClose={()=>setConfirmDelEmp(null)} title="Eliminar empleado">
       {confirmDelEmp&&(<div className="space-y-4">
         <p className="text-sm text-center">Eliminar a <b>{confirmDelEmp.nombre}</b> del equipo?</p>
         <div className="flex gap-3"><Btn full color="gray" onClick={()=>setConfirmDelEmp(null)}>Cancelar</Btn>
@@ -3898,7 +4112,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
 
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-black text-gray-800 text-sm">📌 Gastos fijos (mensuales)</h3>
+        <h3 className="font-black text-gray-800 text-sm"><Icon name="pin" size={15} className="mr-1"/>Gastos fijos (mensuales)</h3>
       </div>
       {state.gastosFijos.map(g=>(<div key={g.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
         <span className="text-sm text-gray-700 flex-1">{g.nombre}</span>
@@ -3907,7 +4121,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
             <span className="px-2 text-gray-400 text-sm">$</span>
             <input type="number" value={g.monto} onChange={e=>onActualizarGastoFijo(g.id,e.target.value)}
               className="w-20 py-1.5 text-sm font-bold text-right outline-none pr-2"/></div>
-          <button onClick={()=>setConfirmDelGF(g)} className="text-red-300 text-sm">✕</button>
+          <button onClick={()=>setConfirmDelGF(g)} className="text-red-300 hover:text-red-500 w-9 h-9 flex items-center justify-center" aria-label={`Eliminar gasto fijo ${g.nombre}`}><Icon name="x" size={14}/></button>
         </div></div>))}
       <div className="mt-3 flex gap-2">
         <input value={nuevoGF} onChange={e=>setNuevoGF(e.target.value)} placeholder="Agregar gasto fijo..."
@@ -3919,10 +4133,10 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
         <span className="font-bold text-sm">Total fijos/mes</span>
         <span className="font-black text-red-500">{fmt(state.gastosFijos.reduce((s,g)=>s+g.monto,0))}</span></div>
       <div className="mt-2 bg-purple-50 rounded-xl p-2 text-[10px] text-purple-600">
-        📌 Estos gastos son mensuales. Se prorratean por jornada en los reportes para calcular utilidad neta real.</div>
+        <Icon name="info" size={12} className="mr-1"/>Estos gastos son mensuales. Se prorratean por jornada en los reportes para calcular utilidad neta real.</div>
     </div>
 
-    <Modal open={!!confirmDelGF} onClose={()=>setConfirmDelGF(null)} title="⚠️ Eliminar gasto fijo">
+    <Modal open={!!confirmDelGF} onClose={()=>setConfirmDelGF(null)} title="Eliminar gasto fijo">
       {confirmDelGF&&(<div className="space-y-4">
         <p className="text-sm text-center">Eliminar "<b>{confirmDelGF.nombre}</b>" de gastos fijos?</p>
         <div className="flex gap-3"><Btn full color="gray" onClick={()=>setConfirmDelGF(null)}>Cancelar</Btn>
@@ -3930,7 +4144,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
       </div>)}
     </Modal>
 
-    <Modal open={confirmPull} onClose={()=>setConfirmPull(false)} title="📥 Reemplazar con nube">
+    <Modal open={confirmPull} onClose={()=>setConfirmPull(false)} title="Reemplazar con nube">
       <div className="space-y-4">
         <p className="text-sm text-center">Esto reemplazará los datos locales de este dispositivo por la última copia guardada en la nube.</p>
         <div className="flex gap-3">
@@ -3940,7 +4154,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
       </div>
     </Modal>
 
-    <Modal open={!!confirmRestore} onClose={()=>setConfirmRestore(null)} title="🛟 Restaurar backup">
+    <Modal open={!!confirmRestore} onClose={()=>setConfirmRestore(null)} title="Restaurar backup">
       {confirmRestore&&(<div className="space-y-4">
         <p className="text-sm text-center">Se restaurará el snapshot local de <b>{fmtDateTime(confirmRestore)}</b>.</p>
         <div className="flex gap-3">
@@ -3960,7 +4174,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
       <p className="text-gray-400 text-xs mt-1">Desarrollo de software & soluciones digitales para negocios</p>
       <p className="text-gray-400 text-xs mt-0.5">Apps PWA · Automatizacion · Inteligencia de datos · IA aplicada</p>
       <div className="mt-3 pt-3 border-t border-gray-700 space-y-1">
-        <p className="text-xs">📱 <a href="https://wa.me/529821057758" className="text-orange-400 font-bold">982 105 77 58</a></p>
+        <p className="text-xs"><Icon name="phone" size={12} className="mr-1"/><a href="https://wa.me/529821057758" className="text-orange-400 font-bold">982 105 77 58</a></p>
         <p className="text-[10px] text-gray-500">Convierte tu idea en una app. Preguntame como.</p>
       </div>
     </div>
@@ -3969,34 +4183,34 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
 
 // ── Importar Tab ──
 function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
-  const [status,setStatus]=useState('');const fileRef=useRef(null);const [importType,setImportType]=useState(null);
+  const [status,setStatus]=useState(null);const fileRef=useRef(null);const [importType,setImportType]=useState(null);
 
   const handleFile=async(e)=>{
     const file=e.target.files[0];if(!file)return;
-    setStatus('📂 Leyendo archivo...');
+    setStatus({kind:'info',text:'Leyendo archivo...'});
     try{
       const data=await file.arrayBuffer();
       const wb=XLSX.read(data);
       const ws=wb.Sheets[wb.SheetNames[0]];
       const json=XLSX.utils.sheet_to_json(ws);
-      if(!json.length){setStatus('❌ El archivo esta vacio');return;}
+      if(!json.length){setStatus({kind:'err',text:'El archivo esta vacio'});return;}
 
       if(importType==='menu'){
         const prods=json.map((r,i)=>({
           id:r.id||('prod_'+i),nombre:r.nombre||'',precio:Number(r.precio)||0,
           costo:Number(r.costo)||0,cat:r.categoria||'platillo',emoji:r.emoji||'🍽️',activo:r.activo!==false&&r.activo!=='no'
         })).filter(p=>p.nombre);
-        if(prods.length){onImportarProductos(prods);setStatus(`✅ ${prods.length} productos importados`);}
-        else setStatus('❌ No se encontraron productos validos');
+        if(prods.length){onImportarProductos(prods);setStatus({kind:'ok',text:`${prods.length} productos importados`});}
+        else setStatus({kind:'err',text:'No se encontraron productos validos'});
       }else if(importType==='costos'){
         const cs=json.map((r,i)=>({
           id:r.id||('costo_'+i),nombre:r.nombre||'',unidad:r.unidad||'',
           pu:Number(r.precio_unitario||r.pu||r.precio)||0,cat:r.categoria||''
         })).filter(c=>c.nombre);
-        if(cs.length){onImportarCostos(cs);setStatus(`✅ ${cs.length} costos importados`);}
-        else setStatus('❌ No se encontraron costos validos');
+        if(cs.length){onImportarCostos(cs);setStatus({kind:'ok',text:`${cs.length} costos importados`});}
+        else setStatus({kind:'err',text:'No se encontraron costos validos'});
       }
-    }catch(e){setStatus(`❌ Error: ${e.message}`);}
+    }catch(e){setStatus({kind:'err',text:`Error: ${e.message}`});}
     if(fileRef.current)fileRef.current.value='';
   };
 
@@ -4015,65 +4229,66 @@ function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
 
   return(<div className="space-y-5">
     <div className="bg-orange-50 rounded-2xl p-4 text-sm text-orange-700">
-      <p className="font-bold mb-2">📥 Dashboard de Importacion</p>
+      <p className="font-bold mb-2"><Icon name="download" size={14} className="mr-1"/>Dashboard de Importacion</p>
       <p className="text-xs opacity-70">Sube archivos Excel (.xlsx) para actualizar datos sin necesidad de modificar codigo.</p>
     </div>
     <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
-      <h3 className="font-black text-gray-800 mb-4 text-sm">🍽️ Menu y Precios</h3>
+      <h3 className="font-black text-gray-800 mb-4 text-sm"><Icon name="bowl" size={15} className="mr-1"/>Menu y Precios</h3>
       <p className="text-xs text-gray-500 mb-3">Actualiza los productos del menu, precios y costos estimados.</p>
       <div className="flex gap-2 mb-3">
-        <Btn size="sm" color="gray" onClick={()=>descargarPlantilla('menu')}>📄 Descargar</Btn>
-        <Btn size="sm" color="orange" onClick={()=>{setImportType('menu');fileRef.current?.click();}}>📤 Subir Excel</Btn>
+        <Btn size="sm" color="gray" onClick={()=>descargarPlantilla('menu')}><Icon name="file" size={13} className="mr-1"/>Descargar</Btn>
+        <Btn size="sm" color="orange" onClick={()=>{setImportType('menu');fileRef.current?.click();}}><Icon name="upload" size={13} className="mr-1"/>Subir Excel</Btn>
       </div>
       <p className="text-xs text-gray-400">Columnas: id · nombre · precio · costo · categoria · emoji · activo</p>
     </div>
     <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
-      <h3 className="font-black text-gray-800 mb-4 text-sm">🧾 Base de Costos (Ingredientes)</h3>
+      <h3 className="font-black text-gray-800 mb-4 text-sm"><Icon name="receipt" size={15} className="mr-1"/>Base de Costos (Ingredientes)</h3>
       <p className="text-xs text-gray-500 mb-3">Actualiza la base de datos de costos de insumos.</p>
       <div className="flex gap-2 mb-3">
-        <Btn size="sm" color="gray" onClick={()=>descargarPlantilla('costos')}>📄 Descargar</Btn>
-        <Btn size="sm" color="orange" onClick={()=>{setImportType('costos');fileRef.current?.click();}}>📤 Subir Excel</Btn>
+        <Btn size="sm" color="gray" onClick={()=>descargarPlantilla('costos')}><Icon name="file" size={13} className="mr-1"/>Descargar</Btn>
+        <Btn size="sm" color="orange" onClick={()=>{setImportType('costos');fileRef.current?.click();}}><Icon name="upload" size={13} className="mr-1"/>Subir Excel</Btn>
       </div>
       <p className="text-xs text-gray-400">Columnas: id · nombre · unidad · precio_unitario · categoria</p>
     </div>
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden"/>
-    {status&&<div className={`rounded-2xl p-4 text-sm font-bold text-center ${status.startsWith('✅')?'bg-green-50 text-green-700':status.startsWith('❌')?'bg-red-50 text-red-600':'bg-blue-50 text-blue-700'}`}>{status}</div>}
+    {status&&<div role="status" className={`rounded-2xl p-4 text-sm font-bold text-center ${status.kind==='ok'?'bg-green-50 text-green-700':status.kind==='err'?'bg-red-50 text-red-600':'bg-blue-50 text-blue-700'}`}><Icon name={status.kind==='ok'?'check':status.kind==='err'?'alert':'info'} size={14} className="mr-1.5"/>{status.text}</div>}
   </div>);
 }
 
 function ImpresoraTab({impresora,onActualizar}){
-  const [status,setStatus]=useState('');const hasBT='bluetooth' in navigator;const hasUSB='usb' in navigator;
-  const conectarBT=async()=>{setStatus('Buscando BT...');const r=await connectBluetooth();
-    if(r.success){onActualizar({tipo:'bluetooth',nombre:r.name,conectada:true});setStatus(`✅ ${r.name}`);}
-    else setStatus(`❌ ${r.error}`);};
-  const conectarUSB=async()=>{setStatus('Buscando USB...');const r=await connectUSB();
-    if(r.success){onActualizar({tipo:'usb',nombre:r.name,conectada:true});setStatus(`✅ ${r.name}`);}
-    else setStatus(`❌ ${r.error}`);};
+  const [status,setStatus]=useState(null);const hasBT='bluetooth' in navigator;const hasUSB='usb' in navigator;
+  const conectarBT=async()=>{setStatus({kind:'info',text:'Buscando BT...'});const r=await connectBluetooth();
+    if(r.success){onActualizar({tipo:'bluetooth',nombre:r.name,conectada:true});setStatus({kind:'ok',text:r.name});}
+    else setStatus({kind:'err',text:r.error});};
+  const conectarUSB=async()=>{setStatus({kind:'info',text:'Buscando USB...'});const r=await connectUSB();
+    if(r.success){onActualizar({tipo:'usb',nombre:r.name,conectada:true});setStatus({kind:'ok',text:r.name});}
+    else setStatus({kind:'err',text:r.error});};
   const testPrint=async()=>{
     const p={numero:0,fecha:localISODate(),hora:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),
       tipoEntrega:'recoger',cliente:'PRUEBA',direccion:'',notas:'Ticket de prueba',totalProductos:100,costoEnvio:0,total:100,
       items:[{productoId:'test',nombre:'Producto prueba',cantidad:1,precio:100,subtotal:100,emoji:'🧪'}]};
-    const r=await printTicket(p);setStatus(r.success?`✅ Impreso (${r.method})`:'❌ Error');};
+    const r=await printTicket(p);setStatus(r.success?{kind:'ok',text:`Impreso (${r.method})`}:{kind:'err',text:'Error'});};
   return(<div className="space-y-5">
     <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
-      <h3 className="font-black text-gray-800 mb-4 text-sm">🖨️ Impresora de tickets</h3>
+      <h3 className="font-black text-gray-800 mb-4 text-sm"><Icon name="printer" size={15} className="mr-1"/>Impresora de tickets</h3>
       <div className="space-y-4">
         <div className={`rounded-2xl p-4 border-2 ${impresora.conectada?'border-green-300 bg-green-50':impresora.reconectando?'border-yellow-300 bg-yellow-50':'border-gray-200 bg-gray-50'}`}>
-          <div className="flex items-center gap-3"><span className="text-3xl">{impresora.conectada?'🟢':impresora.reconectando?'🟡':'⚪'}</span>
+          <div className="flex items-center gap-3">
+            <span className={`w-4 h-4 rounded-full shrink-0 ${impresora.conectada?'bg-green-500':impresora.reconectando?'bg-yellow-400 pulse-dot':'bg-gray-300'}`} role="img" aria-label={impresora.conectada?'Conectada':impresora.reconectando?'Reconectando':'Sin conexion'}/>
             <div><p className="font-bold text-sm">{impresora.conectada?impresora.nombre:impresora.reconectando?'Reconectando...':'Sin impresora'}</p>
               <p className="text-xs text-gray-500">{impresora.conectada?`${impresora.tipo} · Se mantiene activa`:impresora.reconectando?'Intentando recuperar la impresora':'Conecta una para imprimir tickets'}</p></div></div></div>
-        {hasUSB&&<Btn full onClick={conectarUSB}>🔌 Conectar USB</Btn>}
-        {hasBT&&<Btn full color="gray" onClick={conectarBT}>📡 Conectar Bluetooth</Btn>}
+        {hasUSB&&<Btn full onClick={conectarUSB}><Icon name="zap" size={15} className="mr-1.5"/>Conectar USB</Btn>}
+        {hasBT&&<Btn full color="gray" onClick={conectarBT}><Icon name="bluetooth" size={15} className="mr-1.5"/>Conectar Bluetooth</Btn>}
         {!hasBT&&!hasUSB&&<div className="bg-yellow-50 rounded-xl p-3 text-sm text-yellow-700">
-          <p className="font-bold">⚠️ Sin conexion directa</p>
+          <p className="font-bold"><Icon name="alert" size={14} className="mr-1"/>Sin conexion directa</p>
           <p className="text-xs mt-1">Los tickets se imprimiran como vista previa.</p></div>}
-        <Btn full color="gray" onClick={testPrint}>🧪 Ticket de prueba</Btn>
+        <Btn full color="gray" onClick={testPrint}><Icon name="printer" size={15} className="mr-1.5"/>Ticket de prueba</Btn>
         <div className="flex items-center justify-between">
           <div><p className="text-sm font-bold">Auto-imprimir</p><p className="text-xs text-gray-400">Al crear pedido</p></div>
-          <button onClick={()=>onActualizar({autoImprimir:!impresora.autoImprimir})}
-            className={`w-12 h-6 rounded-full ${impresora.autoImprimir?'bg-green-500':'bg-gray-300'} relative`}>
-            <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow ${impresora.autoImprimir?'right-0.5':'left-0.5'}`}/></button></div>
-        {status&&<p className="text-center text-sm font-bold">{status}</p>}
+          <button onClick={()=>onActualizar({autoImprimir:!impresora.autoImprimir})} role="switch" aria-checked={impresora.autoImprimir} aria-label="Auto-imprimir al crear pedido"
+            className={`w-12 h-6 rounded-full transition-colors duration-150 ${impresora.autoImprimir?'bg-green-500':'bg-gray-300'} relative`}>
+            <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all duration-150 ${impresora.autoImprimir?'right-0.5':'left-0.5'}`}/></button></div>
+        {status&&<p role="status" className={`text-center text-sm font-bold ${status.kind==='ok'?'text-green-700':status.kind==='err'?'text-red-600':'text-gray-600'}`}><Icon name={status.kind==='ok'?'check':status.kind==='err'?'alert':'info'} size={14} className="mr-1"/>{status.text}</p>}
       </div></div>
   </div>);
 }
@@ -4085,7 +4300,7 @@ function EditProductoForm({producto,onSave}){
     <Input label="Precio de venta" type="number" prefix="$" value={precio} onChange={v=>setPrecio(Number(v))}/>
     <Input label="Costo estimado" type="number" prefix="$" value={costo} onChange={v=>setCosto(Number(v))}/>
     <div className={`rounded-xl p-3 text-center font-bold ${margen>=40?'bg-green-50 text-green-700':margen>=20?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
-      Margen: {margen}% {margen>=40?'✅':margen>=20?'⚠️':'🚨'}</div>
+      Margen: {margen}% <Icon name={margen>=40?'check':'alert'} size={14} className="ml-1"/></div>
     <Btn full onClick={()=>onSave({precio,costo})}>Guardar</Btn></div>);
 }
 function ProductoForm({onSave}){
@@ -4178,41 +4393,41 @@ function App(){
   },[]);
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
-      onAbrir={(f,d)=>{abrirJornada(f,d);showToast('🟢 Jornada abierta');}}
-      onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('🔴 Jornada cerrada','red');}}
-      onRegistrarAjuste={(a)=>{registrarAjusteCaja(a);showToast(a.tipo==='entrada'?'➕ Entrada de caja':'➖ Salida de caja','orange');}}
+      onAbrir={(f,d)=>{abrirJornada(f,d);showToast('Jornada abierta');}}
+      onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('Jornada cerrada','red');}}
+      onRegistrarAjuste={(a)=>{registrarAjusteCaja(a);showToast(a.tipo==='entrada'?'Entrada de caja registrada':'Salida de caja registrada','orange');}}
       onEliminarAjuste={eliminarAjusteCaja}
       onPagarRepartidor={registrarPagoRepartidor}
-      onPagarTodosRepartidores={()=>{pagarRepartidoresPendientes();showToast('🛵 Repartidores pagados desde caja','orange');}}/>}
+      onPagarTodosRepartidores={()=>{pagarRepartidoresPendientes();showToast('Repartidores pagados desde caja','orange');}}/>}
     {page==='pedidos'&&<PedidosPage state={state}
-      onCrearPedido={(i,t,c,dir,n)=>{const p=crearPedido(i,t,c,dir,n);showToast(`📋 Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
+      onCrearPedido={(i,t,c,dir,n)=>{const p=crearPedido(i,t,c,dir,n);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
       onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
-        if(c.cobrado)showToast('💰 Cobrado','green');
-        else if(c.estado==='entregado')showToast('✅ Entregado','green');
-        else if(c.estado==='cancelado')showToast('🔴 Cancelado','red');
-        else if(c.items||c.tipoEntrega||c.metodoPago)showToast('✏️ Pedido editado','orange');}}/>}
+        if(c.cobrado)showToast('Cobrado','green');
+        else if(c.estado==='entregado')showToast('Entregado','green');
+        else if(c.estado==='cancelado')showToast('Pedido cancelado','red');
+        else if(c.items||c.tipoEntrega||c.metodoPago)showToast('Pedido editado','orange');}}/>}
     {page==='gastos'&&<GastosPage state={state}
-      onRegistrar={(c,d,m,e)=>{registrarGasto(c,d,m,e);showToast('💸 Gasto registrado','orange');}}
+      onRegistrar={(c,d,m,e)=>{registrarGasto(c,d,m,e);showToast('Gasto registrado','orange');}}
       onEliminar={eliminarGasto}
-      onActualizar={(id,c)=>{actualizarGasto(id,c);showToast('✏️ Gasto actualizado','orange');}}/>}
+      onActualizar={(id,c)=>{actualizarGasto(id,c);showToast('Gasto actualizado','orange');}}/>}
     {page==='reportes'&&<ReportesPage state={state}/>}
-    {page==='admin'&&<AdminPage state={state} onAgregarProducto={d=>{agregarProducto(d);showToast('✅ Producto agregado');}} onActualizarProducto={actualizarProducto}
-      onActualizarGastoFijo={actualizarGastoFijo} onAgregarGastoFijo={n=>{agregarGastoFijo(n);showToast('✅ Gasto fijo agregado');}}
-      onEliminarGastoFijo={id=>{eliminarGastoFijo(id);showToast('🗑️ Gasto fijo eliminado','red');}}
+    {page==='admin'&&<AdminPage state={state} onAgregarProducto={d=>{agregarProducto(d);showToast('Producto agregado');}} onActualizarProducto={actualizarProducto}
+      onActualizarGastoFijo={actualizarGastoFijo} onAgregarGastoFijo={n=>{agregarGastoFijo(n);showToast('Gasto fijo agregado');}}
+      onEliminarGastoFijo={id=>{eliminarGastoFijo(id);showToast('Gasto fijo eliminado','red');}}
       onActualizarImpresora={actualizarImpresora}
-      onImportarProductos={p=>{importarProductos(p);showToast('✅ Productos actualizados');}}
-      onImportarCostos={c=>{importarCostos(c);showToast('✅ Costos actualizados');}}
-      onAgregarEmpleado={(n,r,s)=>{agregarEmpleado(n,r,s);showToast('✅ Empleado agregado');}}
-      onEditarEmpleado={(id,d)=>{editarEmpleado(id,d);showToast('✅ Empleado actualizado');}}
-      onEliminarEmpleado={id=>{eliminarEmpleado(id);showToast('🗑️ Empleado eliminado','red');}}
+      onImportarProductos={p=>{importarProductos(p);showToast('Productos actualizados');}}
+      onImportarCostos={c=>{importarCostos(c);showToast('Costos actualizados');}}
+      onAgregarEmpleado={(n,r,s)=>{agregarEmpleado(n,r,s);showToast('Empleado agregado');}}
+      onEditarEmpleado={(id,d)=>{editarEmpleado(id,d);showToast('Empleado actualizado');}}
+      onEliminarEmpleado={id=>{eliminarEmpleado(id);showToast('Empleado eliminado','red');}}
       syncStatus={syncStatus} lastCloudAt={lastCloudAt} deviceInfo={deviceInfo}
-      onSyncNow={async()=>{const r=await syncNow();showToast(r.ok?'☁️ Cambios enviados':'❌ Sync falló',r.ok?'green':'red');return r;}}
-      onPullFromCloud={pullFromCloud} onSetDeviceRole={role=>{setDeviceRole(role);showToast(role==='primary'?'🖥️ Modo principal':'📱 Modo espejo','orange');}}
+      onSyncNow={async()=>{const r=await syncNow();showToast(r.ok?'Cambios enviados':'Sync fallo',r.ok?'green':'red');return r;}}
+      onPullFromCloud={pullFromCloud} onSetDeviceRole={role=>{setDeviceRole(role);showToast(role==='primary'?'Modo principal':'Modo espejo','orange');}}
       onListBackups={listBackups} onRestoreBackup={restoreBackup}
       onAuditHistoricalData={auditHistoricalData} onRepairHistoricalData={repairHistoricalData}/>}
     <BottomNav page={page} setPage={setPage} hasJornada={hasJornada} pedidosNuevos={pedidosNuevos}/>
-    {saveError&&(<div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-red-600 text-white font-bold text-xs shadow-xl max-w-[90%] text-center">
-      ⚠️ {saveError}</div>)}
+    {saveError&&(<div role="alert" className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-red-600 text-white font-bold text-xs shadow-xl max-w-[90%] text-center">
+      <Icon name="alert" size={13} className="mr-1"/>{saveError}</div>)}
     {toast&&(<div className={`fixed top-20 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl text-white font-bold text-sm shadow-xl slide-up
       ${toast.color==='green'?'bg-green-500':toast.color==='red'?'bg-red-500':toast.color==='orange'?'bg-orange-500':'bg-gray-700'}`}>{toast.msg}</div>)}
     {remoteNotice&&!cloudRecovery&&(<div className="fixed top-32 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-2xl bg-blue-500 text-white font-bold text-sm shadow-xl slide-up">
