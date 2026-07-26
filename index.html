@@ -2729,10 +2729,15 @@ function DeliverySelector({tipo,setTipo}){
 function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEliminarAjuste,onPagarRepartidor,onPagarTodosRepartidores}){
   const [showAbrir,setShowAbrir]=useState(false);const [showCerrar,setShowCerrar]=useState(false);
   const ja=state.jornadaActiva;
-  const totalV=ja?calcVentasTotal(ja.ventas):0;const totalG=ja?calcGastosTotal(ja.gastos):0;const util=totalV-totalG;
-  const margen=totalV>0?((util/totalV)*100).toFixed(1):0;
-  const pedidosActivos=ja?(ja.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
-  const totalManda=ja?calcMandaditosCobrados(ja.mandaditos||[]):0;
+  // TODAS las cifras del dashboard salen de buildCajaModel (misma fuente que
+  // el modal y el ticket de cierre). No usar calcVentasTotal/ledger aqui.
+  const m=ja?buildCajaModel(ja):null;
+  const pedidosActivos=m?m.rows.filter(r=>r.estado==='nuevo').length:0;
+  const porMetodo=met=>{
+    const rs=(m?m.rows:[]).filter(r=>r.cuentaCaja&&r.metodo===met);
+    return {n:rs.length,monto:_roundMoney(rs.reduce((s,r)=>s+r.total,0))};
+  };
+  const metEf=porMetodo('efectivo'),metMx=porMetodo('mixto'),metTr=porMetodo('transferencia');
   const ultimasJ=state.jornadas.filter(j=>j.estado==='cerrada').slice(-5).reverse();
   return(<div className="safe-bottom">
     <TopBar title="K'apul'Its" syncStatus={syncStatus} subtitle={ja?`Jornada activa · ${ja.horaApertura}`:NEGOCIO.slogan}
@@ -2759,24 +2764,36 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
                 <p className="mt-2 text-[13px] text-[rgba(255,244,224,.82)]">{fmtDate(ja.fecha)}</p>
               </div>
               <div className="rounded-[18px] border border-[rgba(255,237,202,.18)] bg-[rgba(255,245,229,.12)] px-3 py-2 text-right">
-                <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.7)]">Margen</p>
-                <p className="text-[22px] font-black">{margen}%</p>
+                <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.7)]">Pedidos cobrados</p>
+                <p className="text-[22px] font-black">{m.countCobrados}</p>
               </div>
             </div>
-            <div className="grid grid-cols-3 md:grid-cols-5 gap-3 mt-5">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-5">
               <div className="rounded-[22px] bg-[rgba(255,248,236,.12)] border border-[rgba(255,240,215,.14)] p-3 text-center">
-                <p className="text-[24px] font-black">{fmt(totalV)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Ventas</p></div>
+                <p className="text-[24px] font-black">{fmt(m.cobrosTotal)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Venta total</p></div>
               <div className="rounded-[22px] bg-[rgba(255,248,236,.12)] border border-[rgba(255,240,215,.14)] p-3 text-center">
-                <p className="text-[24px] font-black">{fmt(totalG)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Gastos</p></div>
-              <div className={`rounded-[22px] border p-3 text-center ${util>=0?'bg-[rgba(95,194,131,.16)] border-[rgba(170,236,189,.18)]':'bg-[rgba(202,77,44,.18)] border-[rgba(246,189,171,.18)]'}`}>
-                <p className="text-[24px] font-black">{fmt(util)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Utilidad</p></div>
+                <p className="text-[24px] font-black">{fmt(m.gastosTotal)}</p><p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.72)]">Gastos</p></div>
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.68)]">Pedidos activos</p>
                 <p className="mt-1 text-[22px] font-black">{pedidosActivos}</p>
               </div>
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
-                <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.68)]">Mandaditos</p>
-                <p className="mt-1 text-[22px] font-black">{fmt(totalManda)}</p>
+                <p className="text-[10px] uppercase tracking-[0.14em] text-[rgba(255,244,224,.68)]">Pendientes por cobrar</p>
+                <p className="mt-1 text-[22px] font-black">{m.countPendientes}</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-3 mt-3">
+              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
+                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]">💵 Efectivo</p>
+                <p className="mt-1 text-[18px] font-black">{metEf.n} · {fmt(metEf.monto)}</p>
+              </div>
+              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
+                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]">💵📱 Mixtos</p>
+                <p className="mt-1 text-[18px] font-black">{metMx.n} · {fmt(metMx.monto)}</p>
+              </div>
+              <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
+                <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]">📱 Transferencia</p>
+                <p className="mt-1 text-[18px] font-black">{metTr.n} · {fmt(metTr.monto)}</p>
               </div>
             </div>
           </div>
@@ -2806,13 +2823,13 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
             <p className="section-kicker">Historial</p>
             <h3 className="section-title">Jornadas anteriores</h3>
           </div>
-          {ultimasJ.map(j=>{const u=calcVentasTotal(j.ventas)-calcGastosTotal(j.gastos);
+          {ultimasJ.map(j=>{const mj=buildCajaModel(j);
             return(<div key={j.id} className="flex items-center justify-between py-3 border-b divider-warm last:border-0">
               <div className="min-w-0 flex-1"><p className="text-[13px] font-black text-[var(--text)] truncate">{fmtDate(j.fecha)}</p>
-                <p className="text-[12px] text-[var(--text-muted)]">{j.ventas.length} ventas · {(j.pedidos||[]).length} pedidos</p></div>
+                <p className="text-[12px] text-[var(--text-muted)]">{mj.countCobrados} cobrados · {(j.pedidos||[]).length} pedidos</p></div>
               <div className="flex items-center gap-2 shrink-0 ml-3">
-                <div className="text-right"><p className="font-black text-[15px] text-[var(--text)]">{fmt(calcVentasTotal(j.ventas))}</p>
-                  <span className={`text-[12px] font-bold ${u>=0?'text-[var(--success)]':'text-[var(--danger)]'}`}>{u>=0?'+':''}{fmt(u)}</span></div>
+                <div className="text-right"><p className="font-black text-[15px] text-[var(--text)]">{fmt(mj.cobrosTotal)}</p>
+                  <span className="text-[12px] font-bold text-[var(--text-muted)]">−{fmt(mj.gastosTotal)} gastos</span></div>
                 {j.estado==='cerrada'&&<React.Fragment>
                   <button onClick={()=>printTicketsJornada(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Reimprimir todos los tickets" aria-label="Reimprimir todos los tickets del dia">🧾</button>
                   <button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] text-lg" title="Imprimir cierre" aria-label="Imprimir cierre de caja">🖨️</button>
