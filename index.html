@@ -3493,22 +3493,46 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWh
 // al escribir el numero busca clientes frecuentes y autocompleta nombre y
 // direcciones guardadas. La direccion solo se pide cuando la recoge un
 // repartidor/servicio (recoger o envio), no en mesa.
-function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,direccion,setDireccion,etiqueta,setEtiqueta}){
+function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,direccion,setDireccion,etiqueta,setEtiqueta,sinTel,setSinTel}){
   const tel=normTel(telefono);
   const lista=Array.isArray(clientes)?clientes:[];
-  const match=tel.length>=3?lista.find(c=>normTel(c.telefono)===tel):null;
-  const sugerencias=(tel.length>=3&&!match)?lista.filter(c=>normTel(c.telefono).includes(tel)).slice(0,5):[];
+  const match=(!sinTel&&tel.length>=3)?lista.find(c=>normTel(c.telefono)===tel):null;
+  const sugerencias=(!sinTel&&tel.length>=3&&!match)?lista.filter(c=>normTel(c.telefono).includes(tel)).slice(0,5):[];
+  // Busqueda por NOMBRE (algunos clientes no dan telefono). Muestra coincidencias
+  // mientras escribes el nombre; se ocultan cuando el cliente ya quedó seleccionado.
+  const nomQ=normVariadoNombre(cliente);
+  const sugerenciasNombre=(nomQ.length>=2&&!match)
+    ? lista.filter(c=>c.nombre&&normVariadoNombre(c.nombre).includes(nomQ)
+        &&!(normVariadoNombre(c.nombre)===nomQ&&normTel(c.telefono)===tel)).slice(0,6)
+    : [];
   const pedirDir=necesitaDireccion(tipo);
-  const usarCliente=c=>{setTelefono(c.telefono||'');setCliente(c.nombre||'');const d=(c.direcciones||[])[0];if(d&&pedirDir){setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}};
+  const usarCliente=c=>{setTelefono(c.telefono||'');if(c.telefono&&setSinTel)setSinTel(false);setCliente(c.nombre||'');const d=(c.direcciones||[])[0];if(d&&pedirDir){setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}};
+  const toggleSinTel=()=>{const n=!sinTel;setSinTel&&setSinTel(n);if(n)setTelefono('');};
   return(<div className="space-y-3">
-    <Input label="Teléfono (obligatorio)" value={telefono} onChange={setTelefono} type="tel" placeholder="10 dígitos"/>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-2">
+        <label className="t-kicker">Teléfono {sinTel?'· sin número':'· obligatorio'}</label>
+        <button type="button" onClick={toggleSinTel} aria-pressed={!!sinTel}
+          className={`text-[10px] font-black px-2.5 py-1 rounded-full border transition-colors ${sinTel?'border-orange-500 bg-orange-50 text-orange-700':'border-[#ecd6bd] text-[var(--text-soft)]'}`}>
+          {sinTel?'✓ Sin teléfono':'Sin teléfono'}</button>
+      </div>
+      <div className={`flex items-center border rounded-[18px] overflow-hidden transition-colors ${sinTel?'opacity-55 bg-[rgba(121,87,67,.05)] border-[rgba(221,192,161,.5)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.7)] focus-within:border-[var(--brand)] focus-within:shadow-[0_0_0_3px_rgba(215,101,22,.10)]'}`}>
+        <input type="tel" value={sinTel?'':telefono} onChange={e=>setTelefono(e.target.value)} disabled={!!sinTel}
+          placeholder={sinTel?'Cliente sin teléfono':'10 dígitos'}
+          className="flex-1 px-4 py-3.5 text-[15px] outline-none bg-transparent text-[var(--text)] placeholder:text-[var(--text-muted)]"/></div>
+    </div>
     {sugerencias.length>0&&<div className="rounded-[16px] border border-[rgba(221,192,161,.7)] bg-[rgba(255,250,244,.95)] overflow-hidden divide-y divide-[rgba(221,192,161,.4)]">
       {sugerencias.map(c=>(<button key={c.id} type="button" onClick={()=>usarCliente(c)} className="w-full text-left px-4 py-2.5 hover:bg-[rgba(242,191,90,.12)]">
         <span className="text-sm font-bold text-[var(--text)]">{c.nombre||'Sin nombre'}</span>
         <span className="text-xs text-[var(--text-muted)] ml-2">{c.telefono}</span></button>))}
     </div>}
     {match&&<div className="rounded-[14px] bg-[rgba(45,139,87,.10)] border border-[rgba(45,139,87,.24)] px-3 py-2 text-xs font-bold text-[#2c7a54]"><Icon name="check" size={12} className="mr-1"/>Cliente frecuente: {match.nombre||'Sin nombre'}</div>}
-    <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
+    <Input label="Nombre del cliente (puedes buscar aquí)" value={cliente} onChange={setCliente} placeholder="Nombre"/>
+    {sugerenciasNombre.length>0&&<div className="rounded-[16px] border border-[rgba(221,192,161,.7)] bg-[rgba(255,250,244,.95)] overflow-hidden divide-y divide-[rgba(221,192,161,.4)]">
+      {sugerenciasNombre.map(c=>(<button key={c.id} type="button" onClick={()=>usarCliente(c)} className="w-full flex items-center justify-between gap-2 px-4 py-2.5 hover:bg-[rgba(242,191,90,.12)]">
+        <span className="text-sm font-bold text-[var(--text)] text-left"><Icon name="users" size={12} className="mr-1.5"/>{c.nombre||'Sin nombre'}</span>
+        <span className="text-xs text-[var(--text-muted)] shrink-0">{c.telefono}</span></button>))}
+    </div>}
     {pedirDir&&(<React.Fragment>
       {match&&(match.direcciones||[]).length>0&&<div className="space-y-1.5">
         <p className="text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-[0.14em]">Direcciones guardadas</p>
@@ -3528,7 +3552,8 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
   const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
   const [cliente,setCliente]=useState('');const [telefono,setTelefono]=useState('');const [direccion,setDireccion]=useState('');
   const [etiqueta,setEtiqueta]=useState('Casa');const [notas,setNotas]=useState('');
-  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');}},[open]);
+  const [sinTel,setSinTel]=useState(false);
+  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);}},[open]);
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
@@ -3537,22 +3562,24 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
   // Validacion en la frontera: telefono y nombre SIEMPRE; direccion cuando la
   // recoge un repartidor/servicio (recoger o envio), no en mesa.
   const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
-  const puedeCrear=items.length>0&&normTel(telefono).length>=7&&cliente.trim().length>0&&!faltaDir;
+  // El telefono deja de ser obligatorio si el cliente no lo dio (sinTel).
+  const telOk=sinTel||normTel(telefono).length>=7;
+  const puedeCrear=items.length>0&&telOk&&cliente.trim().length>0&&!faltaDir;
   const crear=()=>{
     if(!puedeCrear)return;
     const its=items.map(i=>buildItem(i));
-    onCrear(its,tipo,cliente.trim(),direccion.trim(),notas,telefono.trim(),etiqueta);
+    onCrear(its,tipo,cliente.trim(),direccion.trim(),notas,sinTel?'':telefono.trim(),etiqueta);
     setCart({});setCliente('');setTelefono('');setDireccion('');setNotas('');};
   return(<Modal open={open} onClose={onClose} title="NUEVO PEDIDO" fullScreen>
     <div className="space-y-4 menu-upper">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
-        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta}/>
+        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
       <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{normTel(telefono).length<7?'Captura el teléfono del cliente':!cliente.trim()?'Captura el nombre del cliente':faltaDir?'Captura la dirección':''}</p>}
+        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'Captura el teléfono del cliente (o marca Sin teléfono)':!cliente.trim()?'Captura el nombre del cliente':faltaDir?'Captura la dirección':''}</p>}
         <Btn full color="green" size="lg" disabled={!puedeCrear} onClick={crear}><Icon name="check" size={17} className="mr-1.5"/>Crear pedido · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
@@ -3573,8 +3600,10 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const [metodoPago,setMetodoPago]=useState(pedido.metodoPago||'efectivo');
   const [pagoEfectivo,setPagoEfectivo]=useState('');
   const [pagoTransferencia,setPagoTransferencia]=useState('');
+  const [sinTel,setSinTel]=useState(!(pedido.telefono&&normTel(pedido.telefono).length>=7));
   useEffect(()=>{
     if(!open)return;
+    setSinTel(!(pedido.telefono&&normTel(pedido.telefono).length>=7));
     const c={};
     pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
     setCart(c);
@@ -3595,12 +3624,13 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
-  const datosOk=normTel(telefono).length>=7&&cliente.trim().length>0&&!faltaDir;
+  const telOk=sinTel||normTel(telefono).length>=7;
+  const datosOk=telOk&&cliente.trim().length>0&&!faltaDir;
   const guardar=()=>{
     if(!items.length||!datosOk)return;
     const its=items.map(i=>buildItem(i));
     const pagoSimple=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
-    onGuardar({items:its,tipoEntrega:tipo,cliente:cliente.trim(),telefono:telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
+    onGuardar({items:its,tipoEntrega:tipo,cliente:cliente.trim(),telefono:sinTel?'':telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
   const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
   const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||(pagoEditado.efectivo>=0&&pagoEditado.transferencia>=0&&sumPagos(pagoEditado)===_roundMoney(totalFinal));
@@ -3608,7 +3638,7 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
-        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta}/>
+        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
       {pedido.cobrado&&<div className="surface-card space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -3642,7 +3672,7 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{normTel(telefono).length<7?'Captura el teléfono del cliente':!cliente.trim()?'Captura el nombre del cliente':'Captura la dirección'}</p>}
+        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'Captura el teléfono del cliente (o marca Sin teléfono)':!cliente.trim()?'Captura el nombre del cliente':'Captura la dirección'}</p>}
         <Btn full color="orange" size="lg" disabled={!pagoOk||!datosOk} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cambios · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
