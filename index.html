@@ -251,7 +251,48 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
+
+// ─── SONIDOS ────────────────────────────────────────────────────────
+// Sintetizados con Web Audio API: sin archivos, funcionan offline y pesan 0kb.
+// pop = click de boton · coin = cobro · print = ticket. Se pueden silenciar
+// con localStorage kapulits_mute='1'. ponytail: WebAudio cubre el rung nativo;
+// si el usuario quiere sus propios .mp3, cambiar cada metodo por new Audio(...).
+const snd=(()=>{
+  let ctx=null,last=0;
+  const muted=()=>{try{return localStorage.getItem('kapulits_mute')==='1';}catch(e){return false;}};
+  const ac=()=>{ if(muted())return null; try{ if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)(); if(ctx.state==='suspended')ctx.resume(); return ctx; }catch(e){return null;} };
+  // Un tono con envolvente para no producir clicks/pops de corte.
+  const tone=(c,freq,start,dur,type='sine',peak=0.22)=>{
+    const o=c.createOscillator(),g=c.createGain();
+    o.type=type;o.frequency.setValueAtTime(freq,start);
+    g.gain.setValueAtTime(0,start);
+    g.gain.linearRampToValueAtTime(peak,start+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001,start+dur);
+    o.connect(g).connect(c.destination);o.start(start);o.stop(start+dur+0.02);
+  };
+  return{
+    // Click corto tipo "pop". Throttle 60ms para no saturar en taps rapidos.
+    pop(){const c=ac();if(!c)return;const now=performance.now();if(now-last<60)return;last=now;
+      const t=c.currentTime;const o=c.createOscillator(),g=c.createGain();
+      o.type='triangle';o.frequency.setValueAtTime(420,t);o.frequency.exponentialRampToValueAtTime(180,t+0.07);
+      g.gain.setValueAtTime(0.0001,t);g.gain.linearRampToValueAtTime(0.18,t+0.006);g.gain.exponentialRampToValueAtTime(0.0001,t+0.09);
+      o.connect(g).connect(c.destination);o.start(t);o.stop(t+0.1);},
+    // Moneda: dos tonos ascendentes (estilo caja registradora / arcade).
+    coin(){const c=ac();if(!c)return;const t=c.currentTime;tone(c,988,t,0.09,'square',0.2);tone(c,1319,t+0.08,0.32,'square',0.22);},
+    // Impresion: zumbido de motor de impresora termica (~0.5s con tremolo).
+    print(){const c=ac();if(!c)return;const t=c.currentTime;
+      const o=c.createOscillator(),g=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
+      o.type='sawtooth';o.frequency.setValueAtTime(140,t);
+      lfo.type='square';lfo.frequency.setValueAtTime(38,t);lg.gain.setValueAtTime(90,t);
+      lfo.connect(lg).connect(o.frequency);
+      g.gain.setValueAtTime(0.0001,t);g.gain.linearRampToValueAtTime(0.14,t+0.02);
+      g.gain.setValueAtTime(0.14,t+0.42);g.gain.exponentialRampToValueAtTime(0.0001,t+0.55);
+      o.connect(g).connect(c.destination);
+      o.start(t);lfo.start(t);o.stop(t+0.56);lfo.stop(t+0.56);
+      tone(c,1600,t+0.5,0.08,'square',0.1);/* ping fin de impresion */},
+  };
+})();
 const NEGOCIO = {
   nombre: "K'apul'Its",
   slogan: 'Birria y algo mas',
@@ -1232,6 +1273,10 @@ function useStore(){
     ja.diferencia=contado-esperado;
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:null});
+    // Respaldo historico al PC: descarga la jornada en Excel dentro del gesto de
+    // cierre. Si falla (bloqueo del navegador) no rompe el cierre; queda el boton
+    // manual en el historial.
+    try{exportJornadaXLSX(ja);}catch(e){}
   },[state,save]);
 
   const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir)=>{
@@ -1473,12 +1518,15 @@ function useStore(){
     else{save({...state,clientes:[...cli,{id:uid(),telefono:'',nombre:'',direcciones:[],...datos,_ts:ts}]});}
   },[state,save]);
   const eliminarCliente=useCallback((cid)=>{save({...state,clientes:(state.clientes||[]).filter(c=>c.id!==cid)});},[state,save]);
+  // Borrado en lote (depuracion): una sola escritura para no perder estado por
+  // cierres obsoletos si se llamara eliminarCliente en bucle.
+  const eliminarClientes=useCallback((ids)=>{const set=new Set(ids||[]);if(!set.size)return;save({...state,clientes:(state.clientes||[]).filter(c=>!set.has(c.id))});},[state,save]);
 
   return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
-    guardarCliente,eliminarCliente,
+    guardarCliente,eliminarCliente,eliminarClientes,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
 }
 
@@ -2248,6 +2296,7 @@ async function _sendToBT(text){
 }
 
 async function printTicket(pedido){
+  snd.print();
   const ticket=_buildBTText(pedido);
   // Intentar Bluetooth
   if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
@@ -2449,6 +2498,46 @@ function buildCajaModel(jornada){
     // auditoria
     warnings,
   };
+}
+
+// Exporta UNA jornada a Excel (.xlsx) a la computadora: hojas Resumen, Pedidos,
+// Ventas y Gastos. Se dispara solo al cerrar la jornada (dentro del gesto del
+// boton, para que el navegador permita la descarga) y tambien manualmente desde
+// el historial. Los archivos se acumulan por fecha = base de datos historica en
+// el PC para analizar sin depender del dispositivo ni la nube.
+function exportJornadaXLSX(ja){
+  if(!ja||!window.XLSX)return false;
+  try{
+    const m=buildCajaModel(ja);const money=n=>Number(n)||0;
+    const resumen=[
+      ['Fecha',ja.fecha],['Apertura',ja.horaApertura||''],['Cierre',ja.horaCierre||''],
+      ['Fondo inicial',money(m.fondoInicial)],['Productos (total)',money(m.productosTotal)],
+      ['Envios (total)',money(m.enviosTotal)],['Cobrado efectivo',money(m.cobrosEfectivo)],
+      ['Cobrado transferencia',money(m.cobrosTransferencia)],['Cobrado total',money(m.cobrosTotal)],
+      ['Gastos total',money(m.gastosTotal)],['Caja esperada',money(m.cajaEsperada)],
+      ['Efectivo contado',money(m.efectivoContado)],['Diferencia',money(m.diferencia)],
+      ['Pedidos cobrados',m.countCobrados],['Pedidos pendientes',m.countPendientes],
+      ['Pedidos cancelados',m.countCancelados],['Utilidad bruta productos',money(m.utilidadBrutaProductos)],
+    ].map(([campo,valor])=>({campo,valor}));
+    const pedidos=(ja.pedidos||[]).map(p=>({
+      numero:p.numero,hora:p.hora||'',cliente:p.cliente||'',telefono:p.telefono||'',
+      tipo:(TARIFAS_ENVIO[p.tipoEntrega]||{}).label||p.tipoEntrega||'',
+      productos:money(p.totalProductos),envio:money(p.costoEnvio),total:money(p.total),
+      metodo:p.metodoPago||'',cobrado:p.cobrado?'si':'no',estado:p.estado||'',notas:p.notas||''}));
+    const ventas=(ja.ventas||[]).map(v=>({
+      hora:v.hora||'',total:money(v.total),envio:money(v.costoEnvio),totalCobrado:money(v.totalCobrado),
+      metodo:v.metodoPago||'',anulada:v.anulada?'si':'no',pedidoId:v.pedidoId||''}));
+    const gastos=(ja.gastos||[]).map(g=>({
+      hora:g.hora||'',descripcion:g.descripcion||g.concepto||'',monto:money(g.monto),
+      enEfectivo:g.enEfectivo!==false?'si':'no'}));
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(resumen),'Resumen');
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(pedidos.length?pedidos:[{numero:''}]),'Pedidos');
+    XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(ventas.length?ventas:[{hora:''}]),'Ventas');
+    if(gastos.length)XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(gastos),'Gastos');
+    XLSX.writeFile(wb,`kapulits_jornada_${ja.fecha}.xlsx`);
+    return true;
+  }catch(e){console.error('exportJornadaXLSX',e);return false;}
 }
 
 // Auditoria de integridad del cierre. NO modifica datos: solo reporta
@@ -2776,7 +2865,8 @@ function Btn(props){
     green_o:'border border-[rgba(45,139,87,.24)] text-[var(--success)] bg-[rgba(45,139,87,.08)]'
   };
   const cls=variant==='outline'?(vars[color+'_o']||vars.orange_o):(vars[color]||vars.orange).solid;
-  return<button className={`${base} ${cls}`} onClick={onClick} disabled={disabled} {...rest}>{children}</button>;
+  const handle=onClick?(e=>{snd.pop();onClick(e);}):undefined;
+  return<button className={`${base} ${cls}`} onClick={handle} disabled={disabled} {...rest}>{children}</button>;
 }
 function Modal({open,onClose,title,children,fullScreen=false}){
   useEffect(()=>{
@@ -3336,6 +3426,7 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
                 {j.estado==='cerrada'&&<React.Fragment>
                   <button onClick={()=>printTicketsJornada(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] w-10 h-10 flex items-center justify-center rounded-full transition-colors duration-150" title="Reimprimir todos los tickets" aria-label="Reimprimir todos los tickets del dia"><Icon name="receipt" size={18}/></button>
                   <button onClick={()=>printCierreCaja(j)} className="text-[var(--text-muted)] hover:text-[var(--brand)] w-10 h-10 flex items-center justify-center rounded-full transition-colors duration-150" title="Imprimir cierre" aria-label="Imprimir cierre de caja"><Icon name="printer" size={18}/></button>
+                  <button onClick={()=>exportJornadaXLSX(j)} className="text-[var(--text-muted)] hover:text-[var(--success)] w-10 h-10 flex items-center justify-center rounded-full transition-colors duration-150" title="Descargar jornada en Excel" aria-label="Descargar jornada en Excel"><Icon name="download" size={18}/></button>
                 </React.Fragment>}
               </div>
             </div>);})}</div>)}
@@ -3409,7 +3500,7 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
           if(p&&state.impresora.autoImprimir)printTicket(p);
           setShowCrear(false);}}/>
       <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
-        onCobrar={pago=>{onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
+        onCobrar={pago=>{snd.coin();onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
       {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos} clientes={state.clientes}
         onClose={()=>setShowEditar(null)}
         onGuardar={cambios=>{onActualizarPedido(showEditar.id,cambios);setShowEditar(null);}}/>}
@@ -3509,17 +3600,16 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
   const usarCliente=c=>{setTelefono(c.telefono||'');if(c.telefono&&setSinTel)setSinTel(false);setCliente(c.nombre||'');const d=(c.direcciones||[])[0];if(d&&pedirDir){setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}};
   const toggleSinTel=()=>{const n=!sinTel;setSinTel&&setSinTel(n);if(n)setTelefono('');};
   return(<div className="space-y-3">
-    <div className="flex flex-col gap-1">
-      <div className="flex items-center justify-between gap-2">
-        <label className="t-kicker">Teléfono {sinTel?'· sin número':'· obligatorio'}</label>
-        <button type="button" onClick={toggleSinTel} aria-pressed={!!sinTel}
-          className={`text-[10px] font-black px-2.5 py-1 rounded-full border transition-colors ${sinTel?'border-orange-500 bg-orange-50 text-orange-700':'border-[#ecd6bd] text-[var(--text-soft)]'}`}>
-          {sinTel?'✓ Sin teléfono':'Sin teléfono'}</button>
-      </div>
+    <div className="flex flex-col gap-1.5">
+      <label className="t-kicker">Teléfono {sinTel?'· sin número':'· 10 dígitos'}</label>
       <div className={`flex items-center border rounded-[18px] overflow-hidden transition-colors ${sinTel?'opacity-55 bg-[rgba(121,87,67,.05)] border-[rgba(221,192,161,.5)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.7)] focus-within:border-[var(--brand)] focus-within:shadow-[0_0_0_3px_rgba(215,101,22,.10)]'}`}>
-        <input type="tel" value={sinTel?'':telefono} onChange={e=>setTelefono(e.target.value)} disabled={!!sinTel}
+        <input type="tel" inputMode="numeric" value={sinTel?'':telefono} onChange={e=>setTelefono(e.target.value)} disabled={!!sinTel}
           placeholder={sinTel?'Cliente sin teléfono':'10 dígitos'}
           className="flex-1 px-4 py-3.5 text-[15px] outline-none bg-transparent text-[var(--text)] placeholder:text-[var(--text-muted)]"/></div>
+      {/* Toggle prominente: el cliente puede no dar telefono (mesa, recoge, envio). */}
+      <button type="button" onClick={toggleSinTel} aria-pressed={!!sinTel}
+        className={`mt-1 w-full flex items-center justify-center gap-2 text-[13px] font-black px-3 py-2.5 min-h-[44px] rounded-[14px] border-2 transition-colors ${sinTel?'border-orange-500 bg-orange-50 text-orange-700':'border-dashed border-[#e2c4a4] text-[var(--text-soft)] bg-[rgba(255,250,244,.7)]'}`}>
+        <Icon name={sinTel?'check':'phone'} size={15}/>{sinTel?'Cliente SIN teléfono (activado)':'El cliente no tiene teléfono'}</button>
     </div>
     {sugerencias.length>0&&<div className="rounded-[16px] border border-[rgba(221,192,161,.7)] bg-[rgba(255,250,244,.95)] overflow-hidden divide-y divide-[rgba(221,192,161,.4)]">
       {sugerencias.map(c=>(<button key={c.id} type="button" onClick={()=>usarCliente(c)} className="w-full text-left px-4 py-2.5 hover:bg-[rgba(242,191,90,.12)]">
@@ -3563,7 +3653,8 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
   // recoge un repartidor/servicio (recoger o envio), no en mesa.
   const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
   // El telefono deja de ser obligatorio si el cliente no lo dio (sinTel).
-  const telOk=sinTel||normTel(telefono).length>=7;
+  // Si SE captura, debe ser un numero real de 10 digitos (movil MX).
+  const telOk=sinTel||normTel(telefono).length===10;
   const puedeCrear=items.length>0&&telOk&&cliente.trim().length>0&&!faltaDir;
   const crear=()=>{
     if(!puedeCrear)return;
@@ -3579,7 +3670,7 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'Captura el teléfono del cliente (o marca Sin teléfono)':!cliente.trim()?'Captura el nombre del cliente':faltaDir?'Captura la dirección':''}</p>}
+        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'El teléfono debe tener 10 dígitos (o marca “Sin teléfono”)':!cliente.trim()?'Captura el nombre del cliente':faltaDir?'Captura la dirección':''}</p>}
         <Btn full color="green" size="lg" disabled={!puedeCrear} onClick={crear}><Icon name="check" size={17} className="mr-1.5"/>Crear pedido · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
@@ -3600,10 +3691,10 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const [metodoPago,setMetodoPago]=useState(pedido.metodoPago||'efectivo');
   const [pagoEfectivo,setPagoEfectivo]=useState('');
   const [pagoTransferencia,setPagoTransferencia]=useState('');
-  const [sinTel,setSinTel]=useState(!(pedido.telefono&&normTel(pedido.telefono).length>=7));
+  const [sinTel,setSinTel]=useState(!(pedido.telefono&&normTel(pedido.telefono).length===10));
   useEffect(()=>{
     if(!open)return;
-    setSinTel(!(pedido.telefono&&normTel(pedido.telefono).length>=7));
+    setSinTel(!(pedido.telefono&&normTel(pedido.telefono).length===10));
     const c={};
     pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
     setCart(c);
@@ -3624,7 +3715,7 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
-  const telOk=sinTel||normTel(telefono).length>=7;
+  const telOk=sinTel||normTel(telefono).length===10;
   const datosOk=telOk&&cliente.trim().length>0&&!faltaDir;
   const guardar=()=>{
     if(!items.length||!datosOk)return;
@@ -3672,7 +3763,7 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'Captura el teléfono del cliente (o marca Sin teléfono)':!cliente.trim()?'Captura el nombre del cliente':'Captura la dirección'}</p>}
+        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'El teléfono debe tener 10 dígitos (o marca “Sin teléfono”)':!cliente.trim()?'Captura el nombre del cliente':'Captura la dirección'}</p>}
         <Btn full color="orange" size="lg" disabled={!pagoOk||!datosOk} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cambios · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
@@ -4202,11 +4293,15 @@ function MandaditosReport({jornadas,jornadaActiva}){
 // ─── ADMIN ──────────────────────────────────────────────────────────
 // Gestion de clientes frecuentes. La clave es el telefono (unico). El alta rapida
 // ocurre sola al crear un pedido; aqui se corrigen datos y direcciones.
-function ClientesTab({clientes,onGuardar,onEliminar}){
+function ClientesTab({clientes,onGuardar,onEliminar,onEliminarVarios}){
   const [q,setQ]=useState('');
   const [edit,setEdit]=useState(null); // {id?,...} o {} para nuevo
   const [confirmDel,setConfirmDel]=useState(null);
+  const [confirmPurga,setConfirmPurga]=useState(false);
   const lista=Array.isArray(clientes)?clientes:[];
+  // "Numeros raros": telefono capturado que NO es de 10 digitos (los sin telefono
+  // quedan con telefono vacio y son validos, no se marcan).
+  const raros=lista.filter(c=>{const d=normTel(c.telefono);return d.length>0&&d.length!==10;});
   const nq=normTel(q);const tq=q.trim().toLowerCase();
   const filtrados=lista.filter(c=>{
     if(!q.trim())return true;
@@ -4221,6 +4316,20 @@ function ClientesTab({clientes,onGuardar,onEliminar}){
       </div>
       <Btn color="orange" onClick={()=>setEdit({})}>+ Agregar cliente</Btn>
     </div>
+    {raros.length>0&&<div className="rounded-2xl border-2 border-[rgba(202,77,44,0.3)] bg-[rgba(202,77,44,0.06)] p-4 space-y-3">
+      <div className="flex items-start gap-2">
+        <Icon name="alert" size={16} className="mt-0.5 text-[var(--danger)]"/>
+        <div>
+          <p className="font-black text-sm text-[var(--danger)]">Depurar clientes ({raros.length})</p>
+          <p className="text-xs text-[var(--text-soft)] mt-0.5">Estos clientes tienen números que no son de 10 dígitos (se agregaron sin teléfono real). Los pedidos ya creados no se modifican.</p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {raros.slice(0,12).map(c=>(<span key={c.id} className="text-[11px] font-bold bg-white/70 border border-[rgba(202,77,44,0.25)] px-2 py-1 rounded-lg text-[var(--text-soft)]">{c.nombre||'Sin nombre'}: {c.telefono}</span>))}
+        {raros.length>12&&<span className="text-[11px] font-bold px-2 py-1 text-[var(--text-muted)]">+{raros.length-12} más</span>}
+      </div>
+      <Btn full color="red" onClick={()=>setConfirmPurga(true)}><Icon name="trash" size={14} className="mr-1.5"/>Eliminar los {raros.length} clientes con número raro</Btn>
+    </div>}
     <Input label="Buscar" value={q} onChange={setQ} placeholder="Teléfono o nombre"/>
     {filtrados.length===0?<EmptyState icon="users" title="Sin clientes" sub={lista.length?'Ninguno coincide con la búsqueda':'Se guardan solos al crear pedidos con teléfono'}/>:
       <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
@@ -4249,6 +4358,14 @@ function ClientesTab({clientes,onGuardar,onEliminar}){
           <Btn full color="red" onClick={()=>{onEliminar(confirmDel.id);setConfirmDel(null);}}>Eliminar</Btn>
         </div></div>)}
     </Modal>
+    <Modal open={confirmPurga} onClose={()=>setConfirmPurga(false)} title="Depurar clientes">
+      <div className="space-y-4">
+        <p className="text-sm text-[var(--text-soft)] text-center">Se eliminarán <span className="font-bold text-[var(--danger)]">{raros.length}</span> clientes cuyo teléfono no es de 10 dígitos. Los pedidos y ventas ya registrados no se tocan.</p>
+        <div className="flex gap-3">
+          <Btn full color="gray" onClick={()=>setConfirmPurga(false)}>Cancelar</Btn>
+          <Btn full color="red" onClick={()=>{onEliminarVarios&&onEliminarVarios(raros.map(c=>c.id));setConfirmPurga(false);}}>Eliminar {raros.length}</Btn>
+        </div></div>
+    </Modal>
   </div>);
 }
 
@@ -4260,11 +4377,12 @@ function ClienteEditModal({cliente,onClose,onGuardar}){
   const setDir=(id,campo,val)=>setDirs(ds=>ds.map(d=>d.id===id?{...d,[campo]:val}:d));
   const addDir=()=>setDirs(ds=>[...ds,{id:nid(),etiqueta:'Casa',texto:''}]);
   const remDir=id=>setDirs(ds=>ds.filter(d=>d.id!==id));
-  const puede=normTel(telefono).length>=7&&nombre.trim().length>0;
+  // Telefono opcional; si se captura debe ser de 10 digitos. Nombre siempre.
+  const telDig=normTel(telefono);const puede=nombre.trim().length>0&&(telDig.length===0||telDig.length===10);
   const guardar=()=>{if(!puede)return;onGuardar({nombre:nombre.trim(),telefono:telefono.trim(),direcciones:dirs.filter(d=>String(d.texto||'').trim()).map(d=>({id:d.id,etiqueta:d.etiqueta||'Otro',texto:d.texto.trim()}))});};
   return(<Modal open={true} onClose={onClose} title={cliente.id?'Editar cliente':'Nuevo cliente'} fullScreen>
     <div className="space-y-4">
-      <Input label="Teléfono (obligatorio)" value={telefono} onChange={setTelefono} type="tel" placeholder="10 dígitos"/>
+      <Input label="Teléfono (10 dígitos · opcional)" value={telefono} onChange={setTelefono} type="tel" placeholder="10 dígitos o déjalo vacío"/>
       <Input label="Nombre" value={nombre} onChange={setNombre} placeholder="Nombre del cliente"/>
       <div className="space-y-3">
         <div className="flex items-center justify-between">
@@ -4281,14 +4399,14 @@ function ClienteEditModal({cliente,onClose,onGuardar}){
           </div>
         </div>))}
       </div>
-      {!puede&&<p className="text-xs font-bold text-[var(--danger)] text-center">{normTel(telefono).length<7?'Captura el teléfono':'Captura el nombre'}</p>}
+      {!puede&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!nombre.trim()?'Captura el nombre':'El teléfono debe tener 10 dígitos (o déjalo vacío)'}</p>}
       <Btn full color="green" size="lg" disabled={!puede} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cliente</Btn>
     </div></Modal>);
 }
 
 function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
   onActualizarImpresora,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,
-  onGuardarCliente,onEliminarCliente,
+  onGuardarCliente,onEliminarCliente,onEliminarClientes,
   syncStatus,lastCloudAt,deviceInfo,onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup,
   onAuditHistoricalData,onRepairHistoricalData}){
   const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);const [showAddProd,setShowAddProd]=useState(false);
@@ -4307,7 +4425,7 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
 
       {tab==='importar'&&(<ImportarTab onImportarProductos={onImportarProductos} onImportarCostos={onImportarCostos} productos={state.productos} costos={state.costos}/>)}
 
-      {tab==='clientes'&&(<ClientesTab clientes={state.clientes} onGuardar={onGuardarCliente} onEliminar={onEliminarCliente}/>)}
+      {tab==='clientes'&&(<ClientesTab clientes={state.clientes} onGuardar={onGuardarCliente} onEliminar={onEliminarCliente} onEliminarVarios={onEliminarClientes}/>)}
 
       {tab==='costos'&&(<div className="space-y-4">
         <div className="rounded-[24px] border border-[rgba(178,69,24,0.16)] bg-[rgba(255,243,232,0.95)] p-4 text-sm text-[#a14017]">
@@ -4431,7 +4549,18 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
     refreshBackups();
   };
 
+  const [mute,setMute]=useState(()=>{try{return localStorage.getItem('kapulits_mute')==='1';}catch(e){return false;}});
+  const toggleMute=()=>{const n=!mute;setMute(n);try{localStorage.setItem('kapulits_mute',n?'1':'0');}catch(e){}if(!n)snd.pop();};
   return(<div className="space-y-5 md:grid md:grid-cols-2 md:gap-5 md:space-y-0 md:items-start">
+    <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100 md:col-span-2">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="font-black text-gray-800 text-sm"><Icon name="settings" size={15} className="mr-1"/>Sonidos</h3>
+          <p className="text-xs text-gray-500 mt-0.5">Moneda al cobrar, impresora al generar ticket y clic en botones.</p>
+        </div>
+        <button type="button" onClick={toggleMute} aria-pressed={!mute} className={`text-xs font-black px-4 py-2.5 min-h-[44px] rounded-2xl border-2 transition-colors ${mute?'border-[rgba(202,77,44,0.3)] text-[var(--danger)] bg-[rgba(202,77,44,0.06)]':'border-[rgba(45,139,87,0.35)] text-[var(--success)] bg-[rgba(45,139,87,0.08)]'}`}>{mute?'Silenciado':'Activados'}</button>
+      </div>
+    </div>
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
       <div className="flex items-center justify-between mb-3">
         <h3 className="font-black text-gray-800 text-sm"><Icon name="cloud" size={15} className="mr-1"/>Sync y Respaldo</h3>
@@ -4820,7 +4949,7 @@ function App(){
     registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
-    guardarCliente,eliminarCliente,
+    guardarCliente,eliminarCliente,eliminarClientes,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
   const hasJornada=!!state.jornadaActiva;
   const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
@@ -4875,6 +5004,7 @@ function App(){
       onEliminarEmpleado={id=>{eliminarEmpleado(id);showToast('Empleado eliminado','red');}}
       onGuardarCliente={(id,d)=>{guardarCliente(id,d);showToast(id?'Cliente actualizado':'Cliente agregado');}}
       onEliminarCliente={id=>{eliminarCliente(id);showToast('Cliente eliminado','red');}}
+      onEliminarClientes={ids=>{eliminarClientes(ids);showToast(`${ids.length} clientes depurados`,'red');}}
       syncStatus={syncStatus} lastCloudAt={lastCloudAt} deviceInfo={deviceInfo}
       onSyncNow={async()=>{const r=await syncNow();showToast(r.ok?'Cambios enviados':'Sync fallo',r.ok?'green':'red');return r;}}
       onPullFromCloud={pullFromCloud} onSetDeviceRole={role=>{setDeviceRole(role);showToast(role==='primary'?'Modo principal':'Modo espejo','orange');}}
