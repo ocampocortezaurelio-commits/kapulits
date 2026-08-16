@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20260816-sonidos-depurar';
+const CACHE_NAME = 'kapulits-assets-v20260816b-audio-unlock';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [

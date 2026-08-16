@@ -261,7 +261,17 @@ const APP_VERSION = '2.1';
 const snd=(()=>{
   let ctx=null,last=0;
   const muted=()=>{try{return localStorage.getItem('kapulits_mute')==='1';}catch(e){return false;}};
-  const ac=()=>{ if(muted())return null; try{ if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)(); if(ctx.state==='suspended')ctx.resume(); return ctx; }catch(e){return null;} };
+  const ac=()=>{ try{ if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)(); if(ctx.state==='suspended')ctx.resume(); return ctx; }catch(e){return null;} };
+  // Desbloqueo en el PRIMER toque de la sesion: en movil/tablet el AudioContext
+  // nace "suspended" hasta un gesto real; sin esto el primer (o todos) los
+  // sonidos se pierden. Crea el contexto, lo resume y reproduce un buffer mudo
+  // para dejar el canal de audio abierto. ponytail: patron estandar iOS/Android.
+  const unlock=()=>{
+    const c=ac();if(!c)return;
+    try{const b=c.createBuffer(1,1,22050),s=c.createBufferSource();s.buffer=b;s.connect(c.destination);s.start(0);}catch(e){}
+    if(c.state==='running'){['pointerdown','touchend','click','keydown'].forEach(ev=>document.removeEventListener(ev,unlock,true));}
+  };
+  ['pointerdown','touchend','click','keydown'].forEach(ev=>document.addEventListener(ev,unlock,true));
   // Un tono con envolvente para no producir clicks/pops de corte.
   const tone=(c,freq,start,dur,type='sine',peak=0.22)=>{
     const o=c.createOscillator(),g=c.createGain();
@@ -273,15 +283,15 @@ const snd=(()=>{
   };
   return{
     // Click corto tipo "pop". Throttle 60ms para no saturar en taps rapidos.
-    pop(){const c=ac();if(!c)return;const now=performance.now();if(now-last<60)return;last=now;
+    pop(){if(muted())return;const c=ac();if(!c)return;const now=performance.now();if(now-last<60)return;last=now;
       const t=c.currentTime;const o=c.createOscillator(),g=c.createGain();
       o.type='triangle';o.frequency.setValueAtTime(420,t);o.frequency.exponentialRampToValueAtTime(180,t+0.07);
       g.gain.setValueAtTime(0.0001,t);g.gain.linearRampToValueAtTime(0.18,t+0.006);g.gain.exponentialRampToValueAtTime(0.0001,t+0.09);
       o.connect(g).connect(c.destination);o.start(t);o.stop(t+0.1);},
     // Moneda: dos tonos ascendentes (estilo caja registradora / arcade).
-    coin(){const c=ac();if(!c)return;const t=c.currentTime;tone(c,988,t,0.09,'square',0.2);tone(c,1319,t+0.08,0.32,'square',0.22);},
+    coin(){if(muted())return;const c=ac();if(!c)return;const t=c.currentTime;tone(c,988,t,0.09,'square',0.2);tone(c,1319,t+0.08,0.32,'square',0.22);},
     // Impresion: zumbido de motor de impresora termica (~0.5s con tremolo).
-    print(){const c=ac();if(!c)return;const t=c.currentTime;
+    print(){if(muted())return;const c=ac();if(!c)return;const t=c.currentTime;
       const o=c.createOscillator(),g=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
       o.type='sawtooth';o.frequency.setValueAtTime(140,t);
       lfo.type='square';lfo.frequency.setValueAtTime(38,t);lg.gain.setValueAtTime(90,t);
@@ -4558,7 +4568,10 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
           <h3 className="font-black text-gray-800 text-sm"><Icon name="settings" size={15} className="mr-1"/>Sonidos</h3>
           <p className="text-xs text-gray-500 mt-0.5">Moneda al cobrar, impresora al generar ticket y clic en botones.</p>
         </div>
-        <button type="button" onClick={toggleMute} aria-pressed={!mute} className={`text-xs font-black px-4 py-2.5 min-h-[44px] rounded-2xl border-2 transition-colors ${mute?'border-[rgba(202,77,44,0.3)] text-[var(--danger)] bg-[rgba(202,77,44,0.06)]':'border-[rgba(45,139,87,0.35)] text-[var(--success)] bg-[rgba(45,139,87,0.08)]'}`}>{mute?'Silenciado':'Activados'}</button>
+        <div className="flex gap-2 shrink-0">
+          <button type="button" onClick={()=>{snd.coin();setTimeout(()=>snd.print(),450);}} disabled={mute} className={`text-xs font-black px-3 py-2.5 min-h-[44px] rounded-2xl border-2 border-[rgba(72,118,168,0.35)] text-[#4876a8] bg-[rgba(72,118,168,0.08)] ${mute?'opacity-40 pointer-events-none':''}`}>Probar</button>
+          <button type="button" onClick={toggleMute} aria-pressed={!mute} className={`text-xs font-black px-4 py-2.5 min-h-[44px] rounded-2xl border-2 transition-colors ${mute?'border-[rgba(202,77,44,0.3)] text-[var(--danger)] bg-[rgba(202,77,44,0.06)]':'border-[rgba(45,139,87,0.35)] text-[var(--success)] bg-[rgba(45,139,87,0.08)]'}`}>{mute?'Silenciado':'Activados'}</button>
+        </div>
       </div>
     </div>
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100">
