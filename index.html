@@ -116,11 +116,11 @@
   .prod-btn{
     position:relative;background:var(--surface);
     border:1.5px solid var(--line-strong);
-    box-shadow:0 2px 8px rgba(88,42,10,.06);
+    box-shadow:0 6px 18px rgba(120,60,15,.13);
     transition:transform .2s cubic-bezier(.34,1.4,.5,1),box-shadow .2s ease,border-color .15s ease,background-color .15s ease;
     will-change:transform;
   }
-  .prod-btn:hover{transform:translateY(-3px) scale(1.03);box-shadow:0 12px 26px rgba(88,42,10,.16);border-color:var(--brand)}
+  .prod-btn:hover{transform:translateY(-3px) scale(1.03);box-shadow:0 16px 32px rgba(120,60,15,.22);border-color:var(--brand)}
   .prod-btn:active{transform:scale(.97)}
   /* Seleccionado: NO cambia el color base (alternado); gana aro + escala + crece texto. */
   .prod-btn.is-selected{
@@ -1622,6 +1622,16 @@ const CAT_STYLE={
 function productStyle(id,cat){
   return PRODUCT_STYLE[id]||CAT_STYLE[cat]||CAT_STYLE.platillo;
 }
+// Color/caracter suave por categoria para las TARJETAS del menu: tinte calido
+// que despega la tarjeta del fondo crema sin el naranja saturado. Texto oscuro
+// legible; el seleccionado gana aro + crecimiento encima de este tinte.
+const CAT_CARD={
+  combo:   {bg:'linear-gradient(180deg,#fffaf0,#fbeecd)',bd:'#e9d3a2'},
+  platillo:{bg:'linear-gradient(180deg,#fff5ee,#fbe4d7)',bd:'#eec8b3'},
+  bebida:  {bg:'linear-gradient(180deg,#edf6f6,#dbedef)',bd:'#bfdadc'},
+  variado: {bg:'linear-gradient(180deg,#f7f3ef,#eee5db)',bd:'#dccfc0'},
+};
+function catCard(cat){return CAT_CARD[cat]||CAT_CARD.platillo;}
 // Chip neutro premium (estilo Uber Eats): el icono plano ya trae su color; el
 // contenedor usa un fondo calido neutro para que la tarjeta luzca limpia.
 function ProductChip({id,cat,size=24,pad=14}){
@@ -2781,9 +2791,9 @@ function Modal({open,onClose,title,children,fullScreen=false}){
       className={`relative bg-[var(--surface)] w-full shadow-[0_-16px_48px_rgba(71,31,9,.22)] slide-up ${fullScreen?'h-[95vh]':'max-h-[90vh]'} overflow-y-auto border border-[rgba(221,192,161,.55)] rounded-t-[30px] md:rounded-[30px] md:max-w-[560px] md:border-b`}>
       <div className="sticky top-0 bg-[rgba(255,250,244,.94)] backdrop-blur-md px-5 pt-4 pb-3 border-b border-[rgba(221,192,161,.5)] z-10">
         <div className="w-10 h-1 bg-[rgba(165,129,107,.34)] rounded-full mx-auto mb-3 md:hidden"/>
-        <div className="flex items-center justify-between">
-          <h2 className="t-title text-[var(--text)]">{title}</h2>
-          <button className="tap text-[var(--text-muted)] hover:text-[var(--text)] w-11 h-11 -mr-2 flex items-center justify-center rounded-full" onClick={onClose} aria-label="Cerrar modal"><Icon name="x" size={20}/></button></div></div>
+        <div className="relative flex items-center justify-center min-h-[44px]">
+          <h2 className="t-title text-[var(--text)] text-center px-10">{title}</h2>
+          <button className="tap absolute right-0 text-[var(--text-muted)] hover:text-[var(--text)] w-11 h-11 flex items-center justify-center rounded-full" onClick={onClose} aria-label="Cerrar modal"><Icon name="x" size={20}/></button></div></div>
       <div className="px-5 py-4">{children}</div></div></div>);
 }
 function EmptyState({icon='info',title,sub}){
@@ -3121,7 +3131,8 @@ function ProductSelector({productos,cart,setCart}){
   function ProdBtn({p,cols=2}){
     const qty=qtyOf(p.id);
     const desc=COMBO_DESC[p.id];
-    return(<button key={p.id} onClick={()=>add(p)}
+    const cc=catCard(p.cat);
+    return(<button key={p.id} onClick={()=>add(p)} style={{background:cc.bg,borderColor:cc.bd}}
       className={`prod-btn rounded-2xl flex flex-col items-center justify-center text-center ${cols===1?'p-4 gap-1':'p-3.5 gap-1 min-h-[86px]'} ${qty>0?'is-selected':''}`}>
       {qty>0&&<span className="absolute top-1.5 right-1.5 bg-[var(--brand)] text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center shadow-[0_2px_6px_rgba(174,74,13,.35)]">{qty}</span>}
       <p className="prod-name t-subtitle text-[var(--text)]">{p.nombre}</p>
@@ -3139,9 +3150,11 @@ function ProductSelector({productos,cart,setCart}){
     <div className="grid grid-cols-2 gap-2.5">{platillos.map(p=><ProdBtn key={p.id} p={p}/>)}</div>
     <p className="t-menuhead">Bebidas</p>
     <div className="grid grid-cols-2 gap-2.5">
-      {bebidas.map(p=>{const qty=qtyOf(p.id);const tieneVar=Array.isArray(p.variantes)&&p.variantes.length>0;const abierto=openVar===p.id;
+      {bebidas.map((p,i,arr)=>{const qty=qtyOf(p.id);const tieneVar=Array.isArray(p.variantes)&&p.variantes.length>0;const abierto=openVar===p.id;
+        const full=i===arr.length-1&&arr.length%2===1;const cc=catCard('bebida');
         return(<button key={p.id} onClick={()=>tieneVar?setOpenVar(o=>o===p.id?null:p.id):add(p)} aria-expanded={tieneVar?abierto:undefined}
-          className={`prod-btn rounded-2xl p-3.5 flex flex-col items-center justify-center text-center gap-1 min-h-[86px] ${qty>0||abierto?'is-selected':''}`}>
+          style={{background:cc.bg,borderColor:cc.bd}}
+          className={`prod-btn rounded-2xl p-3.5 flex flex-col items-center justify-center text-center gap-1 min-h-[86px] ${full?'col-span-2':''} ${qty>0||abierto?'is-selected':''}`}>
           {qty>0&&<span className="absolute top-1.5 right-1.5 bg-[var(--brand)] text-white text-[10px] font-black w-5 h-5 rounded-full flex items-center justify-center shadow-[0_2px_6px_rgba(174,74,13,.35)]">{qty}</span>}
           <p className="prod-name t-subtitle text-[var(--text)]">{p.nombre}</p>
           <p className="t-price text-[var(--brand-strong)] inline-flex items-center">{fmt(p.precio)}{tieneVar&&<Icon name={abierto?'chevronUp':'chevronDown'} size={12} className="ml-0.5"/>}</p>
@@ -3205,8 +3218,8 @@ function DeliverySelector({tipo,setTipo}){
     <div className="grid grid-cols-6 gap-2">
       {Object.entries(TARIFAS_ENVIO).map(([k,v])=>{
         const sel=tipo===k;const esMesa=k.startsWith('mesa');
-        return(<button key={k} onClick={()=>setTipo(k)} aria-pressed={sel} style={{background:'var(--surface)'}}
-          className={`${esMesa?'col-span-3':'col-span-2'} py-3 min-h-[60px] rounded-xl border flex flex-col items-center justify-center gap-0.5 transition-transform duration-200 hover:scale-[1.03] active:scale-95 ${sel?'scale-105 border-[var(--brand)] ring-2 ring-[var(--brand-strong)] ring-offset-2 ring-offset-[var(--surface)]':'border-[var(--line-strong)]'}`}>
+        return(<button key={k} onClick={()=>setTipo(k)} aria-pressed={sel} style={{background:'linear-gradient(180deg,#fff9f0,#fbeedb)'}}
+          className={`${esMesa?'col-span-3':'col-span-2'} py-3 min-h-[60px] rounded-xl border shadow-[0_5px_14px_rgba(120,60,15,.12)] flex flex-col items-center justify-center gap-0.5 transition-transform duration-200 hover:scale-[1.03] active:scale-95 ${sel?'scale-105 border-[var(--brand)] ring-2 ring-[var(--brand-strong)] ring-offset-2 ring-offset-[var(--surface)]':'border-[#ecd6bd]'}`}>
           <span className="text-[11px] font-black leading-tight text-[var(--text)]">{v.label}</span>
           {v.precio>0&&<span className="text-[10px] font-black text-[var(--brand-strong)]">+{fmt(v.precio)}</span>}
         </button>);
@@ -3505,7 +3518,8 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
       </div>}
       <Input label="Dirección" value={direccion} onChange={setDireccion} placeholder="Calle, número, colonia..."/>
       <div className="grid grid-cols-4 gap-2">{ETIQUETAS_DIR.map(e=>(<button key={e} type="button" onClick={()=>setEtiqueta(e)} aria-pressed={etiqueta===e}
-        className={`tap text-xs font-bold px-2 py-2 min-h-[42px] rounded-[14px] border text-center ${etiqueta===e?'border-orange-500 bg-orange-50 text-orange-700':'border-[rgba(221,192,161,.7)] text-[var(--text-soft)]'}`}>{e}</button>))}</div>
+        style={etiqueta===e?undefined:{background:'linear-gradient(180deg,#fff9f0,#fbeedb)'}}
+        className={`tap text-xs font-bold px-2 py-2 min-h-[42px] rounded-[14px] border text-center shadow-[0_4px_12px_rgba(120,60,15,.10)] ${etiqueta===e?'border-orange-500 bg-orange-50 text-orange-700':'border-[#ecd6bd] text-[var(--text-soft)]'}`}>{e}</button>))}</div>
     </React.Fragment>)}
   </div>);
 }
@@ -4617,6 +4631,18 @@ function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
     XLSX.utils.book_append_sheet(wb,ws,'Datos');
     XLSX.writeFile(wb,`plantilla_${tipo}.xlsx`);
   };
+  // Respaldo completo para analisis: descarga TODO el estado (jornadas, pedidos,
+  // ventas con hora, gastos) como JSON a la computadora. No solo vive en el
+  // dispositivo: este archivo se puede guardar y compartir para analizar datos.
+  const descargarDatos=()=>{
+    const raw=localStorage.getItem('kapulits_v2')||'{}';
+    const blob=new Blob([raw],{type:'application/json'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url;a.download=`kapulits_datos_${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+  };
 
   return(<div className="space-y-5">
     <div className="bg-orange-50 rounded-2xl p-4 text-sm text-orange-700">
@@ -4640,6 +4666,11 @@ function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
         <Btn size="sm" color="orange" onClick={()=>{setImportType('costos');fileRef.current?.click();}}><Icon name="upload" size={13} className="mr-1"/>Subir Excel</Btn>
       </div>
       <p className="text-xs text-gray-400">Columnas: id · nombre · unidad · precio_unitario · categoria</p>
+    </div>
+    <div className="bg-white rounded-3xl p-5 shadow-sm border border-gray-100">
+      <h3 className="font-black text-gray-800 mb-1 text-sm"><Icon name="save" size={15} className="mr-1"/>Datos para análisis</h3>
+      <p className="text-xs text-gray-500 mb-3">Descarga TODO tu historial (jornadas, pedidos con hora, ventas y gastos) en un archivo a tu computadora. Sirve para respaldo y para analizar qué días/horas vendes más y cuánta carne comprar. Tus datos también se sincronizan en la nube.</p>
+      <Btn size="sm" color="green" onClick={descargarDatos}><Icon name="download" size={13} className="mr-1"/>Descargar mis datos (JSON)</Btn>
     </div>
     <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} className="hidden"/>
     {status&&<div role="status" className={`rounded-2xl p-4 text-sm font-bold text-center ${status.kind==='ok'?'bg-green-50 text-green-700':status.kind==='err'?'bg-red-50 text-red-600':'bg-blue-50 text-blue-700'}`}><Icon name={status.kind==='ok'?'check':status.kind==='err'?'alert':'info'} size={14} className="mr-1.5"/>{status.text}</div>}
