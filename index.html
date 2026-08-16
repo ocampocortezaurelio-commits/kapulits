@@ -200,7 +200,19 @@ const TARIFAS_ENVIO = {
   recoger: {label:'Pasa a recoger',precio:0,emoji:'🏃'},
   zona_centro: {label:'Envío Zona Centro',precio:30,emoji:'🛵'},
   retirado: {label:'Envío Retirado',precio:45,emoji:'🚗'},
+  mesa_1: {label:'Mesa 1 · Afuera',precio:0,emoji:'🪑'},
+  mesa_2: {label:'Mesa 2 · Adentro',precio:0,emoji:'🍽️'},
 };
+// Mesa = cuenta abierta en local (tarifa 0). Reutiliza todo el flujo de pedido:
+// el pedido queda "nuevo" hasta cobrar; se le agregan platillos con Editar.
+const esMesa=t=>t==='mesa_1'||t==='mesa_2';
+// Un pedido necesita direccion cuando lo recoge un repartidor/servicio (recoger
+// o envio), no cuando se come en mesa.
+const necesitaDireccion=t=>!esMesa(t);
+const ETIQUETAS_DIR=['Casa','Oficina','Trabajo','Otro'];
+// Normaliza telefono a solo digitos: clave real del cliente (los nombres se
+// repiten, el numero no). Se usa para buscar/deduplicar clientes frecuentes.
+const normTel=t=>String(t||'').replace(/\D+/g,'');
 
 // ─── DATA ───────────────────────────────────────────────────────────
 const PRODUCTOS_DEFAULT = [
@@ -218,9 +230,11 @@ const PRODUCTOS_DEFAULT = [
   {id:'combo_clasico',nombre:'Combo Clásico',precio:265,costo:100,cat:'combo',emoji:'🌟',activo:true},
   {id:'combo_2x2',nombre:'Combo 2+2',precio:290,costo:0,cat:'combo',emoji:'🥤',activo:true},
   {id:'guacamole',nombre:'Guacamole',precio:45,costo:45,cat:'platillo',emoji:'🥑',activo:true},
-  {id:'coca',nombre:'Coca-Cola',precio:35,costo:14,cat:'bebida',emoji:'🥤',activo:true},
-  {id:'jamaica',nombre:'Jamaica',precio:35,costo:7,cat:'bebida',emoji:'🍹',activo:true},
-  {id:'horchata',nombre:'Horchata',precio:35,costo:9,cat:'bebida',emoji:'🥛',activo:true},
+  {id:'coca',nombre:'Coca-Cola',precio:35,costo:14,cat:'bebida',emoji:'🥤',activo:true,variantes:['Clásica','Sin azúcar']},
+  // Aguas naturales: un solo producto con sabores desplegables. costo 8 = punto
+  // medio de los costos reales ya capturados (Jamaica 7 / Horchata 9); el dueño
+  // lo ajusta en Admin si cambia. ponytail: valor derivado de datos reales, no inventado.
+  {id:'agua_natural',nombre:'Aguas naturales',precio:35,costo:8,cat:'bebida',emoji:'🥤',activo:true,variantes:['Piña','Horchata','Jamaica','Chía con limón']},
   // Descriptor especial: sin precio/costo fijos. Cada linea captura su propio
   // nombre y precio (ver esVariado). No se edita como producto ordinario.
   {id:'variado',nombre:'Producto variado',precio:0,costo:0,cat:'variado',emoji:'🧪',activo:true,esVariado:true},
@@ -232,7 +246,7 @@ const PRODUCTOS_DEFAULT = [
 // versionado en migrateProducts corre UNA sola vez por estado: al terminar,
 // hydrateState estampa state.catalogVersion = CATALOG_VERSION, de modo que
 // ediciones manuales posteriores del dueño nunca se revierten.
-const CATALOG_VERSION = 1;
+const CATALOG_VERSION = 2;
 
 const COMBO_DESC = {
   combo_jarocho:'4 Quesabirrias Mano + 2 Coca 600ml + 1 Consome',
@@ -283,6 +297,7 @@ const INITIAL_STATE = {
   jornadas:[],
   jornadaActiva:null,
   catalogVersion:CATALOG_VERSION,
+  clientes:[],
   productos:PRODUCTOS_DEFAULT,
   costos:COSTOS_DEFAULT,
   empleados:EMPLEADOS_DEFAULT,
@@ -576,7 +591,10 @@ function _mergeStates(cloud,local){
   return {
     ...cloud,...local,
     jornadas:_mergeJornadas(cloud.jornadas||[],local.jornadas||[]),
-    jornadaActiva:_mergeJornadaActiva(cloud.jornadaActiva,local.jornadaActiva,local)
+    jornadaActiva:_mergeJornadaActiva(cloud.jornadaActiva,local.jornadaActiva,local),
+    // Clientes frecuentes son base de datos compartida y creciente: merge por id
+    // (gana el _ts mas reciente) para no perder altas hechas en otro dispositivo.
+    clientes:_mergeById(cloud.clientes||[],local.clientes||[])
     // productos, costos, empleados, gastosFijos, impresora: last-write-wins
     // del spread de arriba (cambios de configuracion son raros)
   };
@@ -746,6 +764,17 @@ function migrateProducts(prods,catalogVersion){
     // v1 (2026-07): refrescos suben de $30 a $35 (menu oficial).
     next=next.map(p=>!p.esVariado&&(p.id==='coca'||normNombreProducto(p.nombre)==='coca-cola')&&Number(p.precio)!==35?{...p,precio:35}:p);
   }
+  if((Number(catalogVersion)||0)<2){
+    // v2 (2026-08): Coca gana variantes (Clasica/Sin azucar). Las aguas naturales
+    // se consolidan en el producto default "Aguas naturales" (con sabores); las
+    // Jamaica/Horchata sueltas se DESACTIVAN para que no aparezcan como boton
+    // aparte. El historico queda intacto: sus items viven congelados en los pedidos.
+    next=next.map(p=>{
+      if((p.id==='coca'||normNombreProducto(p.nombre)==='coca-cola')&&!p.variantes)return{...p,variantes:['Clásica','Sin azúcar']};
+      if((p.id==='jamaica'||p.id==='horchata'||normNombreProducto(p.nombre)==='jamaica'||normNombreProducto(p.nombre)==='horchata')&&p.activo!==false)return{...p,activo:false};
+      return p;
+    });
+  }
   return next;
 }
 // ID unico por linea de "producto variado": permite varios variados distintos
@@ -763,6 +792,33 @@ function buildItem(i){
   if(i.esVariado){it.esVariado=true;it.id=i.id;it.costo=0;}
   else if(i.id&&i.id!==it.productoId){it.id=i.id;}
   return it;
+}
+// Alta/actualizacion de cliente frecuente. Clave = telefono normalizado (unico;
+// los nombres se repiten, el numero no). Idempotente: si el telefono ya existe
+// actualiza el nombre y agrega la direccion nueva (con etiqueta) si no estaba.
+// Devuelve la lista nueva de clientes. Sin telefono no crea cliente.
+function upsertClienteList(clientes,{telefono,nombre,direccion,etiqueta}){
+  const tel=normTel(telefono);
+  const list=Array.isArray(clientes)?clientes:[];
+  if(!tel)return list;
+  const nid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const nom=String(nombre||'').trim();
+  const dir=String(direccion||'').trim();
+  const et=String(etiqueta||'Otro').trim()||'Otro';
+  const ts=new Date().toISOString();
+  const idx=list.findIndex(c=>normTel(c.telefono)===tel);
+  if(idx<0){
+    const direcciones=dir?[{id:nid(),etiqueta:et,texto:dir}]:[];
+    return[...list,{id:nid(),telefono:String(telefono||'').trim(),nombre:nom,direcciones,_ts:ts}];
+  }
+  const c=list[idx];
+  const direcciones=[...(c.direcciones||[])];
+  if(dir&&!direcciones.some(d=>String(d.texto||'').trim().toLowerCase()===dir.toLowerCase())){
+    direcciones.push({id:nid(),etiqueta:et,texto:dir});
+  }
+  const next=[...list];
+  next[idx]={...c,nombre:nom||c.nombre,direcciones,_ts:ts};
+  return next;
 }
 function localISODate(d=new Date()){
   const y=d.getFullYear();
@@ -864,6 +920,7 @@ function hydrateState(p){
   const base={...INITIAL_STATE,...p,
     productos:migrateProducts(p?.productos||PRODUCTOS_DEFAULT,p?.catalogVersion),
     catalogVersion:CATALOG_VERSION,
+    clientes:Array.isArray(p?.clientes)?p.clientes:[],
     costos:p?.costos||COSTOS_DEFAULT,
     empleados:p?.empleados||EMPLEADOS_DEFAULT,
     impresora:{...INITIAL_STATE.impresora,...(p?.impresora||{}),conectada:false,reconectando:false}};
@@ -1105,7 +1162,7 @@ function useStore(){
     save({...state,jornadas:js,jornadaActiva:null});
   },[state,save]);
 
-  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas)=>{
+  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir)=>{
     if(!state.jornadaActiva)return null;
     const ja=state.jornadaActiva;
     const totalProductos=items.reduce((s,i)=>s+i.subtotal,0);
@@ -1113,16 +1170,18 @@ function useStore(){
     const costoEnvio=tarifa.precio;
     const pedido={id:uid(),numero:ja.contadorPedido,fecha:ja.fecha,hora:now(),_ts:new Date().toISOString(),
       items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
-      tipoEntrega,cliente:cliente||'',direccion:direccion||'',notas:notas||'',
+      tipoEntrega,cliente:cliente||'',telefono:telefono||'',direccion:direccion||'',notas:notas||'',
       estado:'nuevo',cobrado:false,metodoPago:null};
     const jaNew={...ja,pedidos:[...ja.pedidos,pedido],contadorPedido:ja.contadorPedido+1};
     if(costoEnvio>0){
       jaNew.mandaditos=[...ja.mandaditos,{id:uid(),pedidoId:pedido.id,pedidoNum:pedido.numero,
-        hora:now(),cliente:pedido.cliente,direccion:pedido.direccion,
+        hora:now(),cliente:pedido.cliente,telefono:pedido.telefono,direccion:pedido.direccion,
         tipo:tipoEntrega,tarifa:costoEnvio,cobrado:false}];
     }
     const js=state.jornadas.map(j=>j.id===jaNew.id?jaNew:j);
-    save({...state,jornadas:js,jornadaActiva:jaNew});
+    // Al crear el pedido se guarda/actualiza el cliente frecuente por telefono.
+    const clientes=upsertClienteList(state.clientes,{telefono,nombre:cliente,direccion,etiqueta:etiquetaDir});
+    save({...state,clientes,jornadas:js,jornadaActiva:jaNew});
     return pedido;
   },[state,save]);
 
@@ -1145,13 +1204,13 @@ function useStore(){
       const newEnvio=(TARIFAS_ENVIO[cambios.tipoEntrega]?.precio||0)>0;
       if(!oldEnvio&&newEnvio){
         ja.mandaditos=[...ja.mandaditos,{id:uid(),pedidoId,pedidoNum:pedOld.numero,
-          hora:now(),cliente:cambios.cliente||pedOld.cliente,direccion:cambios.direccion||pedOld.direccion,
+          hora:now(),cliente:cambios.cliente||pedOld.cliente,telefono:cambios.telefono||pedOld.telefono,direccion:cambios.direccion||pedOld.direccion,
           tipo:cambios.tipoEntrega,tarifa:newCostoEnvio,cobrado:false}];
       }else if(oldEnvio&&!newEnvio){
         ja.mandaditos=ja.mandaditos.filter(m=>m.pedidoId!==pedidoId);
       }else if(oldEnvio&&newEnvio){
         ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?
-          {...m,tipo:cambios.tipoEntrega,tarifa:newCostoEnvio,cliente:cambios.cliente||m.cliente,direccion:cambios.direccion||m.direccion}:m);
+          {...m,tipo:cambios.tipoEntrega,tarifa:newCostoEnvio,cliente:cambios.cliente||m.cliente,telefono:cambios.telefono||m.telefono,direccion:cambios.direccion||m.direccion}:m);
       }
     }
 
@@ -1216,7 +1275,12 @@ function useStore(){
       ja.mandaditos=ja.mandaditos.map(m=>m.pedidoId===pedidoId?{...m,cobrado:true,metodoPago:metodoFinal}:m);
     }
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
-    save({...state,jornadas:js,jornadaActiva:ja});
+    // Editar tambien mantiene al dia el cliente frecuente (telefono/nombre/direccion).
+    const pedFin=ja.pedidos.find(p=>p.id===pedidoId);
+    const clientes=(cambios.telefono||cambios.cliente||cambios.direccion)&&pedFin
+      ?upsertClienteList(state.clientes,{telefono:pedFin.telefono,nombre:pedFin.cliente,direccion:pedFin.direccion,etiqueta:cambios.etiquetaDir})
+      :state.clientes;
+    save({...state,clientes,jornadas:js,jornadaActiva:ja});
   },[state,save]);
 
   const registrarGasto=useCallback((categoria,descripcion,monto,enEfectivo=true)=>{
@@ -1328,11 +1392,21 @@ function useStore(){
   const agregarEmpleado=useCallback((nombre,rol,sueldo)=>{save({...state,empleados:[...state.empleados,{id:uid(),nombre,rol,sueldo:Number(sueldo)||0}]});},[state,save]);
   const editarEmpleado=useCallback((eid,datos)=>{save({...state,empleados:state.empleados.map(e=>e.id===eid?{...e,...datos,sueldo:Number(datos.sueldo)||0}:e)});},[state,save]);
   const eliminarEmpleado=useCallback((eid)=>{save({...state,empleados:state.empleados.filter(e=>e.id!==eid)});},[state,save]);
+  // Clientes frecuentes CRUD (gestion manual desde Admin). El alta rapida vive en
+  // el flujo de pedido (upsertClienteList); aqui se editan datos y direcciones.
+  const guardarCliente=useCallback((cid,datos)=>{
+    const ts=new Date().toISOString();
+    const cli=Array.isArray(state.clientes)?state.clientes:[];
+    if(cid){save({...state,clientes:cli.map(c=>c.id===cid?{...c,...datos,_ts:ts}:c)});}
+    else{save({...state,clientes:[...cli,{id:uid(),telefono:'',nombre:'',direcciones:[],...datos,_ts:ts}]});}
+  },[state,save]);
+  const eliminarCliente=useCallback((cid)=>{save({...state,clientes:(state.clientes||[]).filter(c=>c.id!==cid)});},[state,save]);
 
   return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
     registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
+    guardarCliente,eliminarCliente,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData};
 }
 
@@ -1429,7 +1503,7 @@ function ProductIcon({cat,size=20,className=''}){
   const name=cat==='bebida'?'cup':cat==='combo'?'star':cat==='variado'?'tag':'bowl';
   return<Icon name={name} size={size} className={className} strokeWidth={1.7}/>;
 }
-const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car'};
+const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'sun',mesa_2:'home'};
 
 // ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
 function analyzeHistorico(jornadas,productos){
@@ -1482,7 +1556,7 @@ function analyzeHistorico(jornadas,productos){
 
   // Tasa de envio vs recoger
   const totalPedidos=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.estado!=='cancelado').length,0);
-  const totalEnvios=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length,0);
+  const totalEnvios=cerradas.reduce((s,j)=>s+(j.pedidos||[]).filter(p=>(Number(p.costoEnvio)||0)>0&&p.estado!=='cancelado').length,0);
   const tasaEnvio=totalPedidos>0?(totalEnvios/totalPedidos*100):0;
 
   // Ticket promedio = dinero cobrado real / pedidos cobrados. Excluye
@@ -1738,7 +1812,7 @@ function calcProjections(jornadas){
   const profits=models.map(m=>m.utilidadBrutaProductos);
   const mandas=models.map(m=>m.enviosTotal);
   const recoger=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length);
-  const envios=cerradas.map(j=>(j.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length);
+  const envios=cerradas.map(j=>(j.pedidos||[]).filter(p=>(Number(p.costoEnvio)||0)>0&&p.estado!=='cancelado').length);
   const avg=a=>a.reduce((s,v)=>s+v,0)/a.length;
   const avgR=avg(revenues),avgE=avg(expenses),avgP=avg(profits),avgM=avg(mandas);
   const margin=avgR>0?(avgP/avgR*100):0;
@@ -1936,8 +2010,9 @@ function buildTicketHTML(pedido){
   h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
   h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
   if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
+  if(pedido.telefono)h+=`<div>Tel: ${pedido.telefono}</div>`;
   h+=`<div>Tipo: ${tarifa.label}</div>`;
-  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>Dir: ${pedido.direccion}</div>`;
+  if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
   h+=`<div class="s"></div>`;
   pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
   h+=`<div class="s"></div>`;
@@ -1973,8 +2048,9 @@ function buildTicketsHTML(pedidos=[]){
     h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
     h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
     if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
+    if(pedido.telefono)h+=`<div>Tel: ${pedido.telefono}</div>`;
     h+=`<div>Tipo: ${tarifa.label}</div>`;
-    if(pedido.direccion&&pedido.tipoEntrega!=='recoger')h+=`<div>${pedido.direccion}</div>`;
+    if(pedido.direccion)h+=`<div>${pedido.direccion}</div>`;
     h+=`<div class="s"></div>`;
     pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
     h+=`<div class="s"></div>`;
@@ -1998,9 +2074,10 @@ function _buildBTText(pedido){
   let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
   t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}\n  ${pedido.fecha}  ${pedido.hora}\n`;
   if(pedido.cliente)t+=`  Cliente: ${pedido.cliente}\n`;
-  const tipoTxt=pedido.tipoEntrega==='recoger'?'REC':'ENV';
+  if(pedido.telefono)t+=`  Tel: ${pedido.telefono}\n`;
+  const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
   t+=`  ${tipoTxt} ${tarifa.label}\n`;
-  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')t+=`  Dir: ${pedido.direccion}\n`;
+  if(pedido.direccion)t+=`  Dir: ${pedido.direccion}\n`;
   t+=sep+'\n';
   pedido.items.forEach(i=>{
     const nom=i.nombre.substring(0,18).padEnd(18);
@@ -2108,7 +2185,7 @@ function buildCierreDesglose(jornada){
     const cancelado=p.estado==='cancelado';
     const cobrado=!!p.cobrado&&!cancelado;
     const ventaOrig=ventas.find(v=>v.pedidoId===p.id&&!v.esReversa&&!v.anulada);
-    const tieneEnvio=(p.tipoEntrega&&p.tipoEntrega!=='recoger')||((Number(p.costoEnvio)||0)>0);
+    const tieneEnvio=(Number(p.costoEnvio)||0)>0;
     const envio=(cobrado&&tieneEnvio)?(Number(p.costoEnvio)||0):0;
     const productos=Number(p.totalProductos)||0;
     const total=productos+envio;
@@ -2265,7 +2342,7 @@ function _validarCaja(jornada,desg,gastos){
     if(ventaOrig&&Math.abs(num(ventaOrig.total)-num(p.totalProductos))>TOL){
       w.push({code:'venta_no_coincide',folio:p.numero,detail:`venta ${fmt(ventaOrig.total)} ≠ productos del pedido ${fmt(p.totalProductos)}`});
     }
-    const tieneEnvio=(p.tipoEntrega&&p.tipoEntrega!=='recoger')||(num(p.costoEnvio)>0);
+    const tieneEnvio=num(p.costoEnvio)>0;
     if(tieneEnvio){
       const m=mandaditos.find(x=>x.pedidoId===p.id);
       if(m&&Math.abs(num(m.tarifa)-num(p.costoEnvio))>TOL){
@@ -2906,6 +2983,13 @@ function ProductSelector({productos,cart,setCart}){
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   // Cantidad total del producto en el carrito (puede haber lineas separadas por precio).
   const qtyOf=pid=>Object.values(cart).reduce((s,l)=>((l.productoId||l.id)===pid&&!l.esVariado)?s+l.cantidad:s,0);
+  // Bebida con sabores: cada sabor es su propia linea (misma productoId para que
+  // las estadisticas agreguen bajo el producto). La variante viaja en el nombre.
+  const [openVar,setOpenVar]=useState(null);
+  const addVariante=(p,variante)=>setCart(c=>{
+    const key=p.id+'::'+variante;const ex=c[key];const q=(ex?.cantidad||0)+1;
+    return{...c,[key]:{...(ex||{}),id:key,productoId:p.id,nombre:`${p.nombre} · ${variante}`,precio:p.precio,costo:p.costo,cat:p.cat,emoji:p.emoji,variante,cantidad:q,subtotal:q*p.precio}};
+  });
 
   function ProdBtn({p,cols=2}){
     const qty=qtyOf(p.id);
@@ -2931,15 +3015,26 @@ function ProductSelector({productos,cart,setCart}){
     <div className="grid grid-cols-2 gap-2">{platillos.map(p=><ProdBtn key={p.id} p={p}/>)}</div>
     <p className="text-xs font-bold text-gray-500 uppercase tracking-wider"><Icon name="cup" size={13} className="mr-1"/>Bebidas</p>
     <div className="grid grid-cols-3 gap-2">
-      {bebidas.map(p=>{const qty=qtyOf(p.id);
-        return(<button key={p.id} onClick={()=>add(p)}
-          className={`relative bg-white rounded-xl p-2 text-center shadow-sm border-2 card-press ${qty>0?'border-orange-400 bg-orange-50':'border-gray-100'}`}>
+      {bebidas.map(p=>{const qty=qtyOf(p.id);const tieneVar=Array.isArray(p.variantes)&&p.variantes.length>0;const abierto=openVar===p.id;
+        return(<button key={p.id} onClick={()=>tieneVar?setOpenVar(o=>o===p.id?null:p.id):add(p)} aria-expanded={tieneVar?abierto:undefined}
+          className={`relative bg-white rounded-xl p-2 text-center shadow-sm border-2 card-press ${qty>0||abierto?'border-orange-400 bg-orange-50':'border-gray-100'}`}>
           {qty>0&&<span className="absolute top-0 right-0 bg-orange-500 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">{qty}</span>}
           <div className="text-[var(--brand-strong)] opacity-80"><ProductIcon cat={p.cat} size={20}/></div>
           <p className="text-[10px] font-bold text-gray-700">{p.nombre}</p>
-          <p className="text-orange-600 font-black text-xs">{fmt(p.precio)}</p>
+          <p className="text-orange-600 font-black text-xs">{fmt(p.precio)}{tieneVar&&<Icon name={abierto?'chevronUp':'chevronDown'} size={11} className="ml-0.5"/>}</p>
         </button>);})}
     </div>
+    {(()=>{const pv=bebidas.find(p=>p.id===openVar&&Array.isArray(p.variantes)&&p.variantes.length);if(!pv)return null;
+      return(<div className="bg-white rounded-xl p-3 shadow-sm border-2 border-orange-200 space-y-2 fade-in">
+        <p className="text-[11px] font-bold text-gray-500">Elige sabor · {pv.nombre}</p>
+        <div className="grid grid-cols-2 gap-2">
+          {pv.variantes.map(v=>{const q=cart[pv.id+'::'+v]?.cantidad||0;
+            return(<button key={v} onClick={()=>addVariante(pv,v)}
+              className={`relative py-2.5 min-h-[44px] rounded-lg text-xs font-bold border-2 card-press ${q>0?'border-orange-400 bg-orange-50 text-orange-700':'border-gray-200 text-gray-700'}`}>
+              {q>0&&<span className="absolute top-0.5 right-1 bg-orange-500 text-white text-[9px] font-black w-4 h-4 rounded-full flex items-center justify-center">{q}</span>}
+              {v}</button>);})}
+        </div>
+      </div>);})()}
     {variadoDesc&&(<React.Fragment>
       <p className="text-xs font-bold text-gray-500 uppercase tracking-wider"><Icon name="tag" size={13} className="mr-1"/>Producto variado</p>
       <div className="bg-white rounded-xl p-3 shadow-sm border-2 border-gray-100 space-y-2">
@@ -3169,14 +3264,14 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
           </div>))}</div></div>)}
       {pedidos.length===0&&<EmptyState icon="orders" title="Sin pedidos" sub="Crea tu primer pedido del dia"/>}
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
-        impresora={state.impresora}
-        onCrear={(items,tipo,cliente,dir,notas)=>{
-          const p=onCrearPedido(items,tipo,cliente,dir,notas);
+        clientes={state.clientes} impresora={state.impresora}
+        onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir)=>{
+          const p=onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir);
           if(p&&state.impresora.autoImprimir)printTicket(p);
           setShowCrear(false);}}/>
       <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
         onCobrar={pago=>{onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
-      {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos}
+      {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos} clientes={state.clientes}
         onClose={()=>setShowEditar(null)}
         onGuardar={cambios=>{onActualizarPedido(showEditar.id,cambios);setShowEditar(null);}}/>}
       <Modal open={!!confirmCancel} onClose={()=>setConfirmCancel(null)} title="Cancelar pedido">
@@ -3201,8 +3296,9 @@ function shareWhatsApp(pedido){
   let msg=`*K'apul'Its* - Pedido #${String(pedido.numero).padStart(3,'0')}\n`;
   msg+=`${pedido.fecha} · ${pedido.hora}\n`;
   if(pedido.cliente)msg+=`Cliente: ${pedido.cliente}\n`;
+  if(pedido.telefono)msg+=`Tel: ${pedido.telefono}\n`;
   msg+=`${tarifa.emoji} ${tarifa.label}\n`;
-  if(pedido.direccion&&pedido.tipoEntrega!=='recoger')msg+=`Dir: ${pedido.direccion}\n`;
+  if(pedido.direccion)msg+=`Dir: ${pedido.direccion}\n`;
   msg+=`---\n`;
   pedido.items.forEach(i=>{msg+=`${i.cantidad}x ${i.nombre} - ${fmt(i.subtotal)}\n`;});
   msg+=`---\n`;
@@ -3228,7 +3324,8 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWh
         </div>
         <p className="text-xs text-[#86695c] mt-1">{pedido.hora} · <Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={13}/> {tarifa.label}
           {pedido.cliente&&` · ${pedido.cliente}`}</p>
-        {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<p className="text-xs text-[#86695c] mt-1"><Icon name="pin" size={12} className="mr-1"/>{pedido.direccion}</p>}
+        {pedido.telefono&&<p className="text-xs text-[#86695c] mt-1"><Icon name="phone" size={12} className="mr-1"/>{pedido.telefono}</p>}
+        {pedido.direccion&&<p className="text-xs text-[#86695c] mt-1"><Icon name="pin" size={12} className="mr-1"/>{pedido.direccion}</p>}
       </div>
       <div className="text-right">
         <p className="text-2xl font-black text-[#b24518] tracking-tight">{fmt(pedido.total)}</p>
@@ -3253,34 +3350,75 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWh
   </div>);
 }
 
-function CrearPedidoModal({open,onClose,productos,impresora,onCrear}){
+// Datos del cliente compartidos por Crear/Editar pedido. Clave = telefono:
+// al escribir el numero busca clientes frecuentes y autocompleta nombre y
+// direcciones guardadas. La direccion solo se pide cuando la recoge un
+// repartidor/servicio (recoger o envio), no en mesa.
+function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,direccion,setDireccion,etiqueta,setEtiqueta}){
+  const tel=normTel(telefono);
+  const lista=Array.isArray(clientes)?clientes:[];
+  const match=tel.length>=3?lista.find(c=>normTel(c.telefono)===tel):null;
+  const sugerencias=(tel.length>=3&&!match)?lista.filter(c=>normTel(c.telefono).includes(tel)).slice(0,5):[];
+  const pedirDir=necesitaDireccion(tipo);
+  const usarCliente=c=>{setTelefono(c.telefono||'');setCliente(c.nombre||'');const d=(c.direcciones||[])[0];if(d&&pedirDir){setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}};
+  return(<div className="space-y-3">
+    <Input label="Teléfono (obligatorio)" value={telefono} onChange={setTelefono} type="tel" placeholder="10 dígitos"/>
+    {sugerencias.length>0&&<div className="rounded-[16px] border border-[rgba(221,192,161,.7)] bg-[rgba(255,250,244,.95)] overflow-hidden divide-y divide-[rgba(221,192,161,.4)]">
+      {sugerencias.map(c=>(<button key={c.id} type="button" onClick={()=>usarCliente(c)} className="w-full text-left px-4 py-2.5 hover:bg-[rgba(242,191,90,.12)]">
+        <span className="text-sm font-bold text-[var(--text)]">{c.nombre||'Sin nombre'}</span>
+        <span className="text-xs text-[var(--text-muted)] ml-2">{c.telefono}</span></button>))}
+    </div>}
+    {match&&<div className="rounded-[14px] bg-[rgba(45,139,87,.10)] border border-[rgba(45,139,87,.24)] px-3 py-2 text-xs font-bold text-[#2c7a54]"><Icon name="check" size={12} className="mr-1"/>Cliente frecuente: {match.nombre||'Sin nombre'}</div>}
+    <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
+    {pedirDir&&(<React.Fragment>
+      {match&&(match.direcciones||[]).length>0&&<div className="space-y-1.5">
+        <p className="text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-[0.14em]">Direcciones guardadas</p>
+        <div className="flex flex-wrap gap-2">{match.direcciones.map(d=>(<button key={d.id} type="button" onClick={()=>{setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}}
+          className={`text-xs font-bold px-3 py-2 rounded-[14px] border ${normVariadoNombre(direccion)===normVariadoNombre(d.texto)?'border-orange-400 bg-orange-50 text-orange-700':'border-[rgba(221,192,161,.7)] text-[var(--text-soft)]'}`}>
+          <Icon name="pin" size={11} className="mr-1"/>{d.etiqueta}: {d.texto}</button>))}</div>
+      </div>}
+      <Input label="Dirección" value={direccion} onChange={setDireccion} placeholder="Calle, número, colonia..."/>
+      <div className="flex flex-wrap gap-2">{ETIQUETAS_DIR.map(e=>(<button key={e} type="button" onClick={()=>setEtiqueta(e)} aria-pressed={etiqueta===e}
+        className={`text-xs font-bold px-3 py-2 min-h-[40px] rounded-[14px] border ${etiqueta===e?'border-orange-500 bg-orange-50 text-orange-700':'border-[rgba(221,192,161,.7)] text-[var(--text-soft)]'}`}>{e}</button>))}</div>
+    </React.Fragment>)}
+  </div>);
+}
+
+function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
   const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
-  const [cliente,setCliente]=useState('');const [direccion,setDireccion]=useState('');const [notas,setNotas]=useState('');
-  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setDireccion('');setNotas('');}},[open]);
+  const [cliente,setCliente]=useState('');const [telefono,setTelefono]=useState('');const [direccion,setDireccion]=useState('');
+  const [etiqueta,setEtiqueta]=useState('Casa');const [notas,setNotas]=useState('');
+  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');}},[open]);
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
   const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
+  // Validacion en la frontera: telefono y nombre SIEMPRE; direccion cuando la
+  // recoge un repartidor/servicio (recoger o envio), no en mesa.
+  const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
+  const puedeCrear=items.length>0&&normTel(telefono).length>=7&&cliente.trim().length>0&&!faltaDir;
   const crear=()=>{
-    if(!items.length)return;
+    if(!puedeCrear)return;
     const its=items.map(i=>buildItem(i));
-    onCrear(its,tipo,cliente,direccion,notas);setCart({});setCliente('');setDireccion('');setNotas('');};
+    onCrear(its,tipo,cliente.trim(),direccion.trim(),notas,telefono.trim(),etiqueta);
+    setCart({});setCliente('');setTelefono('');setDireccion('');setNotas('');};
   return(<Modal open={open} onClose={onClose} title="Nuevo pedido" fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
-      <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
-      {tipo!=='recoger'&&<Input label="Direccion de envio" value={direccion} onChange={setDireccion} placeholder="Calle, numero, colonia..."/>}
+      <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
+        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta}/>
       <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        <Btn full color="green" size="lg" onClick={crear}><Icon name="check" size={17} className="mr-1.5"/>Crear pedido · {fmt(totalFinal)}</Btn>
+        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{normTel(telefono).length<7?'Captura el teléfono del cliente':!cliente.trim()?'Captura el nombre del cliente':faltaDir?'Captura la dirección':''}</p>}
+        <Btn full color="green" size="lg" disabled={!puedeCrear} onClick={crear}><Icon name="check" size={17} className="mr-1.5"/>Crear pedido · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
 }
 
-function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
+function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const [cart,setCart]=useState(()=>{
     const c={};
     pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
@@ -3288,7 +3426,9 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   });
   const [tipo,setTipo]=useState(pedido.tipoEntrega);
   const [cliente,setCliente]=useState(pedido.cliente||'');
+  const [telefono,setTelefono]=useState(pedido.telefono||'');
   const [direccion,setDireccion]=useState(pedido.direccion||'');
+  const [etiqueta,setEtiqueta]=useState('Casa');
   const [notas,setNotas]=useState(pedido.notas||'');
   const [metodoPago,setMetodoPago]=useState(pedido.metodoPago||'efectivo');
   const [pagoEfectivo,setPagoEfectivo]=useState('');
@@ -3300,6 +3440,7 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
     setCart(c);
     setTipo(pedido.tipoEntrega);
     setCliente(pedido.cliente||'');
+    setTelefono(pedido.telefono||'');
     setDireccion(pedido.direccion||'');
     setNotas(pedido.notas||'');
     const pagos=normalizePagos(pedido.pagos,Number(pedido.total)||0,pedido.metodoPago||'efectivo');
@@ -3313,19 +3454,21 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
   const totalFinal=totalProd+costoEnvio;
   const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
+  const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
+  const datosOk=normTel(telefono).length>=7&&cliente.trim().length>0&&!faltaDir;
   const guardar=()=>{
-    if(!items.length)return;
+    if(!items.length||!datosOk)return;
     const its=items.map(i=>buildItem(i));
     const pagoSimple=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
-    onGuardar({items:its,tipoEntrega:tipo,cliente,direccion,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
+    onGuardar({items:its,tipoEntrega:tipo,cliente:cliente.trim(),telefono:telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
   const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
   const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||(pagoEditado.efectivo>=0&&pagoEditado.transferencia>=0&&sumPagos(pagoEditado)===_roundMoney(totalFinal));
   return(<Modal open={open} onClose={onClose} title={`Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
-      <Input label="Nombre del cliente" value={cliente} onChange={setCliente} placeholder="Nombre"/>
-      {tipo!=='recoger'&&<Input label="Direccion de envio" value={direccion} onChange={setDireccion} placeholder="Calle, numero, colonia..."/>}
+      <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
+        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta}/>
       {pedido.cobrado&&<div className="surface-card space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -3359,7 +3502,8 @@ function EditarPedidoModal({open,pedido,productos,onClose,onGuardar}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        <Btn full color="orange" size="lg" disabled={!pagoOk} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cambios · {fmt(totalFinal)}</Btn>
+        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{normTel(telefono).length<7?'Captura el teléfono del cliente':!cliente.trim()?'Captura el nombre del cliente':'Captura la dirección'}</p>}
+        <Btn full color="orange" size="lg" disabled={!pagoOk||!datosOk} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cambios · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
 }
@@ -3443,8 +3587,9 @@ function TicketPreviewModal({open,pedido,onClose}){
       <div className="text-center font-black">PEDIDO #{String(pedido.numero).padStart(3,'0')}</div>
       <div className="text-center text-gray-400">{pedido.fecha} · {pedido.hora}</div>
       {pedido.cliente&&<div className="font-bold">Cliente: {pedido.cliente}</div>}
+      {pedido.telefono&&<div className="text-gray-500">Tel: {pedido.telefono}</div>}
       <div><Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={12} className="mr-1"/>{tarifa.label}</div>
-      {pedido.direccion&&pedido.tipoEntrega!=='recoger'&&<div className="text-gray-500"><Icon name="pin" size={11} className="mr-1"/>{pedido.direccion}</div>}
+      {pedido.direccion&&<div className="text-gray-500"><Icon name="pin" size={11} className="mr-1"/>{pedido.direccion}</div>}
       <div className="border-t border-dashed border-gray-300"/>
       {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between"><span>{i.cantidad}x {i.nombre}</span><span className="font-bold">{fmt(i.subtotal)}</span></div>))}
       <div className="border-t border-dashed border-gray-300"/>
@@ -3669,7 +3814,7 @@ function ReportesPage({state}){
             const tv=mj.productosTotal;const tg=mj.gastosTotal;const ut=mj.utilidadBrutaProductos;
             const mg=tv>0?((ut/tv)*100).toFixed(1):0;const manda=mj.enviosTotal;
             const pRecoger=(jActual.pedidos||[]).filter(p=>p.tipoEntrega==='recoger'&&p.estado!=='cancelado').length;
-            const pEnvio=(jActual.pedidos||[]).filter(p=>p.tipoEntrega!=='recoger'&&p.estado!=='cancelado').length;
+            const pEnvio=(jActual.pedidos||[]).filter(p=>(Number(p.costoEnvio)||0)>0&&p.estado!=='cancelado').length;
             return(<div className="space-y-4">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <MetricCard icon="coins" label="Ventas" value={fmt(tv)} color="green" sub={`Cobrado total: ${fmt(mj.cobrosTotal)}`}/>
@@ -3883,8 +4028,95 @@ function MandaditosReport({jornadas,jornadaActiva}){
 }
 
 // ─── ADMIN ──────────────────────────────────────────────────────────
+// Gestion de clientes frecuentes. La clave es el telefono (unico). El alta rapida
+// ocurre sola al crear un pedido; aqui se corrigen datos y direcciones.
+function ClientesTab({clientes,onGuardar,onEliminar}){
+  const [q,setQ]=useState('');
+  const [edit,setEdit]=useState(null); // {id?,...} o {} para nuevo
+  const [confirmDel,setConfirmDel]=useState(null);
+  const lista=Array.isArray(clientes)?clientes:[];
+  const nq=normTel(q);const tq=q.trim().toLowerCase();
+  const filtrados=lista.filter(c=>{
+    if(!q.trim())return true;
+    return (nq&&normTel(c.telefono).includes(nq))||String(c.nombre||'').toLowerCase().includes(tq);
+  }).sort((a,b)=>String(a.nombre||'').localeCompare(String(b.nombre||'')));
+  return(<div className="space-y-4">
+    <div className="surface-card-strong flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+      <div>
+        <p className="section-kicker mb-1">Base de clientes</p>
+        <h3 className="section-title text-[22px]">Clientes frecuentes</h3>
+        <p className="text-sm text-[var(--text-soft)] mt-1">{lista.length} guardados · se buscan por teléfono al levantar el pedido.</p>
+      </div>
+      <Btn color="orange" onClick={()=>setEdit({})}>+ Agregar cliente</Btn>
+    </div>
+    <Input label="Buscar" value={q} onChange={setQ} placeholder="Teléfono o nombre"/>
+    {filtrados.length===0?<EmptyState icon="users" title="Sin clientes" sub={lista.length?'Ninguno coincide con la búsqueda':'Se guardan solos al crear pedidos con teléfono'}/>:
+      <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">
+        {filtrados.map(c=>(<div key={c.id} className="surface-card">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="font-bold text-sm text-[#2f1d17] truncate">{c.nombre||'Sin nombre'}</p>
+              <p className="text-xs text-[#7a6255] mt-0.5"><Icon name="phone" size={11} className="mr-1"/>{c.telefono||'—'}</p>
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <button onClick={()=>setEdit(c)} aria-label="Editar cliente" className="text-xs text-[#a14017] font-bold border border-[rgba(178,69,24,0.2)] px-3 py-1.5 rounded-xl bg-[rgba(255,241,230,0.9)]"><Icon name="edit" size={13}/></button>
+              <button onClick={()=>setConfirmDel(c)} aria-label="Eliminar cliente" className="text-xs text-[var(--danger)] font-bold border border-[rgba(202,77,44,0.2)] px-3 py-1.5 rounded-xl"><Icon name="trash" size={13}/></button>
+            </div>
+          </div>
+          {(c.direcciones||[]).length>0&&<div className="flex flex-wrap gap-1.5 mt-2">
+            {c.direcciones.map(d=>(<span key={d.id} className="text-[11px] text-[var(--text-soft)] bg-[rgba(255,251,246,0.92)] border border-[rgba(221,192,161,.5)] px-2 py-1 rounded-lg"><Icon name="pin" size={10} className="mr-1"/>{d.etiqueta}: {d.texto}</span>))}
+          </div>}
+        </div>))}
+      </div>}
+    {edit&&<ClienteEditModal cliente={edit} onClose={()=>setEdit(null)} onGuardar={(datos)=>{onGuardar(edit.id||null,datos);setEdit(null);}}/>}
+    <Modal open={!!confirmDel} onClose={()=>setConfirmDel(null)} title="Eliminar cliente">
+      {confirmDel&&(<div className="space-y-4">
+        <p className="text-sm text-[var(--text-soft)] text-center">Se eliminará <span className="font-bold">{confirmDel.nombre||confirmDel.telefono}</span> de la base de clientes. Los pedidos ya creados no se modifican.</p>
+        <div className="flex gap-3">
+          <Btn full color="gray" onClick={()=>setConfirmDel(null)}>Cancelar</Btn>
+          <Btn full color="red" onClick={()=>{onEliminar(confirmDel.id);setConfirmDel(null);}}>Eliminar</Btn>
+        </div></div>)}
+    </Modal>
+  </div>);
+}
+
+function ClienteEditModal({cliente,onClose,onGuardar}){
+  const [nombre,setNombre]=useState(cliente.nombre||'');
+  const [telefono,setTelefono]=useState(cliente.telefono||'');
+  const [dirs,setDirs]=useState(()=>(cliente.direcciones||[]).map(d=>({...d})));
+  const nid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+  const setDir=(id,campo,val)=>setDirs(ds=>ds.map(d=>d.id===id?{...d,[campo]:val}:d));
+  const addDir=()=>setDirs(ds=>[...ds,{id:nid(),etiqueta:'Casa',texto:''}]);
+  const remDir=id=>setDirs(ds=>ds.filter(d=>d.id!==id));
+  const puede=normTel(telefono).length>=7&&nombre.trim().length>0;
+  const guardar=()=>{if(!puede)return;onGuardar({nombre:nombre.trim(),telefono:telefono.trim(),direcciones:dirs.filter(d=>String(d.texto||'').trim()).map(d=>({id:d.id,etiqueta:d.etiqueta||'Otro',texto:d.texto.trim()}))});};
+  return(<Modal open={true} onClose={onClose} title={cliente.id?'Editar cliente':'Nuevo cliente'} fullScreen>
+    <div className="space-y-4">
+      <Input label="Teléfono (obligatorio)" value={telefono} onChange={setTelefono} type="tel" placeholder="10 dígitos"/>
+      <Input label="Nombre" value={nombre} onChange={setNombre} placeholder="Nombre del cliente"/>
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <p className="text-[11px] font-bold text-[var(--text-muted)] uppercase tracking-[0.14em]">Direcciones</p>
+          <Btn size="sm" color="orange" variant="outline" onClick={addDir}><Icon name="plus" size={13} className="mr-1"/>Agregar</Btn>
+        </div>
+        {dirs.length===0&&<p className="text-xs text-[var(--text-muted)]">Sin direcciones. Agrega Casa, Oficina, etc.</p>}
+        {dirs.map(d=>(<div key={d.id} className="surface-card space-y-2">
+          <div className="flex flex-wrap gap-2">{ETIQUETAS_DIR.map(e=>(<button key={e} type="button" onClick={()=>setDir(d.id,'etiqueta',e)} aria-pressed={d.etiqueta===e}
+            className={`text-xs font-bold px-3 py-1.5 rounded-[12px] border ${d.etiqueta===e?'border-orange-500 bg-orange-50 text-orange-700':'border-[rgba(221,192,161,.7)] text-[var(--text-soft)]'}`}>{e}</button>))}</div>
+          <div className="flex gap-2 items-end">
+            <div className="flex-1"><Input label="Dirección" value={d.texto} onChange={v=>setDir(d.id,'texto',v)} placeholder="Calle, número, colonia..."/></div>
+            <button onClick={()=>remDir(d.id)} aria-label="Quitar dirección" className="mb-1 text-[var(--danger)] border border-[rgba(202,77,44,0.2)] p-2.5 rounded-xl"><Icon name="trash" size={15}/></button>
+          </div>
+        </div>))}
+      </div>
+      {!puede&&<p className="text-xs font-bold text-[var(--danger)] text-center">{normTel(telefono).length<7?'Captura el teléfono':'Captura el nombre'}</p>}
+      <Btn full color="green" size="lg" disabled={!puede} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cliente</Btn>
+    </div></Modal>);
+}
+
 function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
   onActualizarImpresora,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,
+  onGuardarCliente,onEliminarCliente,
   syncStatus,lastCloudAt,deviceInfo,onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup,
   onAuditHistoricalData,onRepairHistoricalData}){
   const [tab,setTab]=useState('importar');const [editProd,setEditProd]=useState(null);const [showAddProd,setShowAddProd]=useState(false);
@@ -3896,12 +4128,14 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
         <h2 className="section-title">Ajustes, sincronización y operación interna</h2>
       </div>
       <div className="flex rounded-[26px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 mb-1 gap-1 overflow-x-auto shadow-[0_16px_40px_rgba(90,53,33,0.08)]">
-        {[{id:'importar',l:'Importar',icon:'download'},{id:'costos',l:'Costos',icon:'coins'},{id:'productos',l:'Productos',icon:'bowl'},{id:'impresora',l:'Impresora',icon:'printer'},{id:'config',l:'Config',icon:'settings'}].map(t=>(
+        {[{id:'importar',l:'Importar',icon:'download'},{id:'clientes',l:'Clientes',icon:'users'},{id:'costos',l:'Costos',icon:'coins'},{id:'productos',l:'Productos',icon:'bowl'},{id:'impresora',l:'Impresora',icon:'printer'},{id:'config',l:'Config',icon:'settings'}].map(t=>(
           <button key={t.id} onClick={()=>setTab(t.id)} aria-label={t.l}
             className={`flex-shrink-0 flex-1 py-3 min-h-[44px] text-xs md:text-sm font-black rounded-[20px] transition-all duration-150 ${tab===t.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_10px_26px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>
             <span className="md:hidden">{t.id==='impresora'||t.id==='importar'?<Icon name={t.icon} size={16} label={t.l}/>:t.l}</span><span className="hidden md:inline"><Icon name={t.icon} size={14} className="mr-1"/>{t.l}</span></button>))}</div>
 
       {tab==='importar'&&(<ImportarTab onImportarProductos={onImportarProductos} onImportarCostos={onImportarCostos} productos={state.productos} costos={state.costos}/>)}
+
+      {tab==='clientes'&&(<ClientesTab clientes={state.clientes} onGuardar={onGuardarCliente} onEliminar={onEliminarCliente}/>)}
 
       {tab==='costos'&&(<div className="space-y-4">
         <div className="rounded-[24px] border border-[rgba(178,69,24,0.16)] bg-[rgba(255,243,232,0.95)] p-4 text-sm text-[#a14017]">
@@ -4397,6 +4631,7 @@ function App(){
     registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
+    guardarCliente,eliminarCliente,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
   const hasJornada=!!state.jornadaActiva;
   const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
@@ -4429,7 +4664,7 @@ function App(){
       onPagarRepartidor={registrarPagoRepartidor}
       onPagarTodosRepartidores={()=>{pagarRepartidoresPendientes();showToast('Repartidores pagados desde caja','orange');}}/>}
     {page==='pedidos'&&<PedidosPage state={state}
-      onCrearPedido={(i,t,c,dir,n)=>{const p=crearPedido(i,t,c,dir,n);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
+      onCrearPedido={(i,t,c,dir,n,tel,et)=>{const p=crearPedido(i,t,c,dir,n,tel,et);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
       onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
         if(c.cobrado)showToast('Cobrado','green');
         else if(c.estado==='entregado')showToast('Entregado','green');
@@ -4449,6 +4684,8 @@ function App(){
       onAgregarEmpleado={(n,r,s)=>{agregarEmpleado(n,r,s);showToast('Empleado agregado');}}
       onEditarEmpleado={(id,d)=>{editarEmpleado(id,d);showToast('Empleado actualizado');}}
       onEliminarEmpleado={id=>{eliminarEmpleado(id);showToast('Empleado eliminado','red');}}
+      onGuardarCliente={(id,d)=>{guardarCliente(id,d);showToast(id?'Cliente actualizado':'Cliente agregado');}}
+      onEliminarCliente={id=>{eliminarCliente(id);showToast('Cliente eliminado','red');}}
       syncStatus={syncStatus} lastCloudAt={lastCloudAt} deviceInfo={deviceInfo}
       onSyncNow={async()=>{const r=await syncNow();showToast(r.ok?'Cambios enviados':'Sync fallo',r.ok?'green':'red');return r;}}
       onPullFromCloud={pullFromCloud} onSetDeviceRole={role=>{setDeviceRole(role);showToast(role==='primary'?'Modo principal':'Modo espejo','orange');}}
