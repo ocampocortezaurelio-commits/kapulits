@@ -254,10 +254,10 @@ const {useState,useEffect,useCallback,useMemo,useRef} = React;
 const APP_VERSION = '2.1';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
-// Sintetizados con Web Audio API: sin archivos, funcionan offline y pesan 0kb.
-// pop = click de boton · coin = cobro · print = ticket. Se pueden silenciar
-// con localStorage kapulits_mute='1'. ponytail: WebAudio cubre el rung nativo;
-// si el usuario quiere sus propios .mp3, cambiar cada metodo por new Audio(...).
+// click = al presionar botones (dos tonos sintetizados, aprobado por el usuario).
+// coin  = al COBRAR: MP3 real que dio el usuario (coin.mp3, cacheado por el SW).
+// print = al generar ticket (zumbido sintetizado). Silenciables con
+// localStorage kapulits_mute='1'.
 const snd=(()=>{
   let ctx=null,last=0;
   const muted=()=>{try{return localStorage.getItem('kapulits_mute')==='1';}catch(e){return false;}};
@@ -281,15 +281,17 @@ const snd=(()=>{
     g.gain.exponentialRampToValueAtTime(0.0001,start+dur);
     o.connect(g).connect(c.destination);o.start(start);o.stop(start+dur+0.02);
   };
+  // MP3 real de moneda que dio el usuario (cobrar). Un solo elemento reutilizado;
+  // se cachea por el service worker para que suene offline.
+  let coinEl=null;
+  const coinAudio=()=>{try{if(!coinEl){coinEl=new Audio('coin.mp3');coinEl.preload='auto';coinEl.volume=1;}return coinEl;}catch(e){return null;}};
   return{
-    // Click corto tipo "pop". Throttle 60ms para no saturar en taps rapidos.
-    pop(){if(muted())return;const c=ac();if(!c)return;const now=performance.now();if(now-last<60)return;last=now;
-      const t=c.currentTime;const o=c.createOscillator(),g=c.createGain();
-      o.type='triangle';o.frequency.setValueAtTime(420,t);o.frequency.exponentialRampToValueAtTime(180,t+0.07);
-      g.gain.setValueAtTime(0.0001,t);g.gain.linearRampToValueAtTime(0.18,t+0.006);g.gain.exponentialRampToValueAtTime(0.0001,t+0.09);
-      o.connect(g).connect(c.destination);o.start(t);o.stop(t+0.1);},
-    // Moneda: dos tonos ascendentes (estilo caja registradora / arcade).
-    coin(){if(muted())return;const c=ac();if(!c)return;const t=c.currentTime;tone(c,988,t,0.09,'square',0.2);tone(c,1319,t+0.08,0.32,'square',0.22);},
+    // CLICK al presionar botones: dos tonos ascendentes (el que el usuario aprobo
+    // como "decente"). Throttle 90ms por su duracion (~0.4s).
+    click(){if(muted())return;const c=ac();if(!c)return;const now=performance.now();if(now-last<90)return;last=now;
+      const t=c.currentTime;tone(c,988,t,0.09,'square',0.2);tone(c,1319,t+0.08,0.32,'square',0.22);},
+    // Moneda al COBRAR: reproduce el MP3 que dio el usuario.
+    coin(){if(muted())return;const a=coinAudio();if(!a)return;try{a.currentTime=0;const p=a.play();p&&p.catch&&p.catch(()=>{});}catch(e){}},
     // Impresion: zumbido de motor de impresora termica (~0.5s con tremolo).
     print(){if(muted())return;const c=ac();if(!c)return;const t=c.currentTime;
       const o=c.createOscillator(),g=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
@@ -303,6 +305,14 @@ const snd=(()=>{
       tone(c,1600,t+0.5,0.08,'square',0.1);/* ping fin de impresion */},
   };
 })();
+// CLICK GLOBAL: cualquier <button> del app suena al presionar, no solo el
+// componente Btn (Nuevo Pedido usa muchos <button> crudos: productos, +/-, tipo
+// de entrega, toggle sin-telefono). Delegado en pointerdown = respuesta al tacto.
+// capture:true para no perderlo si un handler hace stopPropagation.
+document.addEventListener('pointerdown',e=>{
+  const t=e.target;const b=t&&t.closest&&t.closest('button,[role="button"]');
+  if(b&&!b.disabled)snd.click();
+},true);
 const NEGOCIO = {
   nombre: "K'apul'Its",
   slogan: 'Birria y algo mas',
@@ -2875,8 +2885,9 @@ function Btn(props){
     green_o:'border border-[rgba(45,139,87,.24)] text-[var(--success)] bg-[rgba(45,139,87,.08)]'
   };
   const cls=variant==='outline'?(vars[color+'_o']||vars.orange_o):(vars[color]||vars.orange).solid;
-  const handle=onClick?(e=>{snd.pop();onClick(e);}):undefined;
-  return<button className={`${base} ${cls}`} onClick={handle} disabled={disabled} {...rest}>{children}</button>;
+  // El "pop" al presionar lo dispara un listener global (ver snd), no aqui: asi
+  // suena en TODOS los botones (incluidos los <button> crudos de Nuevo Pedido).
+  return<button className={`${base} ${cls}`} onClick={onClick} disabled={disabled} {...rest}>{children}</button>;
 }
 function Modal({open,onClose,title,children,fullScreen=false}){
   useEffect(()=>{
@@ -4560,7 +4571,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
   };
 
   const [mute,setMute]=useState(()=>{try{return localStorage.getItem('kapulits_mute')==='1';}catch(e){return false;}});
-  const toggleMute=()=>{const n=!mute;setMute(n);try{localStorage.setItem('kapulits_mute',n?'1':'0');}catch(e){}if(!n)snd.pop();};
+  const toggleMute=()=>{const n=!mute;setMute(n);try{localStorage.setItem('kapulits_mute',n?'1':'0');}catch(e){}if(!n)snd.click();};
   return(<div className="space-y-5 md:grid md:grid-cols-2 md:gap-5 md:space-y-0 md:items-start">
     <div className="bg-white rounded-3xl p-4 shadow-sm border border-gray-100 md:col-span-2">
       <div className="flex items-center justify-between">
@@ -4569,7 +4580,7 @@ function ConfigTab({state,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGas
           <p className="text-xs text-gray-500 mt-0.5">Moneda al cobrar, impresora al generar ticket y clic en botones.</p>
         </div>
         <div className="flex gap-2 shrink-0">
-          <button type="button" onClick={()=>{snd.coin();setTimeout(()=>snd.print(),450);}} disabled={mute} className={`text-xs font-black px-3 py-2.5 min-h-[44px] rounded-2xl border-2 border-[rgba(72,118,168,0.35)] text-[#4876a8] bg-[rgba(72,118,168,0.08)] ${mute?'opacity-40 pointer-events-none':''}`}>Probar</button>
+          <button type="button" onClick={()=>{setTimeout(()=>snd.coin(),350);setTimeout(()=>snd.print(),2000);}} disabled={mute} className={`text-xs font-black px-3 py-2.5 min-h-[44px] rounded-2xl border-2 border-[rgba(72,118,168,0.35)] text-[#4876a8] bg-[rgba(72,118,168,0.08)] ${mute?'opacity-40 pointer-events-none':''}`}>Probar</button>
           <button type="button" onClick={toggleMute} aria-pressed={!mute} className={`text-xs font-black px-4 py-2.5 min-h-[44px] rounded-2xl border-2 transition-colors ${mute?'border-[rgba(202,77,44,0.3)] text-[var(--danger)] bg-[rgba(202,77,44,0.06)]':'border-[rgba(45,139,87,0.35)] text-[var(--success)] bg-[rgba(45,139,87,0.08)]'}`}>{mute?'Silenciado':'Activados'}</button>
         </div>
       </div>
