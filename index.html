@@ -199,7 +199,8 @@
   /* Movimiento tactil reutilizable (hover levanta, press hunde). Spring corto. */
   .tap{transition:transform .18s cubic-bezier(.34,1.4,.5,1),box-shadow .2s ease,filter .15s ease;will-change:transform}
   .tap:hover{transform:translateY(-2px)}
-  .tap:active{transform:scale(.95)}
+  /* Presion instantanea (.05s) coordinada con el sonido; el rebote suave queda al soltar. */
+  .tap:active{transform:scale(.95);transition-duration:.05s}
   @media(prefers-reduced-motion:reduce){.tap,.tap:hover,.tap:active{transform:none;transition:none}}
   .divider-warm{border-color:rgba(221,192,161,.55)}
   /* Accesibilidad: foco visible por teclado en todo control interactivo */
@@ -254,12 +255,13 @@ const {useState,useEffect,useCallback,useMemo,useRef} = React;
 const APP_VERSION = '2.1';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
-// click = al presionar botones (dos tonos sintetizados, aprobado por el usuario).
-// coin  = al COBRAR: MP3 real que dio el usuario (coin.mp3, cacheado por el SW).
-// print = al generar ticket (zumbido sintetizado). Silenciables con
+// click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
+// coin  = al COBRAR: MP3 real del usuario (coin.mp3).
+// print = al imprimir/reimprimir ticket o reporte: MP3 real (print.mp3).
+// Los MP3 se cachean en el service worker (suenan offline). Silenciar con
 // localStorage kapulits_mute='1'.
 const snd=(()=>{
-  let ctx=null,last=0;
+  let ctx=null,last=0,lastSpecial=0;
   const muted=()=>{try{return localStorage.getItem('kapulits_mute')==='1';}catch(e){return false;}};
   const ac=()=>{ try{ if(!ctx)ctx=new (window.AudioContext||window.webkitAudioContext)(); if(ctx.state==='suspended')ctx.resume(); return ctx; }catch(e){return null;} };
   // Desbloqueo en el PRIMER toque de la sesion: en movil/tablet el AudioContext
@@ -281,38 +283,30 @@ const snd=(()=>{
     g.gain.exponentialRampToValueAtTime(0.0001,start+dur);
     o.connect(g).connect(c.destination);o.start(start);o.stop(start+dur+0.02);
   };
-  // MP3 real de moneda que dio el usuario (cobrar). Un solo elemento reutilizado;
-  // se cachea por el service worker para que suene offline.
-  let coinEl=null;
-  const coinAudio=()=>{try{if(!coinEl){coinEl=new Audio('coin.mp3');coinEl.preload='auto';coinEl.volume=1;}return coinEl;}catch(e){return null;}};
+  // MP3 reales dados por el usuario (cobrar / imprimir). Un elemento por sonido,
+  // reutilizado; se cachean por el service worker para que suenen offline.
+  const mp3=(()=>{const cache={};return src=>{try{if(!cache[src]){const a=new Audio(src);a.preload='auto';a.volume=1;cache[src]=a;}return cache[src];}catch(e){return null;}};})();
+  const play=src=>{if(muted())return;lastSpecial=performance.now();const a=mp3(src);if(!a)return;try{a.currentTime=0;const p=a.play();p&&p.catch&&p.catch(()=>{});}catch(e){}};
   return{
-    // CLICK al presionar botones: dos tonos ascendentes (el que el usuario aprobo
-    // como "decente"). Throttle 90ms por su duracion (~0.4s).
-    click(){if(muted())return;const c=ac();if(!c)return;const now=performance.now();if(now-last<90)return;last=now;
+    // CLICK: se dispara en el evento click (seleccion registrada), no al rozar.
+    // Dos tonos cortos. Throttle 80ms. Se omite si la accion ya sono moneda o
+    // impresion (esos botones no llevan doble sonido): coherencia > capas.
+    click(){if(muted())return;const now=performance.now();if(now-lastSpecial<250)return;if(now-last<80)return;const c=ac();if(!c)return;last=now;
       const t=c.currentTime;tone(c,988,t,0.09,'square',0.2);tone(c,1319,t+0.08,0.32,'square',0.22);},
-    // Moneda al COBRAR: reproduce el MP3 que dio el usuario.
-    coin(){if(muted())return;const a=coinAudio();if(!a)return;try{a.currentTime=0;const p=a.play();p&&p.catch&&p.catch(()=>{});}catch(e){}},
-    // Impresion: zumbido de motor de impresora termica (~0.5s con tremolo).
-    print(){if(muted())return;const c=ac();if(!c)return;const t=c.currentTime;
-      const o=c.createOscillator(),g=c.createGain(),lfo=c.createOscillator(),lg=c.createGain();
-      o.type='sawtooth';o.frequency.setValueAtTime(140,t);
-      lfo.type='square';lfo.frequency.setValueAtTime(38,t);lg.gain.setValueAtTime(90,t);
-      lfo.connect(lg).connect(o.frequency);
-      g.gain.setValueAtTime(0.0001,t);g.gain.linearRampToValueAtTime(0.14,t+0.02);
-      g.gain.setValueAtTime(0.14,t+0.42);g.gain.exponentialRampToValueAtTime(0.0001,t+0.55);
-      o.connect(g).connect(c.destination);
-      o.start(t);lfo.start(t);o.stop(t+0.56);lfo.stop(t+0.56);
-      tone(c,1600,t+0.5,0.08,'square',0.1);/* ping fin de impresion */},
+    // Moneda al COBRAR y receipt al IMPRIMIR: MP3 del usuario.
+    coin(){play('coin.mp3');},
+    print(){play('print.mp3');},
   };
 })();
-// CLICK GLOBAL: cualquier <button> del app suena al presionar, no solo el
-// componente Btn (Nuevo Pedido usa muchos <button> crudos: productos, +/-, tipo
-// de entrega, toggle sin-telefono). Delegado en pointerdown = respuesta al tacto.
-// capture:true para no perderlo si un handler hace stopPropagation.
-document.addEventListener('pointerdown',e=>{
+// CLICK GLOBAL: cualquier <button> del app suena cuando la SELECCION se registra.
+// Usa el evento 'click' (no 'pointerdown'): asi NO suena al rozar el boton ni al
+// arrastrar/hacer scroll que empieza sobre un boton; solo cuando el toque firme
+// completa la accion. Fase de burbuja (sin capture) para correr DESPUES del
+// onClick de React: si esa accion ya sono moneda/impresion, snd.click se omite.
+document.addEventListener('click',e=>{
   const t=e.target;const b=t&&t.closest&&t.closest('button,[role="button"]');
   if(b&&!b.disabled)snd.click();
-},true);
+});
 const NEGOCIO = {
   nombre: "K'apul'Its",
   slogan: 'Birria y algo mas',
@@ -2347,6 +2341,7 @@ async function printTicket(pedido){
 }
 
 async function printTicketsJornada(jornada){
+  snd.print();
   const pedidos=[...(jornada?.pedidos||[])]
     .filter(p=>p&&p.estado!=='cancelado')
     .sort((a,b)=>(a.numero||0)-(b.numero||0));
@@ -2777,6 +2772,7 @@ function buildCierreHTML(jornada){
 }
 
 async function printCierreCaja(jornada){
+  snd.print();
   const ticket=_buildCierreText(jornada);
   if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
     await reconnectBluetooth();

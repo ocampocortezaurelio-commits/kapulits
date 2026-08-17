@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20260816c-coin-mp3';
+const CACHE_NAME = 'kapulits-assets-v20260817-sonidos-click';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [
@@ -7,7 +7,8 @@ const APP_SHELL = [
   './icon-192.png',
   './icon-512.png',
   './logo.svg',
-  './coin.mp3'
+  './coin.mp3',
+  './print.mp3'
 ];
 
 // CDNs criticos (React/Babel/Tailwind/XLSX/jsPDF/supabase-js). Se precachean
