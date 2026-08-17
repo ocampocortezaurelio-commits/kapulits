@@ -252,7 +252,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -2267,16 +2267,43 @@ function buildTicketsHTML(pedidos=[]){
   return h;
 }
 
+// Impresora termica de 58mm = 32 columnas por linea (Font A). Si un texto
+// excede el ancho, la impresora lo corta a mitad de palabra: feo. Estas helpers
+// envuelven por PALABRA (no por caracter) para lectura profesional.
+const TICKET_COLS=32;
+// Envuelve `text` a `width` columnas sin partir palabras. Solo parte una
+// palabra si por si sola no cabe en una linea (ultimo recurso).
+function _wrapWords(text,width){
+  const words=String(text==null?'':text).split(/\s+/).filter(Boolean);
+  const out=[];let line='';
+  for(let w of words){
+    while(w.length>width){ if(line){out.push(line);line='';} out.push(w.slice(0,width)); w=w.slice(width); }
+    if(!line)line=w;
+    else if((line+' '+w).length<=width)line+=' '+w;
+    else{out.push(line);line=w;}
+  }
+  if(line)out.push(line);
+  return out.length?out:[''];
+}
+// Campo etiquetado con sangria colgante: la continuacion queda alineada bajo el
+// valor. Ej: "  Dir: Calle muy larga\n       que no cabia".
+function _ticketField(label,value,cols=TICKET_COLS){
+  const base='  ';const inner=cols-base.length;const valWidth=Math.max(6,inner-label.length);
+  const lines=_wrapWords(value,valWidth);const hang=' '.repeat(label.length);
+  let s=base+label+(lines[0]||'')+'\n';
+  for(let i=1;i<lines.length;i++)s+=base+hang+lines[i]+'\n';
+  return s;
+}
 function _buildBTText(pedido){
   const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
-  const sep='-'.repeat(32);
+  const sep='-'.repeat(TICKET_COLS);
   let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
   t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}\n  ${pedido.fecha}  ${pedido.hora}\n`;
-  if(pedido.cliente)t+=`  Cliente: ${pedido.cliente}\n`;
+  if(pedido.cliente)t+=_ticketField('Cliente: ',pedido.cliente);
   if(pedido.telefono)t+=`  Tel: ${pedido.telefono}\n`;
   const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
-  t+=`  ${tipoTxt} ${tarifa.label}\n`;
-  if(pedido.direccion)t+=`  Dir: ${pedido.direccion}\n`;
+  t+=_ticketField(tipoTxt+' ',tarifa.label);
+  if(pedido.direccion)t+=_ticketField('Dir: ',pedido.direccion);
   t+=sep+'\n';
   pedido.items.forEach(i=>{
     const nom=i.nombre.substring(0,18).padEnd(18);
@@ -2285,22 +2312,13 @@ function _buildBTText(pedido){
   t+=sep+'\n';
   if(pedido.notas){
     t+=`  Notas:\n`;
-    const words=String(pedido.notas).split(/\s+/);
-    let line='';
-    for(const w of words){
-      if((line+' '+w).trim().length>30){
-        t+=`  ${line.trim()}\n`;
-        line=w;
-      } else {
-        line=(line?line+' ':'')+w;
-      }
-    }
-    if(line)t+=`  ${line.trim()}\n`;
+    _wrapWords(pedido.notas,TICKET_COLS-2).forEach(l=>{t+=`  ${l}\n`;});
     t+=sep+'\n';
   }
   if(pedido.costoEnvio>0)t+=`  Envio:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
   t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
-  t+=`  ${NEGOCIO.direccion}\n  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
+  _wrapWords(NEGOCIO.direccion,TICKET_COLS-2).forEach(l=>{t+=`  ${l}\n`;});
+  t+=`  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
   return sanitize(t);
 }
 
@@ -3538,22 +3556,88 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
   </div>);
 }
 
-function shareWhatsApp(pedido){
-  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
-  let msg=`*K'apul'Its* - Pedido #${String(pedido.numero).padStart(3,'0')}\n`;
-  msg+=`${pedido.fecha} · ${pedido.hora}\n`;
-  if(pedido.cliente)msg+=`Cliente: ${pedido.cliente}\n`;
-  if(pedido.telefono)msg+=`Tel: ${pedido.telefono}\n`;
-  msg+=`${tarifa.emoji} ${tarifa.label}\n`;
-  if(pedido.direccion)msg+=`Dir: ${pedido.direccion}\n`;
-  msg+=`---\n`;
-  pedido.items.forEach(i=>{msg+=`${i.cantidad}x ${i.nombre} - ${fmt(i.subtotal)}\n`;});
-  msg+=`---\n`;
-  if(pedido.costoEnvio>0)msg+=`Envio: ${fmt(pedido.costoEnvio)}\n`;
-  msg+=`*TOTAL: ${fmt(pedido.total)}*\n`;
-  if(pedido.notas)msg+=`Nota: ${pedido.notas}\n`;
-  msg+=`\nTel.: ${NEGOCIO.telefono}`;
-  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`,'_blank');
+// Dibuja el ticket como IMAGEN (canvas -> PNG). Se comparte tal cual por
+// WhatsApp (imagen que se ve bien en el chat), no texto que pierde formato.
+// Estilo recibo monospace, precios alineados a la derecha, texto largo envuelto
+// por palabra. Devuelve Promise<Blob>.
+function buildTicketImage(pedido){
+  return new Promise((resolve,reject)=>{try{
+    const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+    const COLS=32; // mismo ancho que el ticket impreso
+    // Construir filas: center | lr (izq/der) | left | sep | space
+    const rows=[];
+    const wrapLeft=(label,value)=>{const inner=COLS,vw=Math.max(6,inner-label.length),ls=_wrapWords(value,vw),hang=' '.repeat(label.length);
+      rows.push({t:'left',s:label+(ls[0]||'')});for(let i=1;i<ls.length;i++)rows.push({t:'left',s:hang+ls[i]});};
+    rows.push({t:'center',s:"K'apul'Its",b:true,size:34});
+    rows.push({t:'center',s:'Birria y algo mas',size:20,c:'#7a6255'});
+    rows.push({t:'sep'});
+    rows.push({t:'center',s:`PEDIDO #${String(pedido.numero).padStart(3,'0')}`,b:true,size:24});
+    rows.push({t:'center',s:`${pedido.fecha}   ${pedido.hora}`,size:18,c:'#7a6255'});
+    rows.push({t:'space'});
+    if(pedido.cliente)wrapLeft('Cliente: ',pedido.cliente);
+    if(pedido.telefono)rows.push({t:'left',s:'Tel: '+pedido.telefono});
+    const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
+    wrapLeft(tipoTxt+' ',tarifa.label);
+    if(pedido.direccion)wrapLeft('Dir: ',pedido.direccion);
+    rows.push({t:'sep'});
+    pedido.items.forEach(i=>{rows.push({t:'lr',l:`${i.cantidad}x ${i.nombre}`,r:fmt(i.subtotal)});});
+    rows.push({t:'sep'});
+    if(pedido.notas){rows.push({t:'left',s:'Notas:'});_wrapWords(pedido.notas,COLS).forEach(l=>rows.push({t:'left',s:l}));rows.push({t:'sep'});}
+    if(pedido.costoEnvio>0)rows.push({t:'lr',l:'Envio',r:fmt(pedido.costoEnvio)});
+    rows.push({t:'lr',l:'TOTAL',r:fmt(pedido.total),b:true,size:26});
+    rows.push({t:'sep'});
+    _wrapWords(NEGOCIO.direccion,COLS).forEach(l=>rows.push({t:'center',s:l,size:15,c:'#7a6255'}));
+    rows.push({t:'center',s:'Tel.: '+NEGOCIO.telefono,size:15,c:'#7a6255'});
+    rows.push({t:'space'});
+    rows.push({t:'center',s:'Gracias por tu compra!',b:true,size:18});
+    // Layout
+    const scale=2, W=520, pad=34, cw=W-pad*2;
+    const baseFont=(size,b)=>`${b?'bold ':''}${size||20}px "Courier New",ui-monospace,monospace`;
+    const gap=r=>r.t==='sep'?26:r.t==='space'?16:Math.round((r.size||20)*1.5);
+    let H=pad*2; rows.forEach(r=>{H+=gap(r);});
+    const cv=document.createElement('canvas');cv.width=W*scale;cv.height=H*scale;
+    const g=cv.getContext('2d');g.scale(scale,scale);
+    g.fillStyle='#fffdf9';g.fillRect(0,0,W,H);
+    g.textBaseline='alphabetic';
+    let y=pad;
+    rows.forEach(r=>{
+      const h=gap(r);y+=h;const cy=y-Math.round(h*0.28);
+      if(r.t==='sep'){g.strokeStyle='#c9b79c';g.lineWidth=1;g.setLineDash([4,4]);g.beginPath();g.moveTo(pad,y-h/2);g.lineTo(W-pad,y-h/2);g.stroke();g.setLineDash([]);return;}
+      if(r.t==='space')return;
+      g.fillStyle=r.c||'#2f1d17';g.font=baseFont(r.size,r.b);
+      if(r.t==='center'){g.textAlign='center';g.fillText(r.s,W/2,cy);}
+      else if(r.t==='left'){g.textAlign='left';g.fillText(r.s,pad,cy);}
+      else if(r.t==='lr'){g.textAlign='left';let left=r.l;
+        // truncar nombre si choca con el precio
+        while(left.length>3&&g.measureText(left).width>cw-g.measureText(r.r).width-16)left=left.slice(0,-1);
+        if(left!==r.l)left=left.slice(0,-1)+'…';
+        g.fillText(left,pad,cy);g.textAlign='right';g.fillText(r.r,W-pad,cy);}
+    });
+    cv.toBlob(b=>b?resolve(b):reject(new Error('toBlob null')),'image/png');
+  }catch(e){reject(e);}});
+}
+// Comparte el ticket como IMAGEN por WhatsApp (share sheet nativo). Si el
+// dispositivo no soporta compartir archivos, descarga el PNG para adjuntarlo.
+async function shareWhatsApp(pedido){
+  const num=String(pedido.numero).padStart(3,'0');
+  try{
+    const blob=await buildTicketImage(pedido);
+    const file=new File([blob],`pedido-${num}.png`,{type:'image/png'});
+    const titulo=`Pedido #${num} · K'apul'Its`;
+    if(navigator.canShare&&navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:titulo,text:titulo});
+      return;
+    }
+    // Respaldo: descargar la imagen para adjuntarla manualmente
+    const url=URL.createObjectURL(blob);const a=document.createElement('a');
+    a.href=url;a.download=`pedido-${num}.png`;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1500);
+    if(_showToast)_showToast('Imagen del ticket guardada: adjúntala en WhatsApp','green');
+  }catch(e){
+    if(e&&e.name==='AbortError')return; // el usuario cerro el share sheet
+    console.error('shareWhatsApp',e);
+    if(_showToast)_showToast('No se pudo generar la imagen del ticket','red');
+  }
 }
 
 function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWhatsApp,showEntregar=true,compact=false}){
@@ -4959,8 +5043,9 @@ function ProductoForm({onSave}){
 }
 
 // ─── APP ────────────────────────────────────────────────────────────
-// Global callback for preview fallback
+// Global callbacks (preview fallback y toast desde funciones fuera de React)
 let _showTicketPreview=null;
+let _showToast=null;
 
 function App(){
   const [page,_setPage]=useState('dashboard');
@@ -4976,8 +5061,8 @@ function App(){
   const [toast,setToast]=useState(null);
   const [previewPedido,setPreviewPedido]=useState(null);
   const showToast=(msg,color='green')=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
-  // Register global preview callback
-  useEffect(()=>{_showTicketPreview=(pedido)=>setPreviewPedido(pedido);return()=>{_showTicketPreview=null;};},[]);
+  // Register global preview + toast callbacks
+  useEffect(()=>{_showTicketPreview=(pedido)=>setPreviewPedido(pedido);_showToast=showToast;return()=>{_showTicketPreview=null;_showToast=null;};},[]);
   // Auto-conectar impresora al arrancar (BT o USB)
   useEffect(()=>{
     _onPrinterStateChange=(s)=>{actualizarImpresora({conectada:!!s.conectada,reconectando:!!s.reconectando});};
