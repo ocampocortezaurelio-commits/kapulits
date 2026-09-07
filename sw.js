@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20260817b-ticket-imagen';
+const CACHE_NAME = 'kapulits-assets-v20260907-mesas-rondas';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [

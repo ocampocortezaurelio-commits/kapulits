@@ -155,6 +155,23 @@
     box-shadow:var(--shadow-soft);
     border-radius:24px;
   }
+  /* Contraste por tipo de servicio (se lee de un vistazo cual es cual):
+     mesa = naranja fuerte, para llevar/envio = tarjeta neutra de siempre,
+     cobrado = gris apagado y compacto para que no compita con lo pendiente. */
+  .card-mesa{
+    background:linear-gradient(180deg, rgba(255,232,205,.99), rgba(250,213,173,.97));
+    border:1px solid rgba(215,101,22,.38);
+    box-shadow:0 12px 28px rgba(178,69,24,.16);
+    border-radius:24px;
+  }
+  .card-cobrado{
+    background:linear-gradient(180deg, rgba(243,239,234,.96), rgba(233,228,221,.94));
+    border:1px solid rgba(120,100,86,.18);
+    box-shadow:none;
+    border-radius:20px;
+  }
+  .card-cobrado .card-folio,.card-cobrado .card-total{color:#6d5c51}
+  .card-mesa .card-folio{color:#8f3708}
   .surface-card-strong{
     background:linear-gradient(180deg, rgba(255,248,238,.98), rgba(246,233,217,.96));
     border:1px solid rgba(221,192,161,.7);
@@ -252,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -318,12 +335,25 @@ const TARIFAS_ENVIO = {
   recoger: {label:'Pasa a recoger',precio:0,emoji:'🏃'},
   zona_centro: {label:'Envío Zona Centro',precio:30,emoji:'🛵'},
   retirado: {label:'Envío Retirado',precio:45,emoji:'🚗'},
-  mesa_1: {label:'Mesa 1 · Afuera',precio:0,emoji:'🪑'},
+  mesa_1: {label:'Mesa 1 · Adentro',precio:0,emoji:'🍽️'},
   mesa_2: {label:'Mesa 2 · Adentro',precio:0,emoji:'🍽️'},
+  mesa_3: {label:'Mesa 3 · Afuera',precio:0,emoji:'🪑'},
+  mesa_4: {label:'Mesa 4 · Afuera',precio:0,emoji:'🪑'},
 };
+// Etiquetas ORIGINALES de mesa antes de habilitar 4 mesas (2 adentro / 2 afuera).
+// hydrateState congela la etiqueta de entonces en cada pedido historico para que
+// reportes, cierres e impresiones NO reescriban el pasado con la numeracion nueva.
+const TIPO_LABEL_LEGACY={mesa_1:'Mesa 1 · Afuera',mesa_2:'Mesa 2 · Adentro'};
+// Etiqueta visible de un pedido: la congelada al crearlo manda sobre el catalogo.
+const tipoLabelDe=p=>(p&&p.tipoLabel)||TARIFAS_ENVIO[p&&p.tipoEntrega]?.label||(p&&p.tipoEntrega)||'';
 // Mesa = cuenta abierta en local (tarifa 0). Reutiliza todo el flujo de pedido:
-// el pedido queda "nuevo" hasta cobrar; se le agregan platillos con Editar.
-const esMesa=t=>t==='mesa_1'||t==='mesa_2';
+// el pedido queda "nuevo" hasta cobrar; se le agregan rondas con "Agregar".
+const esMesa=t=>/^mesa_/.test(String(t||''));
+// Rondas de un pedido: tandas de platillos pedidas en momentos distintos. Los
+// pedidos previos a esta version no las tienen: su unica ronda son sus items.
+const rondasDe=p=>(Array.isArray(p&&p.rondas)&&p.rondas.length)
+  ?p.rondas
+  :[{id:'r1',n:1,hora:(p&&p.hora)||'',mesero:(p&&p.mesero)||'',items:(p&&p.items)||[]}];
 // Un pedido necesita direccion cuando lo recoge un repartidor/servicio (recoger
 // o envio), no cuando se come en mesa.
 const necesitaDireccion=t=>!esMesa(t);
@@ -424,6 +454,10 @@ const INITIAL_STATE = {
   empleados:EMPLEADOS_DEFAULT,
   gastosFijos:[{id:'renta',nombre:'Renta',monto:0},{id:'luz',nombre:'Luz',monto:0},{id:'gas_fijo',nombre:'Gas (fijo)',monto:0}],
   impresora:{tipo:null,nombre:null,conectada:false,autoImprimir:true},
+  // Cola de impresion COMPARTIDA entre dispositivos. El mesero encola desde su
+  // telefono; el dispositivo que tenga la impresora conectada la imprime solo.
+  // Asi el pedido llega a cocina sin que nadie toque la computadora.
+  colaImpresion:[],
 };
 const DEVICE_INFO_KEY='kapulits_device_v1';
 const DIRTY_KEY='kapulits_dirty_v1';
@@ -534,9 +568,21 @@ function _mergePedidos(cloud,local){
   let maxNum=Math.max(0,...list.map(p=>p.numero||0));
   for(const peds of byNum.values()){
     if(peds.length>1){
-      // Conservar el primero por hora; renumerar los demas
-      peds.sort((a,b)=>String(a.hora||'').localeCompare(String(b.hora||'')));
-      for(let i=1;i<peds.length;i++){maxNum++;peds[i].numero=maxNum;}
+      // DETERMINISTA: todos los dispositivos deben llegar al MISMO resultado o
+      // el folio queda distinto en cada pantalla (era el bug de "el ticket dice
+      // 5 y la app dice 4"). Antes se ordenaba por `hora` ("10:51 a.m."), que no
+      // es comparable como texto. Ahora manda `_ts` (ISO) y desempata `id`.
+      peds.sort((a,b)=>String(a._ts||'').localeCompare(String(b._ts||''))||String(a.id||'').localeCompare(String(b.id||'')));
+      for(let i=1;i<peds.length;i++){
+        maxNum++;
+        const p=peds[i];
+        const idx=list.indexOf(p);
+        // No mutar el objeto que llego de la nube: se clona y se conserva el
+        // folio que YA SE IMPRIMIO, para poder buscar el ticket de papel.
+        const folios=Array.isArray(p.foliosPrevios)?p.foliosPrevios.slice():[];
+        if(p.numero&&!folios.includes(p.numero))folios.push(p.numero);
+        list[idx]={...p,numero:maxNum,foliosPrevios:folios};
+      }
     }
   }
   return list.sort((a,b)=>(a.numero||0)-(b.numero||0));
@@ -655,13 +701,17 @@ function _repairHistoricalState(state){
 function _mergeJornada(cloud,local){
   if(!cloud)return local;
   if(!local)return cloud;
+  const pedidos=_mergePedidos(cloud.pedidos||[],local.pedidos||[]);
+  // El contador SIEMPRE debe quedar por encima del folio mas alto ya asignado:
+  // si el merge renumero una colision, max(cloud,local) volvia a repartir un
+  // folio ya entregado en papel.
+  const maxFolio=Math.max(0,...pedidos.map(p=>p.numero||0));
   return {
-    ...cloud,...local,
-    pedidos:_mergePedidos(cloud.pedidos||[],local.pedidos||[]),
+    ...cloud,...local,pedidos,
     mandaditos:_mergeById(cloud.mandaditos||[],local.mandaditos||[]),
     gastos:_mergeById(cloud.gastos||[],local.gastos||[]),
     ventas:_repairVentas(_mergeById(cloud.ventas||[],local.ventas||[])),
-    contadorPedido:Math.max(cloud.contadorPedido||0,local.contadorPedido||0)
+    contadorPedido:Math.max(cloud.contadorPedido||0,local.contadorPedido||0,maxFolio+1)
   };
 }
 function _getAperturaMs(j){
@@ -715,7 +765,10 @@ function _mergeStates(cloud,local){
     jornadaActiva:_mergeJornadaActiva(cloud.jornadaActiva,local.jornadaActiva,local),
     // Clientes frecuentes son base de datos compartida y creciente: merge por id
     // (gana el _ts mas reciente) para no perder altas hechas en otro dispositivo.
-    clientes:_mergeById(cloud.clientes||[],local.clientes||[])
+    clientes:_mergeById(cloud.clientes||[],local.clientes||[]),
+    // La cola de impresion es compartida: union por id para no perder trabajos
+    // encolados por un mesero mientras la caja estaba offline.
+    colaImpresion:_mergeById(cloud.colaImpresion||[],local.colaImpresion||[])
     // productos, costos, empleados, gastosFijos, impresora: last-write-wins
     // del spread de arriba (cambios de configuracion son raros)
   };
@@ -1043,15 +1096,36 @@ function _reconcileVentasFromPedidos(j){
   });
   return changed?{...j,ventas,mandaditos}:j;
 }
+// Poda de la cola de impresion. NO borra los trabajos ya impresos de inmediato:
+// si se borraran, el merge por union con otro dispositivo que aun tiene la copia
+// pendiente los resucitaria y se imprimirian dos veces. Se van por edad (12 h).
+function _prunePrintQueue(cola){
+  const list=Array.isArray(cola)?cola:[];
+  const limite=Date.now()-12*60*60*1000;
+  return list.filter(j=>j&&j.id&&(Number(j.ts)||0)>limite).slice(-200);
+}
+// Congela en el pedido la etiqueta de mesa que tenia cuando se creo. Sin esto,
+// renumerar las mesas reescribiria el historico (un pedido de "Mesa 1 · Afuera"
+// pasaria a leerse "Mesa 1 · Adentro" en reportes y reimpresiones).
+function _freezeTipoLabel(j){
+  if(!j||!Array.isArray(j.pedidos))return j;
+  let changed=false;
+  const pedidos=j.pedidos.map(p=>{
+    if(p&&!p.tipoLabel&&TIPO_LABEL_LEGACY[p.tipoEntrega]){changed=true;return{...p,tipoLabel:TIPO_LABEL_LEGACY[p.tipoEntrega]};}
+    return p;
+  });
+  return changed?{...j,pedidos}:j;
+}
 function hydrateState(p){
   const base={...INITIAL_STATE,...p,
+    colaImpresion:_prunePrintQueue(p?.colaImpresion),
     productos:migrateProducts(p?.productos||PRODUCTOS_DEFAULT,p?.catalogVersion),
     catalogVersion:CATALOG_VERSION,
     clientes:Array.isArray(p?.clientes)?p.clientes:[],
     costos:p?.costos||COSTOS_DEFAULT,
     empleados:p?.empleados||EMPLEADOS_DEFAULT,
     impresora:{...INITIAL_STATE.impresora,...(p?.impresora||{}),conectada:false,reconectando:false}};
-  const fix=j=>_reconcileVentasFromPedidos(_backfillMandaditoMetodo(j));
+  const fix=j=>_freezeTipoLabel(_reconcileVentasFromPedidos(_backfillMandaditoMetodo(j)));
   base.jornadas=(base.jornadas||[]).map(fix);
   if(base.jornadaActiva)base.jornadaActiva=fix(base.jornadaActiva);
   return _autoCloseExpired(base);
@@ -1293,17 +1367,31 @@ function useStore(){
     try{exportJornadaXLSX(ja);}catch(e){}
   },[state,save]);
 
-  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir)=>{
+  // Trabajo de impresion para la cola compartida. tipo 'completo' = la cuenta
+  // entera; 'ronda' = SOLO la tanda nueva (lo que va a cocina).
+  const _nuevoJob=useCallback((pedidoId,tipo,rondaId)=>({
+    id:uid(),_ts:new Date().toISOString(),ts:Date.now(),
+    pedidoId,tipo,rondaId:rondaId||null,origen:deviceInfo.id,impreso:false
+  }),[deviceInfo.id]);
+
+  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir,mesero)=>{
     if(!state.jornadaActiva)return null;
     const ja=state.jornadaActiva;
     const totalProductos=items.reduce((s,i)=>s+i.subtotal,0);
     const tarifa=TARIFAS_ENVIO[tipoEntrega]||TARIFAS_ENVIO.recoger;
     const costoEnvio=tarifa.precio;
-    const pedido={id:uid(),numero:ja.contadorPedido,fecha:ja.fecha,hora:now(),_ts:new Date().toISOString(),
+    // El folio nunca puede repetir uno ya asignado en esta jornada: si un merge
+    // renumero una colision, contadorPedido podia haber quedado por detras.
+    const folio=Math.max(Number(ja.contadorPedido)||1,...(ja.pedidos||[]).map(p=>(Number(p.numero)||0)+1),1);
+    const stamp=new Date().toISOString();
+    const rondaInicial={id:uid(),n:1,hora:now(),_ts:stamp,mesero:mesero||'',items};
+    const pedido={id:uid(),numero:folio,fecha:ja.fecha,hora:now(),_ts:stamp,
       items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
-      tipoEntrega,cliente:cliente||'',telefono:telefono||'',direccion:direccion||'',notas:notas||'',
+      tipoEntrega,tipoLabel:(TARIFAS_ENVIO[tipoEntrega]||{}).label||tipoEntrega,
+      mesero:mesero||'',rondas:[rondaInicial],
+      cliente:cliente||'',telefono:telefono||'',direccion:direccion||'',notas:notas||'',
       estado:'nuevo',cobrado:false,metodoPago:null};
-    const jaNew={...ja,pedidos:[...ja.pedidos,pedido],contadorPedido:ja.contadorPedido+1};
+    const jaNew={...ja,pedidos:[...ja.pedidos,pedido],contadorPedido:folio+1};
     if(costoEnvio>0){
       jaNew.mandaditos=[...ja.mandaditos,{id:uid(),pedidoId:pedido.id,pedidoNum:pedido.numero,
         hora:now(),cliente:pedido.cliente,telefono:pedido.telefono,direccion:pedido.direccion,
@@ -1312,11 +1400,16 @@ function useStore(){
     const js=state.jornadas.map(j=>j.id===jaNew.id?jaNew:j);
     // Al crear el pedido se guarda/actualiza el cliente frecuente por telefono.
     const clientes=upsertClienteList(state.clientes,{telefono,nombre:cliente,direccion,etiqueta:etiquetaDir});
-    save({...state,clientes,jornadas:js,jornadaActiva:jaNew});
+    // Auto-imprimir = encolar. El dispositivo con impresora (aunque sea otro)
+    // lo saca de la cola y lo imprime: el mesero no depende de la computadora.
+    const cola=state.impresora?.autoImprimir!==false
+      ?_prunePrintQueue([...(state.colaImpresion||[]),_nuevoJob(pedido.id,'completo',rondaInicial.id)])
+      :(state.colaImpresion||[]);
+    save({...state,clientes,jornadas:js,jornadaActiva:jaNew,colaImpresion:cola});
     return pedido;
-  },[state,save]);
+  },[state,save,_nuevoJob]);
 
-  const actualizarPedido=useCallback((pedidoId,cambios)=>{
+  const actualizarPedido=useCallback((pedidoId,cambios,opts)=>{
     if(!state.jornadaActiva)return;
     const ja={...state.jornadaActiva};
     const pedOld=ja.pedidos.find(p=>p.id===pedidoId);
@@ -1411,8 +1504,61 @@ function useStore(){
     const clientes=(cambios.telefono||cambios.cliente||cambios.direccion)&&pedFin
       ?upsertClienteList(state.clientes,{telefono:pedFin.telefono,nombre:pedFin.cliente,direccion:pedFin.direccion,etiqueta:cambios.etiquetaDir})
       :state.clientes;
-    save({...state,clientes,jornadas:js,jornadaActiva:ja});
+    // El trabajo de impresion viaja en el MISMO save que el cambio del pedido:
+    // dos save() seguidos en el mismo tick perderian uno de los dos (closure).
+    const cola=opts&&opts.printJob
+      ?_prunePrintQueue([...(state.colaImpresion||[]),opts.printJob])
+      :(state.colaImpresion||[]);
+    save({...state,clientes,jornadas:js,jornadaActiva:ja,colaImpresion:cola});
   },[state,save]);
+
+  // ─── RONDAS: el cliente pide mas durante el servicio ────────────────
+  // La fuente de verdad del dinero sigue siendo pedido.items (todo lo consumido).
+  // La ronda solo registra CUANDO y QUIEN tomo cada tanda, para imprimir a cocina
+  // solo lo nuevo y para desglosar la cuenta completa al final.
+  const agregarItemsPedido=useCallback((pedidoId,nuevosItems,mesero)=>{
+    if(!state.jornadaActiva)return null;
+    const ped=(state.jornadaActiva.pedidos||[]).find(p=>p.id===pedidoId);
+    if(!ped||!Array.isArray(nuevosItems)||!nuevosItems.length)return null;
+    const its=nuevosItems.map(i=>buildItem(i));
+    const merged=(ped.items||[]).map(i=>({...i}));
+    for(const n of its){
+      const k=n.id||n.productoId;
+      const ex=merged.find(m=>!m.esVariado&&!n.esVariado&&(m.id||m.productoId)===k&&Number(m.precio)===Number(n.precio));
+      if(ex){ex.cantidad=(Number(ex.cantidad)||0)+(Number(n.cantidad)||0);ex.subtotal=_roundMoney(ex.cantidad*(Number(ex.precio)||0));}
+      else merged.push({...n});
+    }
+    const previas=rondasDe(ped);
+    const ronda={id:uid(),n:previas.length+1,hora:now(),_ts:new Date().toISOString(),mesero:mesero||'',items:its};
+    const job=state.impresora?.autoImprimir!==false?_nuevoJob(pedidoId,'ronda',ronda.id):null;
+    actualizarPedido(pedidoId,{items:merged,rondas:[...previas,ronda]},{printJob:job});
+    return ronda;
+  },[state,actualizarPedido,_nuevoJob]);
+
+  // Encola una reimpresion manual de la cuenta completa.
+  const encolarImpresion=useCallback(pedidoId=>{
+    const job=_nuevoJob(pedidoId,'completo');
+    save({...state,colaImpresion:_prunePrintQueue([...(state.colaImpresion||[]),job])});
+    return job;
+  },[state,save,_nuevoJob]);
+
+  // Marca trabajos como impresos (los ejecuta el dispositivo con impresora).
+  const marcarImpresion=useCallback(ids=>{
+    const set=new Set(ids);
+    const stamp=new Date().toISOString();
+    const cola=_prunePrintQueue((state.colaImpresion||[]).map(j=>
+      set.has(j.id)?{...j,impreso:true,impresoPor:deviceInfo.id,_ts:stamp}:j));
+    save({...state,colaImpresion:cola});
+  },[state,save,deviceInfo.id]);
+
+  // Mesero que atiende en ESTE dispositivo. Vive en el dispositivo (no se
+  // sincroniza): cada telefono tiene su propio mesero al frente.
+  const setMesero=useCallback((id,nombre)=>{
+    const next={...deviceInfo,meseroId:id||'',meseroNombre:nombre||''};
+    saveDeviceInfo(next);
+    setDeviceInfo(next);
+    return next;
+  },[deviceInfo]);
 
   const registrarGasto=useCallback((categoria,descripcion,monto,enEfectivo=true)=>{
     if(!state.jornadaActiva)return;
@@ -1537,6 +1683,7 @@ function useStore(){
   const eliminarClientes=useCallback((ids)=>{const set=new Set(ids||[]);if(!set.size)return;save({...state,clientes:(state.clientes||[]).filter(c=>!set.has(c.id))});},[state,save]);
 
   return{state,syncStatus,remoteNotice,cloudRecovery,setCloudRecovery,lastCloudAt,deviceInfo,saveError,abrirJornada,cerrarJornada,crearPedido,actualizarPedido,
+    agregarItemsPedido,encolarImpresion,marcarImpresion,setMesero,
     registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
@@ -1702,7 +1849,7 @@ function ProductChip({id,cat,size=24,pad=14}){
     style={{background:'#fbf4ea',border:'1px solid rgba(221,192,161,.55)',width:size+pad,height:size+pad}}>
     <TwemojiIcon code={st.emoji} size={size}/></span>);
 }
-const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'sun',mesa_2:'home'};
+const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'home',mesa_2:'home',mesa_3:'sun',mesa_4:'sun'};
 
 // ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
 function analyzeHistorico(jornadas,productos){
@@ -2045,6 +2192,10 @@ let _keepaliveTimer=null;
 let _reconnectTimer=null;
 let _reconnectAttempt=0;
 let _onPrinterStateChange=null;
+// Trabajos de impresion que este dispositivo ya esta enviando o envio en esta
+// sesion. Evita imprimir dos veces el mismo ticket si un merge de la nube
+// devuelve el trabajo como pendiente antes de que se propague la marca.
+const _jobsEnVuelo=new Set();
 const BT_SERVICES=['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455'];
 
 // ─── USB PRINTER ───────────────────────────────────────────────────
@@ -2131,11 +2282,10 @@ function _handleDisconnect(){
 function _scheduleReconnect(){
   if(_reconnectTimer)clearTimeout(_reconnectTimer);
   _reconnectAttempt++;
-  if(_reconnectAttempt>8){
-    if(_onPrinterStateChange)_onPrinterStateChange({conectada:false,reconectando:false});
-    return;
-  }
-  const delay=Math.min(1000*Math.pow(2,_reconnectAttempt-1),20000);
+  // Sin tope de intentos. Antes se rendia a los 8 y la impresora quedaba muerta
+  // hasta reiniciar la app: esa era la causa real del "se desconecta muchisimo".
+  // El backoff se estanca en 30 s, que no calienta bateria ni satura el GATT.
+  const delay=Math.min(1000*Math.pow(2,Math.min(_reconnectAttempt,5)),30000);
   _reconnectTimer=setTimeout(async()=>{
     const ok=await reconnectBluetooth();
     if(ok){
@@ -2187,6 +2337,17 @@ async function reconnectBluetooth(){
   return false;
 }
 
+// Android suspende el GATT al apagar la pantalla y el temporizador solo no
+// siempre alcanza: al volver el foco, la visibilidad o la red, se reintenta ya.
+function _wakeReconnect(){
+  if(printerCharacteristic||document.hidden||!_btDevice)return;
+  _reconnectAttempt=0;
+  _scheduleReconnect();
+}
+document.addEventListener('visibilitychange',_wakeReconnect);
+window.addEventListener('online',_wakeReconnect);
+window.addEventListener('focus',_wakeReconnect);
+
 // Auto-conectar al arrancar la app sin mostrar prompt (usa dispositivos ya autorizados)
 async function tryAutoConnectPrinter(){
   if(!navigator.bluetooth?.getDevices)return false;
@@ -2210,7 +2371,7 @@ function buildTicketHTML(pedido){
   h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
   if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
   if(pedido.telefono)h+=`<div>Tel: ${pedido.telefono}</div>`;
-  h+=`<div>Tipo: ${tarifa.label}</div>`;
+  h+=`<div>Tipo: ${tipoLabelDe(pedido)}</div>`;
   if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
   h+=`<div class="s"></div>`;
   pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
@@ -2248,7 +2409,7 @@ function buildTicketsHTML(pedidos=[]){
     h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
     if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
     if(pedido.telefono)h+=`<div>Tel: ${pedido.telefono}</div>`;
-    h+=`<div>Tipo: ${tarifa.label}</div>`;
+    h+=`<div>Tipo: ${tipoLabelDe(pedido)}</div>`;
     if(pedido.direccion)h+=`<div>${pedido.direccion}</div>`;
     h+=`<div class="s"></div>`;
     pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
@@ -2294,21 +2455,43 @@ function _ticketField(label,value,cols=TICKET_COLS){
   for(let i=1;i<lines.length;i++)s+=base+hang+lines[i]+'\n';
   return s;
 }
-function _buildBTText(pedido){
-  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
+const _lineaItem=i=>` ${String(i.cantidad).padStart(2)}x ${String(i.nombre||'').substring(0,18).padEnd(18)} ${fmt(i.subtotal).padStart(7)}\n`;
+// opts.ronda -> ticket de ACTUALIZACION: solo lo nuevo, para cocina. Sin total
+// de la cuenta (evita que alguien cobre una ronda suelta como si fuera todo).
+// Sin opts -> cuenta completa; si hubo varias rondas, se desglosan por tanda.
+function _buildBTText(pedido,opts){
+  const ronda=opts&&opts.ronda;
   const sep='-'.repeat(TICKET_COLS);
+  const rondas=rondasDe(pedido);
   let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
-  t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}\n  ${pedido.fecha}  ${pedido.hora}\n`;
+  if(ronda)t+=`  ** ACTUALIZACION DE PEDIDO **\n`;
+  t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}`;
+  t+=ronda?`   RONDA ${ronda.n||''}\n`:`\n`;
+  t+=`  ${pedido.fecha}  ${ronda?(ronda.hora||pedido.hora):pedido.hora}\n`;
   if(pedido.cliente)t+=_ticketField('Cliente: ',pedido.cliente);
-  if(pedido.telefono)t+=`  Tel: ${pedido.telefono}\n`;
+  if(pedido.telefono&&!ronda)t+=`  Tel: ${pedido.telefono}\n`;
   const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
-  t+=_ticketField(tipoTxt+' ',tarifa.label);
-  if(pedido.direccion)t+=_ticketField('Dir: ',pedido.direccion);
+  t+=_ticketField(tipoTxt+' ',tipoLabelDe(pedido));
+  const mesero=(ronda&&ronda.mesero)||pedido.mesero;
+  if(mesero)t+=_ticketField('Atiende: ',mesero);
+  if(pedido.direccion&&!ronda)t+=_ticketField('Dir: ',pedido.direccion);
   t+=sep+'\n';
-  pedido.items.forEach(i=>{
-    const nom=i.nombre.substring(0,18).padEnd(18);
-    t+=` ${String(i.cantidad).padStart(2)}x ${nom} ${fmt(i.subtotal).padStart(7)}\n`;
-  });
+  if(ronda){
+    (ronda.items||[]).forEach(i=>{t+=_lineaItem(i);});
+    t+=sep+'\n';
+    const sub=(ronda.items||[]).reduce((a,i)=>a+(Number(i.subtotal)||0),0);
+    t+=`  Suma ronda:   ${fmt(sub).padStart(10)}\n`;
+    t+=`  (Solo lo agregado; la cuenta\n   completa se imprime al cobrar)\n${sep}\n\n\n`;
+    return sanitize(t);
+  }
+  if(rondas.length>1){
+    rondas.forEach(r=>{
+      t+=(`  Ronda ${r.n||''}${r.hora?'  '+r.hora:''}${r.mesero?'  '+r.mesero:''}`).substring(0,TICKET_COLS)+'\n';
+      (r.items||[]).forEach(i=>{t+=_lineaItem(i);});
+    });
+  }else{
+    (pedido.items||[]).forEach(i=>{t+=_lineaItem(i);});
+  }
   t+=sep+'\n';
   if(pedido.notas){
     t+=`  Notas:\n`;
@@ -2327,32 +2510,38 @@ async function _sendToBT(text){
   for(let i=0;i<data.length;i+=100){await printerCharacteristic.writeValue(data.slice(i,i+100));}
 }
 
-async function printTicket(pedido){
-  snd.print();
-  const ticket=_buildBTText(pedido);
-  // Intentar Bluetooth
+// Unica ruta de salida al papel: BT (con reconexion) y si no, USB. Devuelve
+// false cuando NO se pudo imprimir, para que la cola no marque el trabajo como
+// hecho y lo reintente cuando la impresora vuelva.
+async function _sendRaw(text){
   if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
     await reconnectBluetooth();
   }
   if(printerCharacteristic){
-    try{
-      await _sendToBT(ticket);
-      return{success:true,method:'bluetooth'};
-    }catch(e){
+    try{await _sendToBT(text);return true;}
+    catch(e){
       printerCharacteristic=null;
       const ok=await reconnectBluetooth();
-      if(ok){try{await _sendToBT(ticket);return{success:true,method:'bluetooth'};}catch(e2){}}
+      if(ok){try{await _sendToBT(text);return true;}catch(e2){}}
     }
   }
-  // Intentar USB
   if(_usbDevice){
-    try{await _sendToUSB(ticket);return{success:true,method:'usb'};}
+    try{await _sendToUSB(text);return true;}
     catch(e){_usbDevice=null;_usbEndpoint=null;}
   }
   if(!_usbDevice&&navigator.usb?.getDevices){
     const ok=await tryAutoConnectUSB();
-    if(ok){try{await _sendToUSB(ticket);return{success:true,method:'usb'};}catch(e){}}
+    if(ok){try{await _sendToUSB(text);return true;}catch(e){}}
   }
+  return false;
+}
+// Este dispositivo tiene papel: solo el que lo tiene atiende la cola compartida.
+function tieneImpresora(){return!!(printerCharacteristic||_usbDevice);}
+
+async function printTicket(pedido,opts){
+  snd.print();
+  const ok=await _sendRaw(_buildBTText(pedido,opts));
+  if(ok)return{success:true,method:printerCharacteristic?'bluetooth':'usb'};
   // Fallback: preview en-app
   if(_showTicketPreview)_showTicketPreview(pedido);
   return{success:true,method:'preview'};
@@ -2364,26 +2553,8 @@ async function printTicketsJornada(jornada){
     .filter(p=>p&&p.estado!=='cancelado')
     .sort((a,b)=>(a.numero||0)-(b.numero||0));
   if(!pedidos.length)return{success:false,error:'Sin pedidos para imprimir'};
-  const text=pedidos.map(_buildBTText).join('\n\n');
-  if(!printerCharacteristic&&(_btDevice||navigator.bluetooth?.getDevices)){
-    await reconnectBluetooth();
-  }
-  if(printerCharacteristic){
-    try{await _sendToBT(text);return{success:true,method:'bluetooth',count:pedidos.length};}
-    catch(e){
-      printerCharacteristic=null;
-      const ok=await reconnectBluetooth();
-      if(ok){try{await _sendToBT(text);return{success:true,method:'bluetooth',count:pedidos.length};}catch(e2){}}
-    }
-  }
-  if(_usbDevice){
-    try{await _sendToUSB(text);return{success:true,method:'usb',count:pedidos.length};}
-    catch(e){_usbDevice=null;_usbEndpoint=null;}
-  }
-  if(!_usbDevice&&navigator.usb?.getDevices){
-    const ok=await tryAutoConnectUSB();
-    if(ok){try{await _sendToUSB(text);return{success:true,method:'usb',count:pedidos.length};}catch(e){}}
-  }
+  const text=pedidos.map(p=>_buildBTText(p)).join('\n\n');
+  if(await _sendRaw(text))return{success:true,method:printerCharacteristic?'bluetooth':'usb',count:pedidos.length};
   const w=window.open('','_blank','width=350,height=700');
   if(w){w.document.write(buildTicketsHTML(pedidos));w.document.close();w.focus();w.print();}
   return{success:true,method:'preview',count:pedidos.length};
@@ -2554,7 +2725,7 @@ function exportJornadaXLSX(ja){
     ].map(([campo,valor])=>({campo,valor}));
     const pedidos=(ja.pedidos||[]).map(p=>({
       numero:p.numero,hora:p.hora||'',cliente:p.cliente||'',telefono:p.telefono||'',
-      tipo:(TARIFAS_ENVIO[p.tipoEntrega]||{}).label||p.tipoEntrega||'',
+      tipo:tipoLabelDe(p),
       productos:money(p.totalProductos),envio:money(p.costoEnvio),total:money(p.total),
       metodo:p.metodoPago||'',cobrado:p.cobrado?'si':'no',estado:p.estado||'',notas:p.notas||''}));
     const ventas=(ja.ventas||[]).map(v=>({
@@ -3336,19 +3507,31 @@ function CartSummary({cart,costoEnvio,onAdd,onRem}){
 }
 
 function DeliverySelector({tipo,setTipo}){
-  // Sin iconos, sin relleno de color: boton plano. El seleccionado crece + aro
-  // de marca. Todos crecen al hover (efecto de crecimiento).
-  return(<div>
-    <p className="t-kicker mb-2">Tipo de pedido</p>
-    <div className="grid grid-cols-6 gap-2">
-      {Object.entries(TARIFAS_ENVIO).map(([k,v])=>{
-        const sel=tipo===k;const esMesa=k.startsWith('mesa');
-        return(<button key={k} onClick={()=>setTipo(k)} aria-pressed={sel} style={{background:'linear-gradient(180deg,#fff9f0,#fbeedb)'}}
-          className={`${esMesa?'col-span-3':'col-span-2'} py-3 min-h-[60px] rounded-xl border shadow-[0_5px_14px_rgba(120,60,15,.12)] flex flex-col items-center justify-center gap-0.5 transition-transform duration-200 hover:scale-[1.03] active:scale-95 ${sel?'scale-105 border-[var(--brand)] ring-2 ring-[var(--brand-strong)] ring-offset-2 ring-offset-[var(--surface)]':'border-[#ecd6bd]'}`}>
-          <span className="text-[11px] font-black leading-tight text-[var(--text)]">{v.label}</span>
-          {v.precio>0&&<span className="text-[10px] font-black text-[var(--brand-strong)]">+{fmt(v.precio)}</span>}
-        </button>);
-      })}
+  // Dos bloques separados: lo que SALE del negocio y lo que se consume AQUI.
+  // Boton plano; el seleccionado crece y toma el aro de marca.
+  const claseBtn=sel=>`py-3 min-h-[60px] rounded-xl border shadow-[0_5px_14px_rgba(120,60,15,.12)] flex flex-col items-center justify-center gap-0.5 transition-transform duration-200 hover:scale-[1.03] active:scale-95 ${sel?'scale-105 border-[var(--brand)] ring-2 ring-[var(--brand-strong)] ring-offset-2 ring-offset-[var(--surface)]':'border-[#ecd6bd]'}`;
+  const salida=Object.entries(TARIFAS_ENVIO).filter(([k])=>!esMesa(k));
+  const mesas=Object.entries(TARIFAS_ENVIO).filter(([k])=>esMesa(k));
+  return(<div className="space-y-3">
+    <div>
+      <p className="t-kicker mb-2">Para llevar o envío</p>
+      <div className="grid grid-cols-3 gap-2">
+        {salida.map(([k,v])=>(
+          <button key={k} onClick={()=>setTipo(k)} aria-pressed={tipo===k} style={{background:'linear-gradient(180deg,#fff9f0,#fbeedb)'}} className={claseBtn(tipo===k)}>
+            <span className="text-[11px] font-black leading-tight text-[var(--text)] text-center px-1">{v.label}</span>
+            {v.precio>0&&<span className="text-[10px] font-black text-[var(--brand-strong)]">+{fmt(v.precio)}</span>}
+          </button>))}
+      </div>
+    </div>
+    <div>
+      <p className="t-kicker mb-2">Mesa · comer aquí</p>
+      <div className="grid grid-cols-4 gap-2">
+        {mesas.map(([k,v])=>(
+          <button key={k} onClick={()=>setTipo(k)} aria-pressed={tipo===k} style={{background:'linear-gradient(180deg,#ffeeda,#fbdcbb)'}} className={claseBtn(tipo===k)}>
+            <span className="text-[15px] font-black leading-none text-[#8f3708]">{v.label.split(' · ')[0].replace('Mesa ','')}</span>
+            <span className="text-[9px] font-bold uppercase tracking-[.1em] text-[var(--text-soft)]">{v.label.split(' · ')[1]||''}</span>
+          </button>))}
+      </div>
     </div>
   </div>);
 }
@@ -3480,10 +3663,66 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
 }
 
 // ─── PEDIDOS ────────────────────────────────────────────────────────
-function PedidosPage({state,onCrearPedido,onActualizarPedido}){
+// Filtros del listado. "Todos" es la vista de siempre (no confunde a quien
+// apenas entra); los demas aislan mesas activas, pedidos que salen y cobrados.
+const FILTROS_PEDIDO=[
+  {id:'todos',l:'Todos'},
+  {id:'mesas',l:'Comer aquí'},
+  {id:'llevar',l:'Para llevar'},
+  {id:'cobrados',l:'Cobrados'},
+];
+
+// Quien atiende en ESTE dispositivo. Se guarda por dispositivo (no se sincroniza):
+// cada telefono lleva su mesero al frente y queda en el pedido y en el ticket.
+function MeseroModal({open,empleados,meseroId,onClose,onElegir}){
+  const lista=(empleados||[]).filter(e=>e&&e.nombre);
+  return(<Modal open={open} onClose={onClose} title="¿Quién atiende?">
+    <div className="space-y-2">
+      <p className="text-xs text-[var(--text-soft)] mb-2">Queda registrado en el pedido y en el ticket, para saber quién tomó y quién sigue esa mesa.</p>
+      {lista.map(e=>(
+        <button key={e.id} onClick={()=>{onElegir(e.id,e.nombre);onClose();}}
+          className={`w-full text-left px-4 py-3 min-h-[52px] rounded-[18px] border transition-colors duration-150 ${meseroId===e.id?'bg-[rgba(242,191,90,.22)] border-[var(--brand)]':'bg-[rgba(255,250,244,.9)] border-[rgba(221,192,161,.6)]'}`}>
+          <span className="font-black text-sm text-[var(--text)]">{e.nombre}</span>
+          {e.rol&&<span className="block text-[11px] text-[var(--text-muted)]">{e.rol}</span>}
+        </button>))}
+      {!lista.length&&<p className="text-sm text-[var(--text-muted)] text-center py-4">Agrega personal en Administración → Config.</p>}
+    </div>
+  </Modal>);
+}
+
+// Ronda nueva sobre una cuenta abierta: el cliente pide mas a media comida.
+// Al guardar se imprime SOLO esta tanda (va a cocina); la cuenta completa se
+// imprime al cobrar.
+function AgregarItemsModal({open,pedido,productos,mesero,onClose,onAgregar}){
+  const [cart,setCart]=useState({});
+  useEffect(()=>{if(open)setCart({});},[open,pedido&&pedido.id]);
+  if(!pedido)return null;
+  const items=Object.values(cart);
+  const totalNuevo=items.reduce((a,i)=>a+i.subtotal,0);
+  const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
+  const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
+  return(<Modal open={open} onClose={onClose} title={`Agregar a #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
+    <div className="space-y-4 menu-upper">
+      <div className="surface-card p-3">
+        <p className="text-xs text-[var(--text-soft)]">{tipoLabelDe(pedido)}{pedido.cliente?` · ${pedido.cliente}`:''}</p>
+        <p className="text-xs text-[var(--text-muted)] mt-1">Ya consumido: <b className="text-[var(--text)]">{fmt(pedido.total)}</b> · Ronda {rondasDe(pedido).length+1}{mesero?` · ${mesero}`:''}</p>
+      </div>
+      <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
+      <CartSummary cart={cart} costoEnvio={0} onAdd={add} onRem={rem}/>
+      {items.length>0&&(<React.Fragment>
+        <p className="text-xs text-[var(--text-soft)] text-center">Se imprime solo esta ronda para cocina. Nueva cuenta: <b>{fmt((Number(pedido.total)||0)+totalNuevo)}</b></p>
+        <Btn full color="green" size="lg" onClick={()=>{onAgregar(items);onClose();}}><Icon name="plus" size={17} className="mr-1.5"/>Agregar y mandar a cocina · {fmt(totalNuevo)}</Btn>
+      </React.Fragment>)}
+    </div></Modal>);
+}
+
+function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgregarItems,onSetMesero,onReimprimir}){
   const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
   const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
+  const [showAgregar,setShowAgregar]=useState(null);const [showMesero,setShowMesero]=useState(false);
+  const [filtro,setFiltro]=useState('todos');
   const ja=state.jornadaActiva;
+  const mesero=deviceInfo?.meseroNombre||'';
   if(!ja)return(<div className="safe-bottom"><TopBar title="Pedidos"/>
     <EmptyState icon="lock" title="Jornada no iniciada" sub="Ve a Inicio y abre la jornada para crear pedidos"/></div>);
   const pedidos=ja.pedidos||[];
@@ -3491,34 +3730,64 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
   const entregados=pedidos.filter(p=>p.estado==='entregado'&&!p.cobrado);
   const cobrados=pedidos.filter(p=>p.cobrado);
   const cancelados=pedidos.filter(p=>p.estado==='cancelado');
+  const activos=pedidos.filter(p=>!p.cobrado&&p.estado!=='cancelado');
+  const mesasActivas=activos.filter(p=>esMesa(p.tipoEntrega));
+  const llevarActivos=activos.filter(p=>!esMesa(p.tipoEntrega));
+  const pendientesImpresion=(state.colaImpresion||[]).filter(j=>!j.impreso).length;
+  const props=p=>({
+    pedido:p,
+    onEntregar:()=>onActualizarPedido(p.id,{estado:'entregado'}),
+    onCobrar:()=>setShowCobrar(p),
+    onCancelar:()=>setConfirmCancel(p),
+    onEditar:()=>setShowEditar(p),
+    onAgregar:()=>setShowAgregar(p),
+    onPrint:()=>onReimprimir(p),
+    onWhatsApp:()=>shareWhatsApp(p),
+  });
+  const abrirCrear=()=>{if(!mesero)setShowMesero(true);else setShowCrear(true);};
   return(<div className="safe-bottom">
-    <TopBar title="Pedidos" subtitle={`${nuevos.length} activos · ${cobrados.length} cobrados`}/>
+    <TopBar title="Pedidos" subtitle={`${activos.length} activos · ${cobrados.length} cobrados`}/>
     <div className="app-shell space-y-4">
-      <Btn full size="lg" onClick={()=>setShowCrear(true)}>+ Nuevo pedido</Btn>
+      <button onClick={()=>setShowMesero(true)} className="w-full surface-card px-4 py-3 flex items-center justify-between text-left">
+        <span className="min-w-0">
+          <span className="t-kicker block">Atiende</span>
+          <span className={`font-black text-sm ${mesero?'text-[var(--text)]':'text-[var(--danger)]'}`}>{mesero||'Sin identificar · toca para elegir'}</span>
+        </span>
+        <Icon name="users" size={16} className="text-[var(--text-muted)] shrink-0"/>
+      </button>
+      {pendientesImpresion>0&&(<div role="status" className="rounded-[18px] px-4 py-3 bg-[rgba(242,191,90,.18)] border border-[rgba(215,101,22,.22)] text-[12px] font-bold text-[var(--brand-strong)]">
+        <Icon name="printer" size={13} className="mr-1"/>{pendientesImpresion} ticket(s) en cola. Se imprimen solos en cuanto la impresora responda.
+      </div>)}
+      <Btn full size="lg" onClick={abrirCrear}>+ Nuevo pedido</Btn>
+      <div className="flex rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 gap-1">
+        {FILTROS_PEDIDO.map(f=>(
+          <button key={f.id} onClick={()=>setFiltro(f.id)} aria-pressed={filtro===f.id}
+            className={`flex-1 py-2.5 min-h-[44px] text-[11px] md:text-sm font-black rounded-[16px] transition-all duration-150 ${filtro===f.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_8px_20px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>{f.l}</button>))}
+      </div>
+
+      {filtro==='mesas'&&(mesasActivas.length
+        ?<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{mesasActivas.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div>
+        :<EmptyState icon="home" title="Sin mesas activas" sub="Los pedidos para comer aquí aparecen en esta pestaña"/>)}
+
+      {filtro==='llevar'&&(llevarActivos.length
+        ?<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{llevarActivos.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div>
+        :<EmptyState icon="bag" title="Sin pedidos para llevar" sub="Aquí salen los de recoger y envío pendientes"/>)}
+
+      {filtro==='cobrados'&&(cobrados.length
+        ?<div className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">{cobrados.map(p=><PedidoCard key={p.id} {...props(p)} showEntregar={false} compact/>)}</div>
+        :<EmptyState icon="cash" title="Sin pedidos cobrados" sub="Los pedidos pagados se agrupan aquí"/>)}
+
+      {filtro==='todos'&&(<React.Fragment>
       {nuevos.length>0&&(<div className="fade-in">
         <p className="section-kicker mb-2 text-[rgb(136,97,23)]">Nuevos ({nuevos.length})</p>
-        <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{nuevos.map(p=>(
-          <PedidoCard key={p.id} pedido={p}
-            onEntregar={()=>onActualizarPedido(p.id,{estado:'entregado'})}
-            onCobrar={()=>setShowCobrar(p)}
-            onCancelar={()=>setConfirmCancel(p)}
-            onEditar={()=>setShowEditar(p)}
-            onPrint={()=>printTicket(p)}
-            onWhatsApp={()=>shareWhatsApp(p)}/>))}</div></div>)}
+        <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{nuevos.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div></div>)}
       {entregados.length>0&&(<div>
         <p className="section-kicker mb-2 text-[var(--success)]">Entregados sin cobrar ({entregados.length})</p>
-        <div className="space-y-3">{entregados.map(p=>(
-          <PedidoCard key={p.id} pedido={p} onCobrar={()=>setShowCobrar(p)} onPrint={()=>printTicket(p)}
-            onWhatsApp={()=>shareWhatsApp(p)} showEntregar={false}/>))}</div></div>)}
+        <div className="space-y-3">{entregados.map(p=><PedidoCard key={p.id} {...props(p)} showEntregar={false}/>)}</div></div>)}
       {cobrados.length>0&&(<div>
         <p className="section-kicker mb-2 text-[var(--info)]">Cobrados ({cobrados.length})</p>
         <div className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">{cobrados.map(p=>(
-          <PedidoCard key={p.id} pedido={p}
-            onEditar={()=>setShowEditar(p)}
-            onCancelar={()=>setConfirmCancel(p)}
-            onPrint={()=>printTicket(p)}
-            onWhatsApp={()=>shareWhatsApp(p)}
-            showEntregar={false} compact/>))}</div></div>)}
+          <PedidoCard key={p.id} {...props(p)} showEntregar={false} compact/>))}</div></div>)}
       {cancelados.length>0&&(<div>
         <p className="section-kicker mb-2 text-[var(--danger)]">Cancelados ({cancelados.length})</p>
         <div className="space-y-2">{cancelados.map(p=>(
@@ -3528,12 +3797,19 @@ function PedidosPage({state,onCrearPedido,onActualizarPedido}){
               className="text-[12px] font-bold text-[var(--brand-strong)] bg-[rgba(242,191,90,.12)] px-3 py-2.5 min-h-[44px] rounded-[14px] border border-[rgba(215,101,22,.16)] transition-colors duration-150" aria-label="Restaurar pedido"><Icon name="undo" size={13} className="mr-1"/>Restaurar</button>
           </div>))}</div></div>)}
       {pedidos.length===0&&<EmptyState icon="orders" title="Sin pedidos" sub="Crea tu primer pedido del dia"/>}
+      </React.Fragment>)}
+
+      <MeseroModal open={showMesero} empleados={state.empleados} meseroId={deviceInfo?.meseroId}
+        onClose={()=>setShowMesero(false)} onElegir={onSetMesero}/>
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
-        clientes={state.clientes} impresora={state.impresora}
+        clientes={state.clientes} impresora={state.impresora} mesero={mesero}
         onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir)=>{
-          const p=onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir);
-          if(p&&state.impresora.autoImprimir)printTicket(p);
+          onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir);
           setShowCrear(false);}}/>
+      {showAgregar&&<AgregarItemsModal open={!!showAgregar} pedido={(ja.pedidos||[]).find(p=>p.id===showAgregar.id)||showAgregar}
+        productos={state.productos} mesero={mesero}
+        onClose={()=>setShowAgregar(null)}
+        onAgregar={items=>onAgregarItems(showAgregar.id,items)}/>}
       <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
         onCobrar={pago=>{snd.coin();onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
       {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos} clientes={state.clientes}
@@ -3577,7 +3853,7 @@ function buildTicketImage(pedido){
     if(pedido.cliente)wrapLeft('Cliente: ',pedido.cliente);
     if(pedido.telefono)rows.push({t:'left',s:'Tel: '+pedido.telefono});
     const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
-    wrapLeft(tipoTxt+' ',tarifa.label);
+    wrapLeft(tipoTxt+' ',tipoLabelDe(pedido));
     if(pedido.direccion)wrapLeft('Dir: ',pedido.direccion);
     rows.push({t:'sep'});
     pedido.items.forEach(i=>{rows.push({t:'lr',l:`${i.cantidad}x ${i.nombre}`,r:fmt(i.subtotal)});});
@@ -3640,42 +3916,76 @@ async function shareWhatsApp(pedido){
   }
 }
 
-function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onPrint,onWhatsApp,showEntregar=true,compact=false}){
+function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,onPrint,onWhatsApp,showEntregar=true,compact=false}){
   const est=ESTADO_PEDIDO[pedido.estado]||(pedido.cobrado?ESTADO_PEDIDO.entregado:ESTADO_PEDIDO.nuevo);
-  const tarifa=TARIFAS_ENVIO[pedido.tipoEntrega]||TARIFAS_ENVIO.recoger;
   const [expanded,setExpanded]=useState(false);
-  return(<div className="surface-card p-4 fade-in space-y-3">
+  const cobrado=!!pedido.cobrado;
+  const enMesa=esMesa(pedido.tipoEntrega);
+  const rondas=rondasDe(pedido);
+  // COBRADO Y CERRADO: solo folio y monto en gris. Un pedido ya pagado no compite
+  // con las mesas activas; se abre con un toque cuando hay que revisarlo.
+  if(cobrado&&compact&&!expanded){
+    return(<button onClick={()=>setExpanded(true)} aria-expanded="false"
+      className="card-cobrado w-full px-4 py-3 flex items-center justify-between gap-3 text-left fade-in">
+      <span className="flex items-center gap-2 min-w-0">
+        <span className="w-2 h-2 rounded-full bg-[#b6a89d] shrink-0"/>
+        <span className="font-black text-[15px] card-folio">#{String(pedido.numero).padStart(3,'0')}</span>
+        {pedido.metodoPago&&<PagoTag metodo={pedido.metodoPago} size={12}/>}
+      </span>
+      <span className="flex items-center gap-1.5 shrink-0">
+        <span className="font-black text-[17px] card-total">{fmt(pedido.total)}</span>
+        <Icon name="chevronDown" size={13} className="text-[#9c8a7d]"/>
+      </span>
+    </button>);
+  }
+  const clase=cobrado?'card-cobrado':(enMesa?'card-mesa':'surface-card');
+  return(<div className={`${clase} p-4 fade-in space-y-3`}>
     <div className="flex justify-between items-start gap-3" onClick={compact?()=>setExpanded(e=>!e):undefined} style={compact?{cursor:'pointer'}:undefined}>
       <div>
         <div className="flex items-center gap-2 flex-wrap">
           <span className={`w-3 h-3 rounded-full ${est.dot}`}/>
-          <span className="font-black text-[#251813] text-lg tracking-tight">#{String(pedido.numero).padStart(3,'0')}</span>
+          <span className="font-black text-[#251813] text-lg tracking-tight card-folio">#{String(pedido.numero).padStart(3,'0')}</span>
           <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${est.color}`}>{est.label}</span>
-          {pedido.cobrado&&<Badge color={pagoBadgeColor(pedido.metodoPago)}><PagoTag metodo={pedido.metodoPago}/></Badge>}
+          {enMesa&&!cobrado&&<span className="text-[11px] font-black px-2.5 py-1 rounded-full bg-[rgba(215,101,22,.16)] text-[#8f3708]">{tipoLabelDe(pedido).split(' ·')[0]}</span>}
+          {cobrado&&<Badge color={pagoBadgeColor(pedido.metodoPago)}><PagoTag metodo={pedido.metodoPago}/></Badge>}
         </div>
-        <p className="text-xs text-[#86695c] mt-1">{pedido.hora} · <Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={13}/> {tarifa.label}
+        {/* El folio impreso se conserva cuando un merge tuvo que renumerar: asi el
+            ticket de papel sigue siendo localizable en la app. */}
+        {Array.isArray(pedido.foliosPrevios)&&pedido.foliosPrevios.length>0&&(
+          <p className="text-[11px] font-bold text-[var(--danger)] mt-1">Ticket impreso: #{pedido.foliosPrevios.map(n=>String(n).padStart(3,'0')).join(', #')}</p>)}
+        <p className="text-xs text-[#86695c] mt-1">{pedido.hora} · <Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={13}/> {tipoLabelDe(pedido)}
           {pedido.cliente&&` · ${pedido.cliente}`}</p>
+        {pedido.mesero&&<p className="text-xs text-[#86695c] mt-1"><Icon name="users" size={12} className="mr-1"/>{pedido.mesero}</p>}
         {pedido.telefono&&<p className="text-xs text-[#86695c] mt-1"><Icon name="phone" size={12} className="mr-1"/>{pedido.telefono}</p>}
         {pedido.direccion&&<p className="text-xs text-[#86695c] mt-1"><Icon name="pin" size={12} className="mr-1"/>{pedido.direccion}</p>}
       </div>
       <div className="text-right">
-        <p className="text-2xl font-black text-[#b24518] tracking-tight">{fmt(pedido.total)}</p>
+        <p className="text-2xl font-black text-[#b24518] tracking-tight card-total">{fmt(pedido.total)}</p>
         {pedido.costoEnvio>0&&<p className="text-[10px] text-[#7d5674] uppercase tracking-[0.18em] mt-1">envio {fmt(pedido.costoEnvio)}</p>}
+        {rondas.length>1&&<p className="text-[10px] font-black text-[#8f3708] mt-1">{rondas.length} rondas</p>}
         {compact&&<p className="text-[10px] text-[var(--text-muted)] mt-1"><Icon name={expanded?'chevronUp':'chevronDown'} size={11} className="mr-0.5"/>{expanded?'cerrar':'ver mas'}</p>}
       </div>
     </div>
     {(!compact||expanded)&&<div className="rounded-[22px] border border-[rgba(180,118,54,0.16)] bg-[rgba(255,251,246,0.96)] px-3 py-3">
-      {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-1">
-        <span className="text-[#574239]">{i.cantidad}x {i.nombre}</span>
-        <span className="font-bold text-[#2f1d17]">{fmt(i.subtotal)}</span></div>))}
+      {rondas.length>1
+        ?rondas.map((r,ri)=>(<div key={r.id||ri} className={ri?'mt-2 pt-2 border-t border-[rgba(180,118,54,0.14)]':''}>
+            <p className="text-[10px] font-black uppercase tracking-[.12em] text-[var(--text-muted)]">Ronda {r.n||ri+1}{r.hora?` · ${r.hora}`:''}{r.mesero?` · ${r.mesero}`:''}</p>
+            {(r.items||[]).map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-1">
+              <span className="text-[#574239]">{i.cantidad}x {i.nombre}</span>
+              <span className="font-bold text-[#2f1d17]">{fmt(i.subtotal)}</span></div>))}
+          </div>))
+        :pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-1">
+            <span className="text-[#574239]">{i.cantidad}x {i.nombre}</span>
+            <span className="font-bold text-[#2f1d17]">{fmt(i.subtotal)}</span></div>))}
       {pedido.notas&&<p className="text-xs text-[#b24518] mt-2 italic"><Icon name="note" size={12} className="mr-1"/>{pedido.notas}</p>}
     </div>}
     <div className="flex gap-2 flex-wrap pt-1">
       {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}><Icon name="check" size={14} className="mr-1"/>Listo</Btn>}
-      {!pedido.cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}><Icon name="coins" size={14} className="mr-1"/>Cobrar</Btn>}
+      {!cobrado&&pedido.estado!=='cancelado'&&onAgregar&&<Btn size="sm" color="orange" onClick={onAgregar}><Icon name="plus" size={14} className="mr-1"/>Agregar</Btn>}
+      {!cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}><Icon name="coins" size={14} className="mr-1"/>Cobrar</Btn>}
       {onEditar&&<Btn size="sm" color="orange" variant="outline" onClick={onEditar}><Icon name="edit" size={13} className="mr-1"/>Editar</Btn>}
       {pedido.estado!=='cancelado'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar} aria-label="Cancelar pedido"><Icon name="x" size={14}/></Btn>}
-      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint} aria-label="Imprimir ticket"><Icon name="printer" size={15}/></Btn>}
+      {onPrint&&<Btn size="sm" color="gray" onClick={onPrint} aria-label="Imprimir cuenta completa"><Icon name="printer" size={15}/></Btn>}
       {onWhatsApp&&<Btn size="sm" color="green" variant="outline" onClick={onWhatsApp} aria-label="Compartir por WhatsApp"><Icon name="chat" size={15}/></Btn>}
     </div>
   </div>);
@@ -3739,7 +4049,7 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
   </div>);
 }
 
-function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
+function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCrear}){
   const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
   const [cliente,setCliente]=useState('');const [telefono,setTelefono]=useState('');const [direccion,setDireccion]=useState('');
   const [etiqueta,setEtiqueta]=useState('Casa');const [notas,setNotas]=useState('');
@@ -3764,6 +4074,7 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,onCrear}){
     setCart({});setCliente('');setTelefono('');setDireccion('');setNotas('');};
   return(<Modal open={open} onClose={onClose} title="NUEVO PEDIDO" fullScreen>
     <div className="space-y-4 menu-upper">
+      {mesero&&<p className="t-kicker">Atiende: <span className="text-[var(--brand-strong)]">{mesero}</span></p>}
       <DeliverySelector tipo={tipo} setTipo={setTipo}/>
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
         cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
@@ -3950,7 +4261,7 @@ function TicketPreviewModal({open,pedido,onClose}){
       <div className="text-center text-gray-400">{pedido.fecha} · {pedido.hora}</div>
       {pedido.cliente&&<div className="font-bold">Cliente: {pedido.cliente}</div>}
       {pedido.telefono&&<div className="text-gray-500">Tel: {pedido.telefono}</div>}
-      <div><Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={12} className="mr-1"/>{tarifa.label}</div>
+      <div><Icon name={TIPO_ENVIO_ICON[pedido.tipoEntrega]||'bag'} size={12} className="mr-1"/>{tipoLabelDe(pedido)}</div>
       {pedido.direccion&&<div className="text-gray-500"><Icon name="pin" size={11} className="mr-1"/>{pedido.direccion}</div>}
       <div className="border-t border-dashed border-gray-300"/>
       {pedido.items.map((i,idx)=>(<div key={idx} className="flex justify-between"><span>{i.cantidad}x {i.nombre}</span><span className="font-bold">{fmt(i.subtotal)}</span></div>))}
@@ -4576,7 +4887,7 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
         </div>
       </div>)}
 
-      {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} onActualizar={onActualizarImpresora}/>)}
+      {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} cola={state.colaImpresion} onActualizar={onActualizarImpresora}/>)}
 
       {tab==='config'&&(<ConfigTab state={state} onActualizarGastoFijo={onActualizarGastoFijo}
         onAgregarGastoFijo={onAgregarGastoFijo} onEliminarGastoFijo={onEliminarGastoFijo}
@@ -4940,8 +5251,9 @@ function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
   </div>);
 }
 
-function ImpresoraTab({impresora,onActualizar}){
+function ImpresoraTab({impresora,cola,onActualizar}){
   const [status,setStatus]=useState(null);const hasBT='bluetooth' in navigator;const hasUSB='usb' in navigator;
+  const pendientes=(cola||[]).filter(j=>!j.impreso).length;
   const conectarBT=async()=>{setStatus({kind:'info',text:'Buscando BT...'});const r=await connectBluetooth();
     if(r.success){onActualizar({tipo:'bluetooth',nombre:r.name,conectada:true});setStatus({kind:'ok',text:r.name});}
     else setStatus({kind:'err',text:r.error});};
@@ -4968,8 +5280,12 @@ function ImpresoraTab({impresora,onActualizar}){
           <p className="font-bold"><Icon name="alert" size={14} className="mr-1"/>Sin conexion directa</p>
           <p className="text-xs mt-1">Los tickets se imprimiran como vista previa.</p></div>}
         <Btn full color="gray" onClick={testPrint}><Icon name="printer" size={15} className="mr-1.5"/>Ticket de prueba</Btn>
+        <div className="rounded-2xl p-3 bg-[rgba(242,191,90,.12)] border border-[rgba(215,101,22,.18)]">
+          <p className="text-xs font-black text-[var(--brand-strong)]"><Icon name="printer" size={13} className="mr-1"/>Cola compartida: {pendientes} pendiente(s)</p>
+          <p className="text-[11px] text-[var(--text-soft)] mt-1">Los meseros mandan el pedido desde su telefono y este dispositivo lo imprime solo, sin que nadie toque la computadora. Si la impresora se cae, el ticket se queda en la cola y sale al reconectar.</p>
+        </div>
         <div className="flex items-center justify-between">
-          <div><p className="text-sm font-bold">Auto-imprimir</p><p className="text-xs text-gray-400">Al crear pedido</p></div>
+          <div><p className="text-sm font-bold">Auto-imprimir</p><p className="text-xs text-gray-400">Al crear pedido y al agregar una ronda</p></div>
           <button onClick={()=>onActualizar({autoImprimir:!impresora.autoImprimir})} role="switch" aria-checked={impresora.autoImprimir} aria-label="Auto-imprimir al crear pedido"
             className={`w-12 h-6 rounded-full transition-colors duration-150 ${impresora.autoImprimir?'bg-green-500':'bg-gray-300'} relative`}>
             <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all duration-150 ${impresora.autoImprimir?'right-0.5':'left-0.5'}`}/></button></div>
@@ -5054,6 +5370,7 @@ function App(){
     registrarAjusteCaja,eliminarAjusteCaja,registrarPagoRepartidor,pagarRepartidoresPendientes,
     registrarGasto,eliminarGasto,actualizarGasto,agregarProducto,actualizarProducto,actualizarGastoFijo,agregarGastoFijo,eliminarGastoFijo,
     actualizarImpresora,importarProductos,importarCostos,agregarEmpleado,editarEmpleado,eliminarEmpleado,
+    agregarItemsPedido,encolarImpresion,marcarImpresion,setMesero,
     guardarCliente,eliminarCliente,eliminarClientes,
     syncNow,pullFromCloud,setDeviceRole,listBackups,restoreBackup,auditHistoricalData,repairHistoricalData}=useStore();
   const hasJornada=!!state.jornadaActiva;
@@ -5078,6 +5395,40 @@ function App(){
     }
     return()=>{_onPrinterStateChange=null;};
   },[]);
+  // ─── COLA DE IMPRESION COMPARTIDA ─────────────────────────────────
+  // Solo el dispositivo que tiene la impresora saca trabajos de la cola. Si
+  // falla el envio NO se marca como impreso: se reintenta al siguiente tick o
+  // cuando la impresora reconecta. Asi el mesero manda desde su telefono y el
+  // ticket sale en cocina sin que nadie toque la computadora.
+  const stateRef=useRef(state);stateRef.current=state;
+  const marcarRef=useRef(marcarImpresion);marcarRef.current=marcarImpresion;
+  const [colaTick,setColaTick]=useState(0);
+  useEffect(()=>{const t=setInterval(()=>setColaTick(x=>x+1),20000);return()=>clearInterval(t);},[]);
+  const pendientesIds=(state.colaImpresion||[]).filter(j=>!j.impreso).map(j=>j.id).join(',');
+  useEffect(()=>{
+    if(!pendientesIds||!tieneImpresora())return;
+    let cancelado=false;
+    (async()=>{
+      const hechos=[];
+      const cola=(stateRef.current.colaImpresion||[]).filter(j=>!j.impreso).sort((a,b)=>(a.ts||0)-(b.ts||0));
+      for(const job of cola){
+        if(cancelado)break;
+        if(_jobsEnVuelo.has(job.id))continue;
+        _jobsEnVuelo.add(job.id);
+        const ped=(stateRef.current.jornadaActiva?.pedidos||[]).find(p=>p.id===job.pedidoId);
+        const ronda=ped&&job.tipo==='ronda'?rondasDe(ped).find(r=>r.id===job.rondaId):null;
+        // Trabajo huerfano (pedido o ronda que ya no existen): se cierra para que
+        // no bloquee la cola para siempre.
+        if(!ped||(job.tipo==='ronda'&&!ronda)){hechos.push(job.id);continue;}
+        const ok=await _sendRaw(_buildBTText(ped,ronda?{ronda}:undefined));
+        if(ok){snd.print();hechos.push(job.id);}
+        else{_jobsEnVuelo.delete(job.id);break;}
+      }
+      if(!cancelado&&hechos.length)marcarRef.current(hechos);
+    })();
+    return()=>{cancelado=true;};
+  },[pendientesIds,colaTick]);
+
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
       onAbrir={(f,d)=>{abrirJornada(f,d);showToast('Jornada abierta');}}
@@ -5086,8 +5437,12 @@ function App(){
       onEliminarAjuste={eliminarAjusteCaja}
       onPagarRepartidor={registrarPagoRepartidor}
       onPagarTodosRepartidores={()=>{pagarRepartidoresPendientes();showToast('Repartidores pagados desde caja','orange');}}/>}
-    {page==='pedidos'&&<PedidosPage state={state}
-      onCrearPedido={(i,t,c,dir,n,tel,et)=>{const p=crearPedido(i,t,c,dir,n,tel,et);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
+    {page==='pedidos'&&<PedidosPage state={state} deviceInfo={deviceInfo}
+      onSetMesero={(id,nombre)=>{setMesero(id,nombre);showToast(`Atiende ${nombre}`);}}
+      onReimprimir={p=>{encolarImpresion(p.id);showToast(`Cuenta #${String(p.numero).padStart(3,'0')} enviada a impresora`);}}
+      onAgregarItems={(id,items)=>{const r=agregarItemsPedido(id,items,deviceInfo.meseroNombre||'');
+        showToast(r?`Ronda ${r.n} enviada a cocina`:'No se pudo agregar',r?'green':'red');}}
+      onCrearPedido={(i,t,c,dir,n,tel,et)=>{const p=crearPedido(i,t,c,dir,n,tel,et,deviceInfo.meseroNombre||'');showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
       onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
         if(c.cobrado)showToast('Cobrado','green');
         else if(c.estado==='entregado')showToast('Entregado','green');
