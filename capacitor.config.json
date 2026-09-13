@@ -1,0 +1,8 @@
+{
+  "appId": "com.kapulits.pos",
+  "appName": "K'apul'Its",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "always"
+  }
+}

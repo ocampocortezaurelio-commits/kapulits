@@ -1,0 +1,21 @@
+{
+  "name": "kapulits-pos",
+  "version": "2.4.0",
+  "private": true,
+  "description": "K'apul'Its POS - web (GitHub Pages) + app nativa iOS (Capacitor) con Bluetooth nativo",
+  "scripts": {
+    "bridge": "esbuild src/native-bridge.js --bundle --format=iife --outfile=native-bridge.js --minify",
+    "www": "node scripts/build-www.mjs",
+    "sync:ios": "npm run bridge && npm run www && npx cap sync ios",
+    "open:ios": "npx cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/ios": "^8.0.0",
+    "@capacitor-community/bluetooth-le": "^8.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.0.0",
+    "esbuild": "^0.24.0"
+  }
+}
