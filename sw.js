@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20260913-mesa5-servidor';
+const CACHE_NAME = 'kapulits-assets-v20260913b-usb-reconexion';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [

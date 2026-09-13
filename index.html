@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -2217,17 +2217,21 @@ async function connectUSB(){
     const ep=iface.alternate.endpoints.find(e=>e.direction==='out');
     _usbDevice=device;
     _usbEndpoint=ep.endpointNumber;
+    _startUsbWatch();
     return{success:true,name:device.productName||'Impresora USB'};
   }catch(e){return{success:false,error:e.message};}
 }
 
 async function _sendToUSB(text){
   if(!_usbDevice||!_usbEndpoint)throw new Error('USB no conectado');
-  const data=new Uint8Array([...text].map(c=>c.charCodeAt(0)&0x7F));
-  const CHUNK=64;
-  for(let i=0;i<data.length;i+=CHUNK){
-    await _usbDevice.transferOut(_usbEndpoint,data.slice(i,i+CHUNK));
-  }
+  _usbBusy=true; // que la vigilancia no meta un ping a medio ticket (corromperia el papel)
+  try{
+    const data=new Uint8Array([...text].map(c=>c.charCodeAt(0)&0x7F));
+    const CHUNK=64;
+    for(let i=0;i<data.length;i+=CHUNK){
+      await _usbDevice.transferOut(_usbEndpoint,data.slice(i,i+CHUNK));
+    }
+  }finally{_usbBusy=false;}
 }
 
 async function tryAutoConnectUSB(){
@@ -2249,6 +2253,48 @@ async function tryAutoConnectUSB(){
     }
   }catch(e){}
   return false;
+}
+
+// ─── USB: vigilancia y reconexion (analogo al keepalive BT) ─────────
+// El controlador USB barato de estas impresoras (SUZWIP/POS-5890) se cae solo.
+// A diferencia del BT, WebUSB no siempre avisa: vigilamos con un ping periodico
+// (NUL 0x00, que la impresora ESC/POS ignora) para detectar la caida temprano y
+// reconectamos apenas el equipo reaparece, sin que nadie toque nada.
+let _usbWatch=null;
+let _usbBusy=false;
+function _stopUsbWatch(){if(_usbWatch){clearInterval(_usbWatch);_usbWatch=null;}}
+function _startUsbWatch(){
+  _stopUsbWatch();
+  _usbWatch=setInterval(async()=>{
+    if(_usbBusy)return; // nunca pisar una impresion en curso
+    if(_usbDevice&&_usbEndpoint){
+      try{await _usbDevice.transferOut(_usbEndpoint,new Uint8Array([0x00]));return;}
+      catch(e){
+        try{await _usbDevice.close();}catch(_){}
+        _usbDevice=null;_usbEndpoint=null;
+        if(_onPrinterStateChange)_onPrinterStateChange({conectada:false,reconectando:true});
+      }
+    }
+    if(!_usbDevice&&!document.hidden){
+      const ok=await tryAutoConnectUSB();
+      if(ok&&_onPrinterStateChange)_onPrinterStateChange({conectada:true,reconectando:false});
+    }
+  },15000);
+}
+if(navigator.usb){
+  // Desconexion inmediata (desenchufe): limpia y marca reconectando.
+  navigator.usb.addEventListener('disconnect',e=>{
+    if(_usbDevice&&e.device===_usbDevice){
+      _usbDevice=null;_usbEndpoint=null;
+      if(_onPrinterStateChange)_onPrinterStateChange({conectada:false,reconectando:true});
+    }
+  });
+  // Reaparecio: reconectar solo.
+  navigator.usb.addEventListener('connect',async()=>{
+    if(_usbDevice)return;
+    const ok=await tryAutoConnectUSB();
+    if(ok){_startUsbWatch();if(_onPrinterStateChange)_onPrinterStateChange({conectada:true,reconectando:false});}
+  });
 }
 
 async function _findCharacteristic(server){
@@ -2346,9 +2392,11 @@ async function reconnectBluetooth(){
 // Android suspende el GATT al apagar la pantalla y el temporizador solo no
 // siempre alcanza: al volver el foco, la visibilidad o la red, se reintenta ya.
 function _wakeReconnect(){
-  if(printerCharacteristic||document.hidden||!_btDevice)return;
-  _reconnectAttempt=0;
-  _scheduleReconnect();
+  if(document.hidden)return;
+  if(!printerCharacteristic&&_btDevice){_reconnectAttempt=0;_scheduleReconnect();}
+  if(!_usbDevice&&navigator.usb?.getDevices){
+    tryAutoConnectUSB().then(ok=>{if(ok){_startUsbWatch();if(_onPrinterStateChange)_onPrinterStateChange({conectada:true,reconectando:false});}});
+  }
 }
 document.addEventListener('visibilitychange',_wakeReconnect);
 window.addEventListener('online',_wakeReconnect);
@@ -5448,8 +5496,9 @@ function App(){
     }
     if(state.impresora?.tipo==='usb'){
       tryAutoConnectUSB().then(ok=>{
-        if(ok)actualizarImpresora({conectada:true,reconectando:false});
+        if(ok){_startUsbWatch();actualizarImpresora({conectada:true,reconectando:false});}
       });
+      _startUsbWatch(); // vigila y reconecta aunque el arranque no la halle todavia
     }
     return()=>{_onPrinterStateChange=null;};
   },[]);
