@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.7';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -1384,11 +1384,17 @@ function useStore(){
     // El folio nunca puede repetir uno ya asignado en esta jornada: si un merge
     // renumero una colision, contadorPedido podia haber quedado por detras.
     const folio=Math.max(Number(ja.contadorPedido)||1,...(ja.pedidos||[]).map(p=>(Number(p.numero)||0)+1),1);
+    // Atencion: cuantas veces se ha usado ESTA mesa en la jornada. Sirve para
+    // diferenciar clientes distintos que se sientan en la misma mesa (Atencion 1,
+    // 2, 3...). Solo aplica a mesas; los de llevar/envio no la llevan.
+    const atencion=esMesa(tipoEntrega)
+      ?(ja.pedidos||[]).filter(p=>p.tipoEntrega===tipoEntrega).reduce((m,p)=>Math.max(m,Number(p.atencion)||0),0)+1
+      :null;
     const stamp=new Date().toISOString();
     const rondaInicial={id:uid(),n:1,hora:now(),_ts:stamp,mesero:mesero||'',items};
     const pedido={id:uid(),numero:folio,fecha:ja.fecha,hora:now(),_ts:stamp,
       items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
-      tipoEntrega,tipoLabel:(TARIFAS_ENVIO[tipoEntrega]||{}).label||tipoEntrega,
+      tipoEntrega,tipoLabel:(TARIFAS_ENVIO[tipoEntrega]||{}).label||tipoEntrega,atencion,
       mesero:mesero||'',rondas:[rondaInicial],
       cliente:cliente||'',telefono:telefono||'',direccion:direccion||'',notas:notas||'',
       estado:'nuevo',cobrado:false,metodoPago:null};
@@ -2545,6 +2551,7 @@ function _buildBTText(pedido,opts){
   if(pedido.telefono&&!ronda)t+=`  Tel: ${pedido.telefono}\n`;
   const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
   t+=_ticketField(tipoTxt+' ',tipoLabelDe(pedido));
+  if(esMesa(pedido.tipoEntrega)&&pedido.atencion)t+=_ticketField('Atencion: ',String(pedido.atencion));
   const mesero=(ronda&&ronda.mesero)||pedido.mesero;
   if(mesero)t+=_ticketField('Atiende: ',mesero);
   if(pedido.direccion&&!ronda)t+=_ticketField('Dir: ',pedido.direccion);
@@ -2573,6 +2580,11 @@ function _buildBTText(pedido,opts){
   }
   if(pedido.costoEnvio>0)t+=`  Envio:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
   t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
+  if(Array.isArray(pedido.split)&&pedido.split.length){
+    t+=`  CUENTA DIVIDIDA (${pedido.split.length})\n`;
+    pedido.split.forEach(s=>{t+=`  Persona ${s.persona} ${(s.metodo==='transferencia'?'Transf':'Efect').padEnd(6)}${fmt(s.total).padStart(9)}\n`;});
+    t+=sep+'\n';
+  }
   _wrapWords(NEGOCIO.direccion,TICKET_COLS-2).forEach(l=>{t+=`  ${l}\n`;});
   t+=`  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
   return sanitize(t);
@@ -3818,6 +3830,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
   const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
   const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
   const [showAgregar,setShowAgregar]=useState(null);const [showMesero,setShowMesero]=useState(false);
+  const [showDividir,setShowDividir]=useState(null);
   const [filtro,setFiltro]=useState('todos');
   const ja=state.jornadaActiva;
   const mesero=deviceInfo?.meseroNombre||'';
@@ -3839,6 +3852,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
     onCancelar:()=>setConfirmCancel(p),
     onEditar:()=>setShowEditar(p),
     onAgregar:()=>setShowAgregar(p),
+    onDividir:()=>setShowDividir(p),
     onPrint:()=>onReimprimir(p),
     onWhatsApp:()=>shareWhatsApp(p),
   });
@@ -3901,6 +3915,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
         onClose={()=>setShowMesero(false)} onElegir={onSetMesero}/>
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
         clientes={state.clientes} impresora={state.impresora} mesero={mesero}
+        pedidosActivos={activos} onAgregarACuenta={p=>{setShowCrear(false);setShowAgregar(p);}}
         onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir)=>{
           onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir);
           setShowCrear(false);}}/>
@@ -3910,6 +3925,8 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
         onAgregar={items=>onAgregarItems(showAgregar.id,items)}/>}
       <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
         onCobrar={pago=>{snd.coin();onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
+      <SplitModal open={!!showDividir} pedido={showDividir} onClose={()=>setShowDividir(null)}
+        onCobrar={pago=>{snd.coin();onActualizarPedido(showDividir.id,{cobrado:true,estado:'entregado',...pago});setShowDividir(null);}}/>
       {showEditar&&<EditarPedidoModal open={!!showEditar} pedido={showEditar} productos={state.productos} clientes={state.clientes}
         onClose={()=>setShowEditar(null)}
         onGuardar={cambios=>{onActualizarPedido(showEditar.id,cambios);setShowEditar(null);}}/>}
@@ -4014,7 +4031,7 @@ async function shareWhatsApp(pedido){
   }
 }
 
-function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,onPrint,onWhatsApp,showEntregar=true,compact=false}){
+function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,onDividir,onPrint,onWhatsApp,showEntregar=true,compact=false}){
   const est=ESTADO_PEDIDO[pedido.estado]||(pedido.cobrado?ESTADO_PEDIDO.entregado:ESTADO_PEDIDO.nuevo);
   const [expanded,setExpanded]=useState(false);
   const cobrado=!!pedido.cobrado;
@@ -4044,7 +4061,7 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,on
           <span className={`w-3 h-3 rounded-full ${est.dot}`}/>
           <span className="font-black text-[#251813] text-lg tracking-tight card-folio">#{String(pedido.numero).padStart(3,'0')}</span>
           <span className={`text-[11px] font-bold px-2.5 py-1 rounded-full ${est.color}`}>{est.label}</span>
-          {enMesa&&!cobrado&&<span className="text-[11px] font-black px-2.5 py-1 rounded-full bg-[rgba(215,101,22,.16)] text-[#8f3708]">{tipoLabelDe(pedido).split(' ·')[0]}</span>}
+          {enMesa&&!cobrado&&<span className="text-[11px] font-black px-2.5 py-1 rounded-full bg-[rgba(215,101,22,.16)] text-[#8f3708]">{tipoLabelDe(pedido).split(' ·')[0]}{pedido.atencion?` · Atención ${pedido.atencion}`:''}</span>}
           {cobrado&&<Badge color={pagoBadgeColor(pedido.metodoPago)}><PagoTag metodo={pedido.metodoPago}/></Badge>}
         </div>
         {/* El folio impreso se conserva cuando un merge tuvo que renumerar: asi el
@@ -4076,11 +4093,18 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,on
             <span className="text-[#574239]">{i.cantidad}x {i.nombre}</span>
             <span className="font-bold text-[#2f1d17]">{fmt(i.subtotal)}</span></div>))}
       {pedido.notas&&<p className="text-xs text-[#b24518] mt-2 italic"><Icon name="note" size={12} className="mr-1"/>{pedido.notas}</p>}
+      {Array.isArray(pedido.split)&&pedido.split.length>0&&<div className="mt-2 pt-2 border-t border-[rgba(180,118,54,0.14)]">
+        <p className="text-[10px] font-black uppercase tracking-[.12em] text-[var(--text-muted)]">Cuenta dividida en {pedido.split.length}</p>
+        {pedido.split.map((s,i)=>(<div key={i} className="flex justify-between text-xs py-0.5">
+          <span className="text-[#574239]">Persona {s.persona} · {s.metodo==='transferencia'?'Transfer.':'Efectivo'}</span>
+          <span className="font-bold text-[#2f1d17]">{fmt(s.total)}</span></div>))}
+      </div>}
     </div>}
     <div className="flex gap-2 flex-wrap pt-1">
       {showEntregar&&pedido.estado==='nuevo'&&onEntregar&&<Btn size="sm" color="green" onClick={onEntregar}><Icon name="check" size={14} className="mr-1"/>Listo</Btn>}
       {!cobrado&&pedido.estado!=='cancelado'&&onAgregar&&<Btn size="sm" color="orange" onClick={onAgregar}><Icon name="plus" size={14} className="mr-1"/>Agregar</Btn>}
       {!cobrado&&onCobrar&&<Btn size="sm" color="orange" onClick={onCobrar}><Icon name="coins" size={14} className="mr-1"/>Cobrar</Btn>}
+      {enMesa&&!cobrado&&onDividir&&<Btn size="sm" color="orange" variant="outline" onClick={onDividir}><Icon name="users" size={14} className="mr-1"/>Dividir</Btn>}
       {onEditar&&<Btn size="sm" color="orange" variant="outline" onClick={onEditar}><Icon name="edit" size={13} className="mr-1"/>Editar</Btn>}
       {pedido.estado!=='cancelado'&&onCancelar&&<Btn size="sm" color="red" variant="outline" onClick={onCancelar} aria-label="Cancelar pedido"><Icon name="x" size={14}/></Btn>}
       {onPrint&&<Btn size="sm" color="gray" onClick={onPrint} aria-label="Imprimir cuenta completa"><Icon name="printer" size={15}/></Btn>}
@@ -4147,12 +4171,19 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
   </div>);
 }
 
-function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCrear}){
+function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCrear,pedidosActivos=[],onAgregarACuenta}){
   const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
   const [cliente,setCliente]=useState('');const [telefono,setTelefono]=useState('');const [direccion,setDireccion]=useState('');
   const [etiqueta,setEtiqueta]=useState('Casa');const [notas,setNotas]=useState('');
   const [sinTel,setSinTel]=useState(false);
-  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);}},[open]);
+  // Cuando la mesa elegida ya tiene cuenta abierta, avisamos. clienteNuevo=true
+  // significa que el usuario confirmo que es OTRO cliente (nueva atencion).
+  const [clienteNuevo,setClienteNuevo]=useState(false);
+  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);setClienteNuevo(false);}},[open]);
+  // Al cambiar de mesa/tipo se reevalua el aviso desde cero.
+  const setTipoReset=t=>{setTipo(t);setClienteNuevo(false);};
+  // Mesa con cuenta abierta (no cobrada, no cancelada) = posible mismo cliente.
+  const mesaOcupada=esMesa(tipo)?(pedidosActivos||[]).find(p=>p.tipoEntrega===tipo&&!p.cobrado&&p.estado!=='cancelado'):null;
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
@@ -4164,7 +4195,7 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCr
   // El telefono deja de ser obligatorio si el cliente no lo dio (sinTel).
   // Si SE captura, debe ser un numero real de 10 digitos (movil MX).
   const telOk=sinTel||normTel(telefono).length===10;
-  const puedeCrear=items.length>0&&telOk&&cliente.trim().length>0&&!faltaDir;
+  const puedeCrear=items.length>0&&telOk&&cliente.trim().length>0&&!faltaDir&&!(mesaOcupada&&!clienteNuevo);
   const crear=()=>{
     if(!puedeCrear)return;
     const its=items.map(i=>buildItem(i));
@@ -4173,7 +4204,16 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCr
   return(<Modal open={open} onClose={onClose} title="NUEVO PEDIDO" fullScreen>
     <div className="space-y-4 menu-upper">
       {mesero&&<p className="t-kicker">Atiende: <span className="text-[var(--brand-strong)]">{mesero}</span></p>}
-      <DeliverySelector tipo={tipo} setTipo={setTipo}/>
+      <DeliverySelector tipo={tipo} setTipo={setTipoReset}/>
+      {mesaOcupada&&!clienteNuevo&&(
+        <div className="rounded-[18px] border-2 border-[#e0a53a] bg-[rgba(242,191,90,.16)] p-4 space-y-3">
+          <p className="text-sm font-black text-[#8f3708]"><Icon name="alert" size={15} className="mr-1"/>{tipoLabelDe(mesaOcupada).split(' ·')[0]} ya tiene cuenta abierta</p>
+          <p className="text-xs text-[#7b5a2e]">Atención {mesaOcupada.atencion||1} · {fmt(mesaOcupada.total)}{mesaOcupada.mesero?` · ${mesaOcupada.mesero}`:''}. ¿Es el mismo cliente o llegó uno nuevo?</p>
+          <div className="grid grid-cols-1 gap-2">
+            <Btn full color="orange" onClick={()=>{onAgregarACuenta&&onAgregarACuenta(mesaOcupada);}}><Icon name="plus" size={15} className="mr-1"/>Agregar a esta cuenta (mismo cliente)</Btn>
+            <Btn full color="orange" variant="outline" onClick={()=>setClienteNuevo(true)}><Icon name="users" size={14} className="mr-1"/>Es cliente nuevo · abrir Atención {(mesaOcupada.atencion||1)+1}</Btn>
+          </div>
+        </div>)}
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
         cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
       <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
@@ -4344,6 +4384,94 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
       {modo!=='mixto'
         ? <Btn full color={modo==='efectivo'?'green':'blue'} size="lg" onClick={()=>cobrarSimple(modo)}>Cobrar {fmt(total)} · {pagoLabel(modo)}</Btn>
         : <Btn full color="purple" size="lg" disabled={!mixtoOk} onClick={cobrarMixto}>Cobrar pago mixto</Btn>}
+    </div></Modal>);
+}
+
+// Dividir la cuenta POR PLATILLO: cada unidad de cada item se asigna a una
+// persona, cada persona elige su metodo (efectivo/transferencia). Al cobrar se
+// junta todo en UNA sola venta (pagos efectivo+transferencia) para no romper la
+// caja ni la regla de "una venta por pedido". La suma de personas debe dar el
+// total exacto del pedido.
+function SplitModal({open,pedido,onClose,onCobrar}){
+  const [personas,setPersonas]=useState([{id:'p1',metodo:'efectivo'},{id:'p2',metodo:'efectivo'}]);
+  const [asign,setAsign]=useState({}); // asign[itemKey][personaId] = unidades
+  useEffect(()=>{if(open&&pedido){setPersonas([{id:'p1',metodo:'efectivo'},{id:'p2',metodo:'efectivo'}]);setAsign({});}},[open,pedido]);
+  if(!open||!pedido)return null;
+  const items=(pedido.items||[]).map((i,idx)=>{
+    const cant=Number(i.cantidad)||0;
+    const precio=Number(i.precio)||(cant?_roundMoney((Number(i.subtotal)||0)/cant):0);
+    return{key:i.id||i.productoId||('it'+idx),nombre:i.nombre||'',precio,cantidad:cant};
+  });
+  const total=Number(pedido.total)||0;
+  const asignadasDe=k=>Object.values(asign[k]||{}).reduce((a,b)=>a+(Number(b)||0),0);
+  const restanteDe=it=>it.cantidad-asignadasDe(it.key);
+  const totalPersona=pid=>items.reduce((s,it)=>s+((asign[it.key]?.[pid]||0)*it.precio),0);
+  const sinAsignar=items.reduce((s,it)=>s+restanteDe(it),0);
+  const asignar=(itKey,pid,delta)=>setAsign(a=>{
+    const it=items.find(x=>x.key===itKey);
+    const cur=a[itKey]?.[pid]||0;
+    const otros=(Object.values(a[itKey]||{}).reduce((x,y)=>x+(Number(y)||0),0))-cur;
+    let next=cur+delta;if(next<0)next=0;if(next+otros>it.cantidad)next=it.cantidad-otros;
+    return{...a,[itKey]:{...(a[itKey]||{}),[pid]:next}};
+  });
+  const addPersona=()=>setPersonas(ps=>[...ps,{id:'p'+Date.now(),metodo:'efectivo'}]);
+  const removePersona=pid=>{setPersonas(ps=>ps.length<=1?ps:ps.filter(p=>p.id!==pid));
+    setAsign(a=>{const n={};for(const k in a){const c={...a[k]};delete c[pid];n[k]=c;}return n;});};
+  const setMetodo=(pid,m)=>setPersonas(ps=>ps.map(p=>p.id===pid?{...p,metodo:m}:p));
+  const sumPersonas=personas.reduce((s,p)=>s+totalPersona(p.id),0);
+  const ok=sinAsignar===0&&_roundMoney(sumPersonas)===_roundMoney(total)&&personas.every(p=>totalPersona(p.id)>0);
+  const confirmar=()=>{
+    if(!ok)return;
+    const ef=personas.filter(p=>p.metodo==='efectivo').reduce((s,p)=>s+totalPersona(p.id),0);
+    const tr=personas.filter(p=>p.metodo==='transferencia').reduce((s,p)=>s+totalPersona(p.id),0);
+    const pagos={efectivo:_roundMoney(ef),transferencia:_roundMoney(tr)};
+    const metodoPago=(ef>0&&tr>0)?'mixto':(tr>0?'transferencia':'efectivo');
+    const split=personas.map((p,i)=>({persona:i+1,metodo:p.metodo,total:_roundMoney(totalPersona(p.id)),
+      items:items.filter(it=>(asign[it.key]?.[p.id]||0)>0).map(it=>({nombre:it.nombre,cantidad:asign[it.key][p.id],subtotal:_roundMoney((asign[it.key][p.id])*it.precio)}))}));
+    onCobrar({metodoPago,pagos,split});
+  };
+  return(<Modal open={open} onClose={onClose} title={`Dividir #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
+    <div className="space-y-4">
+      <div className="brand-panel text-center">
+        <p className="text-[11px] uppercase tracking-[0.28em] text-[rgba(255,244,229,0.78)]">total de la mesa</p>
+        <p className="text-3xl font-black tracking-tight mt-2">{fmt(total)}</p>
+        <p className="text-xs text-[rgba(255,244,229,0.85)] mt-1">{sinAsignar>0?`Faltan ${sinAsignar} platillo(s) por asignar`:'Todo asignado'}</p>
+      </div>
+      <div className="grid grid-cols-1 gap-2">
+        {personas.map((p,i)=>(
+          <div key={p.id} className="surface-card p-3 flex items-center justify-between gap-2">
+            <div className="min-w-0"><p className="font-black text-sm text-[var(--text)]">Persona {i+1}</p>
+              <p className="text-xs text-[var(--text-muted)]">{fmt(totalPersona(p.id))}</p></div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button onClick={()=>setMetodo(p.id,'efectivo')} aria-pressed={p.metodo==='efectivo'} className={`text-[11px] font-black px-2.5 py-2 rounded-[12px] border ${p.metodo==='efectivo'?'border-green-500 bg-green-50 text-green-700':'border-[#e0cdb5] text-[var(--text-soft)]'}`}>Efectivo</button>
+              <button onClick={()=>setMetodo(p.id,'transferencia')} aria-pressed={p.metodo==='transferencia'} className={`text-[11px] font-black px-2.5 py-2 rounded-[12px] border ${p.metodo==='transferencia'?'border-blue-500 bg-blue-50 text-blue-700':'border-[#e0cdb5] text-[var(--text-soft)]'}`}>Transfer.</button>
+              {personas.length>1&&<button onClick={()=>removePersona(p.id)} aria-label="Quitar persona" className="text-[var(--danger)] px-2 py-2"><Icon name="x" size={14}/></button>}
+            </div>
+          </div>))}
+        <Btn full color="orange" variant="outline" onClick={addPersona}><Icon name="plus" size={14} className="mr-1"/>Agregar persona</Btn>
+      </div>
+      <div className="space-y-2">
+        {items.map(it=>(
+          <div key={it.key} className="surface-card p-3">
+            <div className="flex justify-between items-center">
+              <span className="text-sm font-bold text-[var(--text)]">{it.cantidad}x {it.nombre} <span className="text-[var(--text-muted)] font-normal">({fmt(it.precio)} c/u)</span></span>
+              <span className={`text-[11px] font-black ${restanteDe(it)>0?'text-[var(--danger)]':'text-green-600'}`}>{restanteDe(it)>0?`faltan ${restanteDe(it)}`:'ok'}</span>
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {personas.map((p,i)=>(
+                <div key={p.id} className="flex items-center justify-between">
+                  <span className="text-xs text-[var(--text-soft)]">Persona {i+1}</span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={()=>asignar(it.key,p.id,-1)} className="w-8 h-8 rounded-full border border-[#e0cdb5] font-black text-[var(--text)]">−</button>
+                    <span className="w-6 text-center font-black text-sm">{asign[it.key]?.[p.id]||0}</span>
+                    <button onClick={()=>asignar(it.key,p.id,1)} disabled={restanteDe(it)<=0} className="w-8 h-8 rounded-full border border-[#e0cdb5] font-black text-[var(--text)] disabled:opacity-40">+</button>
+                  </div>
+                </div>))}
+            </div>
+          </div>))}
+      </div>
+      {!ok&&<p className="text-xs font-bold text-[var(--danger)] text-center">{sinAsignar>0?'Asigna todos los platillos':personas.some(p=>totalPersona(p.id)<=0)?'Cada persona debe tener al menos un platillo':'La suma no cuadra'}</p>}
+      <Btn full color="green" size="lg" disabled={!ok} onClick={confirmar}><Icon name="coins" size={17} className="mr-1.5"/>Cobrar dividido · {fmt(total)}</Btn>
     </div></Modal>);
 }
 

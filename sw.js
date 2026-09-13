@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20260913c-usb-claim-fix';
+const CACHE_NAME = 'kapulits-assets-v20260913d-dividir-atencion';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [
