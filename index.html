@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.5';
+const APP_VERSION = '2.6';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -2202,24 +2202,46 @@ const BT_SERVICES=['000018f0-0000-1000-8000-00805f9b34fb','e7810a71-73ae-499d-8c
 // ─── USB PRINTER ───────────────────────────────────────────────────
 let _usbDevice=null;
 let _usbEndpoint=null;
+// Candado: un solo intento de abrir/reclamar USB a la vez. Sin esto, la
+// vigilancia y el boton manual chocaban y dejaban la interfaz "tomada"
+// (Unable to claim interface).
+let _usbLock=false;
+
+// Abre y reclama la interfaz de salida, recuperando de "Unable to claim
+// interface": libera, resetea el dispositivo y reintenta una vez. Si aun asi
+// falla, la interfaz la tiene el sistema (impresora dada de alta en macOS) y hay
+// que quitarla de Ajustes del Sistema > Impresoras.
+async function _usbAcquire(device){
+  try{await device.open();}catch(e){/* puede ya estar abierto */}
+  const iface=device.configuration?.interfaces.find(i=>
+    i.alternate.endpoints.some(e=>e.direction==='out'));
+  if(!iface)throw new Error('No se encontro interfaz de salida');
+  const num=iface.interfaceNumber;
+  try{await device.claimInterface(num);}
+  catch(e){
+    try{await device.releaseInterface(num);}catch(_){}
+    try{await device.reset();}catch(_){}
+    await new Promise(r=>setTimeout(r,300));
+    await device.claimInterface(num); // si vuelve a fallar, propaga el error
+  }
+  const ep=iface.alternate.endpoints.find(e=>e.direction==='out');
+  return ep.endpointNumber;
+}
 
 async function connectUSB(){
+  if(_usbLock)return{success:false,error:'Conexion en curso, intenta de nuevo en un momento'};
+  _usbLock=true;
   try{
     const device=await navigator.usb.requestDevice({filters:[
       {vendorId:0x0416},{vendorId:0x0483},{vendorId:0x04B8},{vendorId:0x0525},{vendorId:0x1FC9},
       {classCode:7}
     ]});
-    await device.open();
-    const iface=device.configuration.interfaces.find(i=>
-      i.alternate.endpoints.some(e=>e.direction==='out'));
-    if(!iface)throw new Error('No se encontro interfaz de salida');
-    await device.claimInterface(iface.interfaceNumber);
-    const ep=iface.alternate.endpoints.find(e=>e.direction==='out');
+    _usbEndpoint=await _usbAcquire(device);
     _usbDevice=device;
-    _usbEndpoint=ep.endpointNumber;
     _startUsbWatch();
     return{success:true,name:device.productName||'Impresora USB'};
   }catch(e){return{success:false,error:e.message};}
+  finally{_usbLock=false;}
 }
 
 async function _sendToUSB(text){
@@ -2235,23 +2257,19 @@ async function _sendToUSB(text){
 }
 
 async function tryAutoConnectUSB(){
-  if(!navigator.usb?.getDevices)return false;
+  if(!navigator.usb?.getDevices||_usbLock)return false;
+  _usbLock=true;
   try{
     const devices=await navigator.usb.getDevices();
     for(const device of devices){
       try{
-        await device.open();
-        const iface=device.configuration.interfaces.find(i=>
-          i.alternate.endpoints.some(e=>e.direction==='out'));
-        if(!iface)continue;
-        await device.claimInterface(iface.interfaceNumber);
-        const ep=iface.alternate.endpoints.find(e=>e.direction==='out');
+        _usbEndpoint=await _usbAcquire(device);
         _usbDevice=device;
-        _usbEndpoint=ep.endpointNumber;
         return true;
       }catch(e){}
     }
   }catch(e){}
+  finally{_usbLock=false;}
   return false;
 }
 
@@ -2266,7 +2284,7 @@ function _stopUsbWatch(){if(_usbWatch){clearInterval(_usbWatch);_usbWatch=null;}
 function _startUsbWatch(){
   _stopUsbWatch();
   _usbWatch=setInterval(async()=>{
-    if(_usbBusy)return; // nunca pisar una impresion en curso
+    if(_usbBusy||_usbLock)return; // no pisar una impresion ni un intento de conexion en curso
     if(_usbDevice&&_usbEndpoint){
       try{await _usbDevice.transferOut(_usbEndpoint,new Uint8Array([0x00]));return;}
       catch(e){
