@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -339,6 +339,7 @@ const TARIFAS_ENVIO = {
   mesa_2: {label:'Mesa 2 · Adentro',precio:0,emoji:'🍽️'},
   mesa_3: {label:'Mesa 3 · Afuera',precio:0,emoji:'🪑'},
   mesa_4: {label:'Mesa 4 · Afuera',precio:0,emoji:'🪑'},
+  mesa_5: {label:'Mesa 5 · Afuera',precio:0,emoji:'🪑'},
 };
 // Etiquetas ORIGINALES de mesa antes de habilitar 4 mesas (2 adentro / 2 afuera).
 // hydrateState congela la etiqueta de entonces en cada pedido historico para que
@@ -1849,7 +1850,7 @@ function ProductChip({id,cat,size=24,pad=14}){
     style={{background:'#fbf4ea',border:'1px solid rgba(221,192,161,.55)',width:size+pad,height:size+pad}}>
     <TwemojiIcon code={st.emoji} size={size}/></span>);
 }
-const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'home',mesa_2:'home',mesa_3:'sun',mesa_4:'sun'};
+const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'home',mesa_2:'home',mesa_3:'sun',mesa_4:'sun',mesa_5:'sun'};
 
 // ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
 function analyzeHistorico(jornadas,productos){
@@ -2537,6 +2538,22 @@ async function _sendRaw(text){
 }
 // Este dispositivo tiene papel: solo el que lo tiene atiende la cola compartida.
 function tieneImpresora(){return!!(printerCharacteristic||_usbDevice);}
+
+// ─── WAKE LOCK ─────────────────────────────────────────────────────
+// Mantiene la pantalla encendida en el equipo servidor. Android suspende el
+// GATT Bluetooth al apagar la pantalla: esa es la causa #1 de "se desconecta
+// mucho". Se pide solo en el servidor y se re-pide al volver el foco (el
+// sistema lo suelta al ocultar la pestana).
+// ponytail: no hay Bluetooth en segundo plano en un navegador; esto solo cubre
+// pantalla encendida + app al frente. Impresion con la app cerrada => app nativa.
+let _wakeLock=null;
+async function pedirWakeLock(){
+  if(!('wakeLock'in navigator)||_wakeLock)return;
+  try{_wakeLock=await navigator.wakeLock.request('screen');
+    _wakeLock.addEventListener('release',()=>{_wakeLock=null;});}
+  catch(e){/* sin permiso o no soportado: el equipo tendra que quedarse despierto solo */}
+}
+async function soltarWakeLock(){try{await _wakeLock?.release();}catch(e){}_wakeLock=null;}
 
 async function printTicket(pedido,opts){
   snd.print();
@@ -4817,7 +4834,7 @@ function ClienteEditModal({cliente,onClose,onGuardar}){
 }
 
 function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGastoFijo,onAgregarGastoFijo,onEliminarGastoFijo,
-  onActualizarImpresora,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,
+  onActualizarImpresora,esServidor,onServidor,onImportarProductos,onImportarCostos,onAgregarEmpleado,onEditarEmpleado,onEliminarEmpleado,
   onGuardarCliente,onEliminarCliente,onEliminarClientes,
   syncStatus,lastCloudAt,deviceInfo,onSyncNow,onPullFromCloud,onSetDeviceRole,onListBackups,onRestoreBackup,
   onAuditHistoricalData,onRepairHistoricalData}){
@@ -4887,7 +4904,7 @@ function AdminPage({state,onAgregarProducto,onActualizarProducto,onActualizarGas
         </div>
       </div>)}
 
-      {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} cola={state.colaImpresion} onActualizar={onActualizarImpresora}/>)}
+      {tab==='impresora'&&(<ImpresoraTab impresora={state.impresora} cola={state.colaImpresion} onActualizar={onActualizarImpresora} esServidor={esServidor} onServidor={onServidor}/>)}
 
       {tab==='config'&&(<ConfigTab state={state} onActualizarGastoFijo={onActualizarGastoFijo}
         onAgregarGastoFijo={onAgregarGastoFijo} onEliminarGastoFijo={onEliminarGastoFijo}
@@ -5251,7 +5268,7 @@ function ImportarTab({onImportarProductos,onImportarCostos,productos,costos}){
   </div>);
 }
 
-function ImpresoraTab({impresora,cola,onActualizar}){
+function ImpresoraTab({impresora,cola,onActualizar,esServidor,onServidor}){
   const [status,setStatus]=useState(null);const hasBT='bluetooth' in navigator;const hasUSB='usb' in navigator;
   const pendientes=(cola||[]).filter(j=>!j.impreso).length;
   const conectarBT=async()=>{setStatus({kind:'info',text:'Buscando BT...'});const r=await connectBluetooth();
@@ -5280,9 +5297,22 @@ function ImpresoraTab({impresora,cola,onActualizar}){
           <p className="font-bold"><Icon name="alert" size={14} className="mr-1"/>Sin conexion directa</p>
           <p className="text-xs mt-1">Los tickets se imprimiran como vista previa.</p></div>}
         <Btn full color="gray" onClick={testPrint}><Icon name="printer" size={15} className="mr-1.5"/>Ticket de prueba</Btn>
+        <div className={`rounded-2xl p-4 border-2 ${esServidor?'border-green-300 bg-green-50':'border-gray-200 bg-gray-50'}`}>
+          <div className="flex items-center justify-between gap-3">
+            <div><p className="text-sm font-bold">Este equipo es la impresora servidor</p>
+              <p className="text-xs text-gray-500">Solo el servidor imprime la cola. Enciéndelo en el equipo que tiene la impresora.</p></div>
+            <button onClick={()=>onServidor(!esServidor)} role="switch" aria-checked={!!esServidor} aria-label="Este equipo es la impresora servidor"
+              className={`w-12 h-6 rounded-full shrink-0 transition-colors duration-150 ${esServidor?'bg-green-500':'bg-gray-300'} relative`}>
+              <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all duration-150 ${esServidor?'right-0.5':'left-0.5'}`}/></button></div>
+          {esServidor
+            ?<p className="text-[11px] text-green-700 mt-2"><Icon name="check" size={12} className="mr-1"/>Manténlo enchufado y con la app abierta. La pantalla se queda encendida sola para no perder el Bluetooth.</p>
+            :impresora.conectada
+              ?<p className="text-[11px] text-red-600 mt-2"><Icon name="alert" size={12} className="mr-1"/>Tienes impresora conectada pero este equipo NO es el servidor: no imprimirá la cola. Actívalo si el ticket debe salir aquí.</p>
+              :<p className="text-[11px] text-[var(--text-soft)] mt-2">Los demás equipos (meseros) déjalos apagados aquí: solo encolan.</p>}
+        </div>
         <div className="rounded-2xl p-3 bg-[rgba(242,191,90,.12)] border border-[rgba(215,101,22,.18)]">
           <p className="text-xs font-black text-[var(--brand-strong)]"><Icon name="printer" size={13} className="mr-1"/>Cola compartida: {pendientes} pendiente(s)</p>
-          <p className="text-[11px] text-[var(--text-soft)] mt-1">Los meseros mandan el pedido desde su telefono y este dispositivo lo imprime solo, sin que nadie toque la computadora. Si la impresora se cae, el ticket se queda en la cola y sale al reconectar.</p>
+          <p className="text-[11px] text-[var(--text-soft)] mt-1">Los meseros mandan el pedido desde su telefono y el equipo servidor lo imprime solo, sin que nadie toque la computadora. Si la impresora se cae, el ticket se queda en la cola y sale al reconectar.</p>
         </div>
         <div className="flex items-center justify-between">
           <div><p className="text-sm font-bold">Auto-imprimir</p><p className="text-xs text-gray-400">Al crear pedido y al agregar una ronda</p></div>
@@ -5377,6 +5407,19 @@ function App(){
   const pedidosNuevos=state.jornadaActiva?(state.jornadaActiva.pedidos||[]).filter(p=>p.estado==='nuevo').length:0;
   const [toast,setToast]=useState(null);
   const [previewPedido,setPreviewPedido]=useState(null);
+  // Bandera LOCAL de este equipo (no se sincroniza): solo el "servidor de
+  // impresion" saca trabajos de la cola compartida. Evita que dos equipos
+  // impriman el mismo ticket (doble) o que ninguno lo haga (ambiguo).
+  const [esServidor,_setEsServidor]=useState(()=>{try{return localStorage.getItem('kapulits_impresora_servidor')==='1';}catch(e){return false;}});
+  const setEsServidor=useCallback(v=>{try{v?localStorage.setItem('kapulits_impresora_servidor','1'):localStorage.removeItem('kapulits_impresora_servidor');}catch(e){}_setEsServidor(v);},[]);
+  // Mantener pantalla encendida solo mientras este equipo es el servidor.
+  useEffect(()=>{
+    if(!esServidor){soltarWakeLock();return;}
+    pedirWakeLock();
+    const onVis=()=>{if(!document.hidden)pedirWakeLock();};
+    document.addEventListener('visibilitychange',onVis);
+    return()=>{document.removeEventListener('visibilitychange',onVis);soltarWakeLock();};
+  },[esServidor]);
   const showToast=(msg,color='green')=>{setToast({msg,color});setTimeout(()=>setToast(null),2500);};
   // Register global preview + toast callbacks
   useEffect(()=>{_showTicketPreview=(pedido)=>setPreviewPedido(pedido);_showToast=showToast;return()=>{_showTicketPreview=null;_showToast=null;};},[]);
@@ -5406,7 +5449,7 @@ function App(){
   useEffect(()=>{const t=setInterval(()=>setColaTick(x=>x+1),20000);return()=>clearInterval(t);},[]);
   const pendientesIds=(state.colaImpresion||[]).filter(j=>!j.impreso).map(j=>j.id).join(',');
   useEffect(()=>{
-    if(!pendientesIds||!tieneImpresora())return;
+    if(!pendientesIds||!tieneImpresora()||!esServidor)return;
     let cancelado=false;
     (async()=>{
       const hechos=[];
@@ -5427,7 +5470,7 @@ function App(){
       if(!cancelado&&hechos.length)marcarRef.current(hechos);
     })();
     return()=>{cancelado=true;};
-  },[pendientesIds,colaTick]);
+  },[pendientesIds,colaTick,esServidor]);
 
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
@@ -5456,7 +5499,7 @@ function App(){
     {page==='admin'&&<AdminPage state={state} onAgregarProducto={d=>{agregarProducto(d);showToast('Producto agregado');}} onActualizarProducto={actualizarProducto}
       onActualizarGastoFijo={actualizarGastoFijo} onAgregarGastoFijo={n=>{agregarGastoFijo(n);showToast('Gasto fijo agregado');}}
       onEliminarGastoFijo={id=>{eliminarGastoFijo(id);showToast('Gasto fijo eliminado','red');}}
-      onActualizarImpresora={actualizarImpresora}
+      onActualizarImpresora={actualizarImpresora} esServidor={esServidor} onServidor={setEsServidor}
       onImportarProductos={p=>{importarProductos(p);showToast('Productos actualizados');}}
       onImportarCostos={c=>{importarCostos(c);showToast('Costos actualizados');}}
       onAgregarEmpleado={(n,r,s)=>{agregarEmpleado(n,r,s);showToast('Empleado agregado');}}
