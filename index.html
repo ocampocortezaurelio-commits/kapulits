@@ -2119,7 +2119,7 @@ function generarPDF(tipo,jornadas,productos){
 
 // ─── PRINTER SANITIZER (ASCII for 58mm thermal) ────────────────────
 const ACCENT_MAP={'á':'a','é':'e','í':'i','ó':'o','ú':'u','ñ':'n','Á':'A','É':'E','Í':'I','Ó':'O','Ú':'U','Ñ':'N',
-  '¡':'!','¿':'?','ü':'u','Ü':'U','à':'a','è':'e','ì':'i','ò':'o','ù':'u','\u2019':"'"};
+  '¡':'!','¿':'?','ü':'u','Ü':'U','à':'a','è':'e','ì':'i','ò':'o','ù':'u','\u2019':"'",'·':' '};
 const EMOJI_MAP={'🛵':'ENV','🚗':'ENV','🏃':'REC','📍':'Dir:','📝':'Nota:','🙏':'','💰':'$','✅':'OK',
   '🍲':'','🌮':'','🫓':'','🧀':'','🥙':'','🫔':'','🥪':'','🍜':'','🥤':'','🍹':'','🥛':'','🧪':'',
   '🎉':'','🌟':'','━':'-','─':'-','│':'|'};
@@ -2548,65 +2548,103 @@ function _ticketField(label,value,cols=TICKET_COLS){
   for(let i=1;i<lines.length;i++)s+=base+hang+lines[i]+'\n';
   return s;
 }
-const _lineaItem=i=>` ${String(i.cantidad).padStart(2)}x ${String(i.nombre||'').substring(0,18).padEnd(18)} ${fmt(i.subtotal).padStart(7)}\n`;
+const _lineaItem=i=>` ${String(i.cantidad).padStart(2)}x ${String(i.nombre||'').substring(0,19).padEnd(19)} ${fmt(i.subtotal).padStart(6)}\n`;
 // opts.ronda -> ticket de ACTUALIZACION: solo lo nuevo, para cocina. Sin total
 // de la cuenta (evita que alguien cobre una ronda suelta como si fuera todo).
 // Sin opts -> cuenta completa; si hubo varias rondas, se desglosan por tanda.
 function _buildBTText(pedido,opts){
   const ronda=opts&&opts.ronda;
-  const sep='-'.repeat(TICKET_COLS);
+  const C=TICKET_COLS;
+  const sep='-'.repeat(C);
+  const sepD='='.repeat(C);
   const rondas=rondasDe(pedido);
-  let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
-  if(ronda)t+=`  ** ACTUALIZACION DE PEDIDO **\n`;
-  t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}`;
-  t+=ronda?`   RONDA ${ronda.n||''}\n`:`\n`;
-  t+=`  ${pedido.fecha}  ${ronda?(ronda.hora||pedido.hora):pedido.hora}\n`;
-  // Destination block — prominent, centered, framed
+  // Centra un string en el ancho del ticket
+  const _ctr=s=>{const p=Math.max(0,Math.floor((C-s.length)/2));return ' '.repeat(p)+s+'\n';};
+  // Label izq + valor der, alineado al borde derecho
+  const _lr=(label,val)=>{const v=fmt(val);const gap=C-label.length-v.length;return label+' '.repeat(Math.max(1,gap))+v+'\n';};
+
+  // ── LOGO / ENCABEZADO ──────────────────────────────────────────────
+  let t='\n'+sepD+'\n';
+  t+=_ctr(NEGOCIO.nombre.toUpperCase());
+  t+=_ctr(NEGOCIO.slogan);
+  t+=sepD+'\n';
+
+  // ── FOLIO Y FECHA ──────────────────────────────────────────────────
+  const folioLine=`PEDIDO #${String(pedido.numero).padStart(3,'0')}${ronda?`   RONDA ${ronda.n||''}`:``}`;
+  t+=_ctr(folioLine);
+  t+=_ctr(`${pedido.fecha}  ${ronda?(ronda.hora||pedido.hora):pedido.hora}`);
+
+  // ── DESTINO ────────────────────────────────────────────────────────
   const _destTxt=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
-  const _ctr=s=>{const p=Math.max(0,Math.floor((TICKET_COLS-s.length)/2));return ' '.repeat(p)+s+'\n';};
   t+=sep+'\n';
   t+=_ctr(_destTxt);
   const _rtl=recogerTipoLabel(pedido.recogerTipo);
   if(_rtl)t+=_ctr(_rtl.toUpperCase());
   if(esMesa(pedido.tipoEntrega)&&pedido.atencion)t+=_ctr('Atencion '+String(pedido.atencion));
   t+=sep+'\n';
+
+  // ── DATOS DEL CLIENTE ──────────────────────────────────────────────
   if(pedido.cliente)t+=_ticketField('Cliente: ',pedido.cliente);
   if(pedido.telefono&&!ronda)t+=`  Tel: ${pedido.telefono}\n`;
   const mesero=(ronda&&ronda.mesero)||pedido.mesero;
   if(mesero)t+=_ticketField('Atiende: ',mesero);
   if(pedido.direccion&&!ronda)t+=_ticketField('Dir: ',pedido.direccion);
   t+=sep+'\n';
+
+  // ── RONDA (actualizacion de cocina) ───────────────────────────────
   if(ronda){
+    t+=_ctr('** ACTUALIZACION DE PEDIDO **');
     (ronda.items||[]).forEach(i=>{t+=_lineaItem(i);});
     t+=sep+'\n';
     const sub=(ronda.items||[]).reduce((a,i)=>a+(Number(i.subtotal)||0),0);
-    t+=`  Suma ronda:   ${fmt(sub).padStart(10)}\n`;
-    t+=`  (Solo lo agregado; la cuenta\n   completa se imprime al cobrar)\n${sep}\n\n\n`;
+    t+=_lr('  Suma ronda:',sub);
+    t+=sep+'\n';
+    t+=_ctr('(Cuenta completa al cobrar)');
+    t+='\n\n\n';
     return sanitize(t);
   }
+
+  // ── ITEMS ──────────────────────────────────────────────────────────
   if(rondas.length>1){
     rondas.forEach(r=>{
-      t+=(`  Ronda ${r.n||''}${r.hora?'  '+r.hora:''}${r.mesero?'  '+r.mesero:''}`).substring(0,TICKET_COLS)+'\n';
+      const rHdr=`Ronda ${r.n||''}${r.hora?'  '+r.hora:''}${r.mesero?'  '+r.mesero:''}`;
+      t+=sep+'\n';
+      t+=('  '+rHdr).substring(0,C)+'\n';
       (r.items||[]).forEach(i=>{t+=_lineaItem(i);});
     });
   }else{
     (pedido.items||[]).forEach(i=>{t+=_lineaItem(i);});
   }
   t+=sep+'\n';
+
+  // ── NOTAS ─────────────────────────────────────────────────────────
   if(pedido.notas){
     t+=`  Notas:\n`;
-    _wrapWords(pedido.notas,TICKET_COLS-2).forEach(l=>{t+=`  ${l}\n`;});
+    _wrapWords(pedido.notas,C-2).forEach(l=>{t+=`  ${l}\n`;});
     t+=sep+'\n';
   }
-  if(pedido.costoEnvio>0)t+=`  Envio:        ${fmt(pedido.costoEnvio).padStart(10)}\n`;
-  t+=`  TOTAL:        ${fmt(pedido.total).padStart(10)}\n${sep}\n`;
+
+  // ── TOTALES ────────────────────────────────────────────────────────
+  if(pedido.costoEnvio>0)t+=_lr('  Envio:',pedido.costoEnvio);
+  t+=_lr('  TOTAL:',pedido.total);
+
+  // ── CUENTA DIVIDIDA ────────────────────────────────────────────────
   if(Array.isArray(pedido.split)&&pedido.split.length){
-    t+=`  CUENTA DIVIDIDA (${pedido.split.length})\n`;
-    pedido.split.forEach(s=>{t+=`  Persona ${s.persona} ${(s.metodo==='transferencia'?'Transf':'Efect').padEnd(6)}${fmt(s.total).padStart(9)}\n`;});
     t+=sep+'\n';
+    t+=_ctr(`CUENTA DIVIDIDA (${pedido.split.length})`);
+    pedido.split.forEach(s=>{
+      const met=(s.metodo==='transferencia'?'Transf':'Efect').padEnd(6);
+      const tot=fmt(s.total).padStart(9);
+      t+=`  Persona ${s.persona} ${met}${tot}\n`;
+    });
   }
-  _wrapWords(NEGOCIO.direccion,TICKET_COLS-2).forEach(l=>{t+=`  ${l}\n`;});
-  t+=`  Tel.: ${NEGOCIO.telefono}\n  Gracias por tu compra!\n\n\n`;
+
+  // ── PIE ────────────────────────────────────────────────────────────
+  t+=sepD+'\n';
+  _wrapWords(NEGOCIO.direccion,C).forEach(l=>{t+=_ctr(l);});
+  t+=_ctr(`Tel.: ${NEGOCIO.telefono}`);
+  t+=_ctr('Gracias por tu compra!');
+  t+='\n\n\n';
   return sanitize(t);
 }
 
@@ -2926,8 +2964,14 @@ function _buildCierreText(jornada){
   const m=buildCajaModel(jornada);
   const metAbbr=x=>x==='efectivo'?'EF':x==='transferencia'?'TR':x==='mixto'?'MX':'--';
   const L=(label,val)=>`  ${label.padEnd(18)}${fmt(val).padStart(10)}\n`;
-  let t=`\n      K'apul'Its\n    Birria y algo mas\n${sep}\n`;
-  t+=`    CORTE DE CAJA\n${sep}\n`;
+  const _ctrC=s=>{const p=Math.max(0,Math.floor((32-s.length)/2));return ' '.repeat(p)+s+'\n';};
+  const sepD2='='.repeat(32);
+  let t='\n'+sepD2+'\n';
+  t+=_ctrC(NEGOCIO.nombre.toUpperCase());
+  t+=_ctrC(NEGOCIO.slogan);
+  t+=sepD2+'\n';
+  t+=_ctrC('CORTE DE CAJA');
+  t+=sep+'\n';
   t+=`  Fecha:    ${jornada.fecha}\n`;
   t+=`  Apertura: ${jornada.horaApertura||'--'}\n`;
   t+=`  Cierre:   ${jornada.horaCierre||'--'}\n`;
@@ -2997,9 +3041,10 @@ function _buildCierreText(jornada){
     t+=sep+'\n';
   }
   if(jornada.observaciones)t+=`  Obs: ${jornada.observaciones}\n${sep}\n`;
-  t+=`  ${NEGOCIO.nombre}\n`;
-  t+=`  ${NEGOCIO.direccion}\n`;
-  t+=`  Tel: ${NEGOCIO.telefono}\n\n\n`;
+  t+=sepD2+'\n';
+  _wrapWords(NEGOCIO.direccion,28).forEach(l=>{t+=_ctrC(l);});
+  t+=_ctrC(`Tel.: ${NEGOCIO.telefono}`);
+  t+='\n\n\n';
   return sanitize(t);
 }
 
