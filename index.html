@@ -3312,6 +3312,25 @@ function BottomNav({page,setPage,hasJornada,pedidosNuevos=0}){
 }
 
 // ─── MODALS ─────────────────────────────────────────────────────────
+function AgregarCambioModal({open,onClose,onAgregar}){
+  const [monto,setMonto]=useState('');
+  const montoN=Number(monto)||0;
+  const ok=montoN>0;
+  const confirm=()=>{if(!ok)return;onAgregar(montoN);setMonto('');onClose();};
+  return(<Modal open={open} onClose={onClose} title="Agregar cambio a la caja">
+    <div className="flex flex-col gap-5">
+      <div className="bg-green-50 rounded-2xl p-4 text-sm text-green-700">
+        <p className="font-bold mb-1">Cambio recibido durante la jornada</p>
+        <p className="opacity-70">Se suma al efectivo disponible y queda registrado en el corte de caja.</p>
+      </div>
+      <Input label="Monto del cambio" type="number" prefix="$" placeholder="0" value={monto} onChange={setMonto}/>
+      <Btn full color="green" size="lg" disabled={!ok} onClick={confirm}>
+        <Icon name="plus" size={18} className="mr-1.5"/>Agregar {ok?fmt(montoN):''} a la caja
+      </Btn>
+    </div>
+  </Modal>);
+}
+
 function AbrirJornadaModal({open,onClose,onAbrir}){
   const [fondo,setFondo]=useState('');const [fecha,setFecha]=useState(localISODate());
   // B2: el fondo inicial debe ser >= 0 (vacio equivale a 0).
@@ -3724,7 +3743,7 @@ function DeliverySelector({tipo,setTipo,recogerTipo,setRecogerTipo}){
 
 // ─── DASHBOARD ──────────────────────────────────────────────────────
 function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEliminarAjuste,onPagarRepartidor,onPagarTodosRepartidores}){
-  const [showAbrir,setShowAbrir]=useState(false);const [showCerrar,setShowCerrar]=useState(false);
+  const [showAbrir,setShowAbrir]=useState(false);const [showCerrar,setShowCerrar]=useState(false);const [showCambio,setShowCambio]=useState(false);
   const ja=state.jornadaActiva;
   // TODAS las cifras del dashboard salen de buildCajaModel (misma fuente que
   // el modal y el ticket de cierre). No usar calcVentasTotal/ledger aqui.
@@ -3793,6 +3812,11 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
                 <p className="mt-1 text-[18px] font-black">{metTr.n} · {fmt(metTr.monto)}</p>
               </div>
             </div>
+            <div className="mt-3 pt-3 border-t border-[rgba(255,237,202,.18)]">
+              <button onClick={()=>setShowCambio(true)} className="w-full py-2.5 rounded-xl border border-[rgba(255,237,202,.28)] bg-[rgba(255,248,236,.14)] text-[rgba(255,244,224,.92)] text-xs font-bold text-center card-press flex items-center justify-center gap-1.5">
+                <Icon name="plus" size={13}/>Agregar cambio a la caja
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -3845,6 +3869,8 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
     <CerrarJornadaModal open={showCerrar} onClose={()=>setShowCerrar(false)} onCerrar={onCerrar} jornada={ja}
       onRegistrarAjuste={onRegistrarAjuste} onEliminarAjuste={onEliminarAjuste} onPagarRepartidor={onPagarRepartidor}
       onPagarTodosRepartidores={onPagarTodosRepartidores}/>
+    <AgregarCambioModal open={showCambio} onClose={()=>setShowCambio(false)}
+      onAgregar={monto=>{onRegistrarAjuste&&onRegistrarAjuste({tipo:'entrada',monto,motivo:'Cambio'});}}/>
   </div>);
 }
 
