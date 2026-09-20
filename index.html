@@ -2619,8 +2619,8 @@ function _buildBTText(pedido,opts){
 
   // ── NOTAS ─────────────────────────────────────────────────────────
   if(pedido.notas){
-    t+=`  Notas:\n`;
-    _wrapWords(pedido.notas,C-2).forEach(l=>{t+=`  ${l}\n`;});
+    t+=_ctr('** NOTAS **');
+    _wrapWords(pedido.notas.toUpperCase(),C).forEach(l=>{t+=_ctr(l);});
     t+=sep+'\n';
   }
 
