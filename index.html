@@ -347,6 +347,7 @@ const TARIFAS_ENVIO = {
 const TIPO_LABEL_LEGACY={mesa_1:'Mesa 1 · Afuera',mesa_2:'Mesa 2 · Adentro'};
 // Etiqueta visible de un pedido: la congelada al crearlo manda sobre el catalogo.
 const tipoLabelDe=p=>(p&&p.tipoLabel)||TARIFAS_ENVIO[p&&p.tipoEntrega]?.label||(p&&p.tipoEntrega)||'';
+const recogerTipoLabel=rt=>rt==='mandaditos'?'Mandaditos':rt==='cliente'?'El cliente pasa':null;
 // Mesa = cuenta abierta en local (tarifa 0). Reutiliza todo el flujo de pedido:
 // el pedido queda "nuevo" hasta cobrar; se le agregan rondas con "Agregar".
 const esMesa=t=>/^mesa_/.test(String(t||''));
@@ -1375,7 +1376,7 @@ function useStore(){
     pedidoId,tipo,rondaId:rondaId||null,origen:deviceInfo.id,impreso:false
   }),[deviceInfo.id]);
 
-  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir,mesero)=>{
+  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir,mesero,recogerTipo)=>{
     if(!state.jornadaActiva)return null;
     const ja=state.jornadaActiva;
     const totalProductos=items.reduce((s,i)=>s+i.subtotal,0);
@@ -1395,6 +1396,7 @@ function useStore(){
     const pedido={id:uid(),numero:folio,fecha:ja.fecha,hora:now(),_ts:stamp,
       items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
       tipoEntrega,tipoLabel:(TARIFAS_ENVIO[tipoEntrega]||{}).label||tipoEntrega,atencion,
+      recogerTipo:(tipoEntrega==='recoger'&&recogerTipo)||null,
       mesero:mesero||'',rondas:[rondaInicial],
       cliente:cliente||'',telefono:telefono||'',direccion:direccion||'',notas:notas||'',
       estado:'nuevo',cobrado:false,metodoPago:null};
@@ -2448,9 +2450,15 @@ function buildTicketHTML(pedido){
   h+=`<div class="c sm">Birria y algo más</div><div class="s"></div>`;
   h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
   h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
-  if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
-  if(pedido.telefono)h+=`<div>Tel: ${pedido.telefono}</div>`;
-  h+=`<div>Tipo: ${tipoLabelDe(pedido)}</div>`;
+  h+=`<div class="s"></div>`;
+  const _destLabel=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+  const _rtLabel=recogerTipoLabel(pedido.recogerTipo);
+  h+=`<div class="c b" style="font-size:15px;border:2px solid #000;padding:5px 2px;margin:3px 0;letter-spacing:.04em">${_destLabel}</div>`;
+  if(_rtLabel)h+=`<div class="c b" style="font-size:13px">${_rtLabel}</div>`;
+  if(esMesa(pedido.tipoEntrega)&&pedido.atencion)h+=`<div class="c" style="font-size:12px">Atencion ${pedido.atencion}</div>`;
+  h+=`<div class="s"></div>`;
+  if(pedido.cliente)h+=`<div class="b" style="font-size:13px">Cliente: ${pedido.cliente}</div>`;
+  if(pedido.telefono)h+=`<div class="b">Tel: ${pedido.telefono}</div>`;
   if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
   h+=`<div class="s"></div>`;
   pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
@@ -2486,10 +2494,16 @@ function buildTicketsHTML(pedidos=[]){
     h+=`<div class="c sm">Birria y algo mas</div><div class="s"></div>`;
     h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
     h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
-    if(pedido.cliente)h+=`<div class="b">Cliente: ${pedido.cliente}</div>`;
-    if(pedido.telefono)h+=`<div>Tel: ${pedido.telefono}</div>`;
-    h+=`<div>Tipo: ${tipoLabelDe(pedido)}</div>`;
-    if(pedido.direccion)h+=`<div>${pedido.direccion}</div>`;
+    h+=`<div class="s"></div>`;
+    const _dl=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+    const _rl=recogerTipoLabel(pedido.recogerTipo);
+    h+=`<div class="c b" style="font-size:15px;border:2px solid #000;padding:5px 2px;margin:3px 0;letter-spacing:.04em">${_dl}</div>`;
+    if(_rl)h+=`<div class="c b" style="font-size:13px">${_rl}</div>`;
+    if(esMesa(pedido.tipoEntrega)&&pedido.atencion)h+=`<div class="c" style="font-size:12px">Atencion ${pedido.atencion}</div>`;
+    h+=`<div class="s"></div>`;
+    if(pedido.cliente)h+=`<div class="b" style="font-size:13px">Cliente: ${pedido.cliente}</div>`;
+    if(pedido.telefono)h+=`<div class="b">Tel: ${pedido.telefono}</div>`;
+    if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
     h+=`<div class="s"></div>`;
     pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
     h+=`<div class="s"></div>`;
@@ -2547,11 +2561,17 @@ function _buildBTText(pedido,opts){
   t+=`  PEDIDO #${String(pedido.numero).padStart(3,'0')}`;
   t+=ronda?`   RONDA ${ronda.n||''}\n`:`\n`;
   t+=`  ${pedido.fecha}  ${ronda?(ronda.hora||pedido.hora):pedido.hora}\n`;
+  // Destination block — prominent, centered, framed
+  const _destTxt=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+  const _ctr=s=>{const p=Math.max(0,Math.floor((TICKET_COLS-s.length)/2));return ' '.repeat(p)+s+'\n';};
+  t+=sep+'\n';
+  t+=_ctr(_destTxt);
+  const _rtl=recogerTipoLabel(pedido.recogerTipo);
+  if(_rtl)t+=_ctr(_rtl.toUpperCase());
+  if(esMesa(pedido.tipoEntrega)&&pedido.atencion)t+=_ctr('Atencion '+String(pedido.atencion));
+  t+=sep+'\n';
   if(pedido.cliente)t+=_ticketField('Cliente: ',pedido.cliente);
   if(pedido.telefono&&!ronda)t+=`  Tel: ${pedido.telefono}\n`;
-  const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
-  t+=_ticketField(tipoTxt+' ',tipoLabelDe(pedido));
-  if(esMesa(pedido.tipoEntrega)&&pedido.atencion)t+=_ticketField('Atencion: ',String(pedido.atencion));
   const mesero=(ronda&&ronda.mesero)||pedido.mesero;
   if(mesero)t+=_ticketField('Atiende: ',mesero);
   if(pedido.direccion&&!ronda)t+=_ticketField('Dir: ',pedido.direccion);
@@ -3612,7 +3632,7 @@ function CartSummary({cart,costoEnvio,onAdd,onRem}){
   </div>);
 }
 
-function DeliverySelector({tipo,setTipo}){
+function DeliverySelector({tipo,setTipo,recogerTipo,setRecogerTipo}){
   // Dos bloques separados: lo que SALE del negocio y lo que se consume AQUI.
   // Boton plano; el seleccionado crece y toma el aro de marca.
   const claseBtn=sel=>`py-3 min-h-[60px] rounded-xl border shadow-[0_5px_14px_rgba(120,60,15,.12)] flex flex-col items-center justify-center gap-0.5 transition-transform duration-200 hover:scale-[1.03] active:scale-95 ${sel?'scale-105 border-[var(--brand)] ring-2 ring-[var(--brand-strong)] ring-offset-2 ring-offset-[var(--surface)]':'border-[#ecd6bd]'}`;
@@ -3637,6 +3657,17 @@ function DeliverySelector({tipo,setTipo}){
             {v.precio>0&&<span className="text-[10px] font-black text-[var(--brand-strong)]">+{fmt(v.precio)}</span>}
           </button>))}
       </div>
+      {tipo==='recoger'&&setRecogerTipo&&(
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          {[['cliente','El cliente pasa'],['mandaditos','Mandaditos']].map(([k,label])=>(
+            <button key={k} onClick={()=>setRecogerTipo(recogerTipo===k?null:k)} aria-pressed={recogerTipo===k}
+              style={{background:recogerTipo===k?'linear-gradient(180deg,#d4f5d4,#b6edb6)':'linear-gradient(180deg,#f4fdf4,#e8f8e8)'}}
+              className={`py-2.5 min-h-[48px] rounded-xl border shadow-[0_3px_10px_rgba(40,120,40,.10)] flex flex-col items-center justify-center transition-transform duration-200 hover:scale-[1.02] active:scale-95 ${recogerTipo===k?'scale-105 border-green-500 ring-2 ring-green-400 ring-offset-1 ring-offset-[var(--surface)]':'border-[#c6e8c6]'}`}>
+              <span className="text-[11px] font-black leading-tight text-[#1a6b1a] text-center px-2">{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
     <div>
       <p className="t-kicker mb-2">Mesa · comer aquí</p>
@@ -3916,8 +3947,8 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
         clientes={state.clientes} impresora={state.impresora} mesero={mesero}
         pedidosActivos={activos} onAgregarACuenta={p=>{setShowCrear(false);setShowAgregar(p);}}
-        onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir)=>{
-          onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir);
+        onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir,recogerTipo)=>{
+          onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir,recogerTipo);
           setShowCrear(false);}}/>
       {showAgregar&&<AgregarItemsModal open={!!showAgregar} pedido={(ja.pedidos||[]).find(p=>p.id===showAgregar.id)||showAgregar}
         productos={state.productos} mesero={mesero}
@@ -3964,11 +3995,15 @@ function buildTicketImage(pedido){
     rows.push({t:'sep'});
     rows.push({t:'center',s:`PEDIDO #${String(pedido.numero).padStart(3,'0')}`,b:true,size:24});
     rows.push({t:'center',s:`${pedido.fecha}   ${pedido.hora}`,size:18,c:'#7a6255'});
-    rows.push({t:'space'});
+    rows.push({t:'sep'});
+    const _imgDest=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+    rows.push({t:'center',s:_imgDest,b:true,size:22});
+    const _imgRtl=recogerTipoLabel(pedido.recogerTipo);
+    if(_imgRtl)rows.push({t:'center',s:_imgRtl.toUpperCase(),b:true,size:18});
+    if(esMesa(pedido.tipoEntrega)&&pedido.atencion)rows.push({t:'center',s:'Atencion '+String(pedido.atencion),size:18});
+    rows.push({t:'sep'});
     if(pedido.cliente)wrapLeft('Cliente: ',pedido.cliente);
-    if(pedido.telefono)rows.push({t:'left',s:'Tel: '+pedido.telefono});
-    const tipoTxt=esMesa(pedido.tipoEntrega)?'LOCAL':(pedido.tipoEntrega==='recoger'?'REC':'ENV');
-    wrapLeft(tipoTxt+' ',tipoLabelDe(pedido));
+    if(pedido.telefono)rows.push({t:'left',s:'Tel: '+pedido.telefono,b:true});
     if(pedido.direccion)wrapLeft('Dir: ',pedido.direccion);
     rows.push({t:'sep'});
     pedido.items.forEach(i=>{rows.push({t:'lr',l:`${i.cantidad}x ${i.nombre}`,r:fmt(i.subtotal)});});
@@ -4173,15 +4208,16 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
 
 function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCrear,pedidosActivos=[],onAgregarACuenta}){
   const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
+  const [recogerTipo,setRecogerTipo]=useState(null);
   const [cliente,setCliente]=useState('');const [telefono,setTelefono]=useState('');const [direccion,setDireccion]=useState('');
   const [etiqueta,setEtiqueta]=useState('Casa');const [notas,setNotas]=useState('');
   const [sinTel,setSinTel]=useState(false);
   // Cuando la mesa elegida ya tiene cuenta abierta, avisamos. clienteNuevo=true
   // significa que el usuario confirmo que es OTRO cliente (nueva atencion).
   const [clienteNuevo,setClienteNuevo]=useState(false);
-  useEffect(()=>{if(open){setCart({});setTipo('recoger');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);setClienteNuevo(false);}},[open]);
+  useEffect(()=>{if(open){setCart({});setTipo('recoger');setRecogerTipo(null);setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);setClienteNuevo(false);}},[open]);
   // Al cambiar de mesa/tipo se reevalua el aviso desde cero.
-  const setTipoReset=t=>{setTipo(t);setClienteNuevo(false);};
+  const setTipoReset=t=>{setTipo(t);setClienteNuevo(false);if(t!=='recoger')setRecogerTipo(null);};
   // Mesa con cuenta abierta (no cobrada, no cancelada) = posible mismo cliente.
   const mesaOcupada=esMesa(tipo)?(pedidosActivos||[]).find(p=>p.tipoEntrega===tipo&&!p.cobrado&&p.estado!=='cancelado'):null;
   const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
@@ -4199,12 +4235,12 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCr
   const crear=()=>{
     if(!puedeCrear)return;
     const its=items.map(i=>buildItem(i));
-    onCrear(its,tipo,cliente.trim(),direccion.trim(),notas,sinTel?'':telefono.trim(),etiqueta);
+    onCrear(its,tipo,cliente.trim(),direccion.trim(),notas,sinTel?'':telefono.trim(),etiqueta,recogerTipo);
     setCart({});setCliente('');setTelefono('');setDireccion('');setNotas('');};
   return(<Modal open={open} onClose={onClose} title="NUEVO PEDIDO" fullScreen>
     <div className="space-y-4 menu-upper">
       {mesero&&<p className="t-kicker">Atiende: <span className="text-[var(--brand-strong)]">{mesero}</span></p>}
-      <DeliverySelector tipo={tipo} setTipo={setTipoReset}/>
+      <DeliverySelector tipo={tipo} setTipo={setTipoReset} recogerTipo={recogerTipo} setRecogerTipo={setRecogerTipo}/>
       {mesaOcupada&&!clienteNuevo&&(
         <div className="rounded-[18px] border-2 border-[#e0a53a] bg-[rgba(242,191,90,.16)] p-4 space-y-3">
           <p className="text-sm font-black text-[#8f3708]"><Icon name="alert" size={15} className="mr-1"/>{tipoLabelDe(mesaOcupada).split(' ·')[0]} ya tiene cuenta abierta</p>
@@ -4242,9 +4278,11 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const [pagoEfectivo,setPagoEfectivo]=useState('');
   const [pagoTransferencia,setPagoTransferencia]=useState('');
   const [sinTel,setSinTel]=useState(!(pedido.telefono&&normTel(pedido.telefono).length===10));
+  const [recogerTipo,setRecogerTipo]=useState(pedido.recogerTipo||null);
   useEffect(()=>{
     if(!open)return;
     setSinTel(!(pedido.telefono&&normTel(pedido.telefono).length===10));
+    setRecogerTipo(pedido.recogerTipo||null);
     const c={};
     pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
     setCart(c);
@@ -4271,13 +4309,13 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
     if(!items.length||!datosOk)return;
     const its=items.map(i=>buildItem(i));
     const pagoSimple=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
-    onGuardar({items:its,tipoEntrega:tipo,cliente:cliente.trim(),telefono:sinTel?'':telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
+    onGuardar({items:its,tipoEntrega:tipo,recogerTipo:tipo==='recoger'?recogerTipo:null,cliente:cliente.trim(),telefono:sinTel?'':telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
   const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
   const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||(pagoEditado.efectivo>=0&&pagoEditado.transferencia>=0&&sumPagos(pagoEditado)===_roundMoney(totalFinal));
   return(<Modal open={open} onClose={onClose} title={`Editar #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4">
-      <DeliverySelector tipo={tipo} setTipo={setTipo}/>
+      <DeliverySelector tipo={tipo} setTipo={t=>{setTipo(t);if(t!=='recoger')setRecogerTipo(null);}} recogerTipo={recogerTipo} setRecogerTipo={setRecogerTipo}/>
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
         cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
       {pedido.cobrado&&<div className="surface-card space-y-3">
@@ -5695,7 +5733,7 @@ function App(){
       onReimprimir={p=>{encolarImpresion(p.id);showToast(`Cuenta #${String(p.numero).padStart(3,'0')} enviada a impresora`);}}
       onAgregarItems={(id,items)=>{const r=agregarItemsPedido(id,items,deviceInfo.meseroNombre||'');
         showToast(r?`Ronda ${r.n} enviada a cocina`:'No se pudo agregar',r?'green':'red');}}
-      onCrearPedido={(i,t,c,dir,n,tel,et)=>{const p=crearPedido(i,t,c,dir,n,tel,et,deviceInfo.meseroNombre||'');showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
+      onCrearPedido={(i,t,c,dir,n,tel,et,rt)=>{const p=crearPedido(i,t,c,dir,n,tel,et,deviceInfo.meseroNombre||'',rt);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
       onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
         if(c.cobrado)showToast('Cobrado','green');
         else if(c.estado==='entregado')showToast('Entregado','green');
