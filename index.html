@@ -3934,6 +3934,8 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
   const [showAgregar,setShowAgregar]=useState(null);const [showMesero,setShowMesero]=useState(false);
   const [showDividir,setShowDividir]=useState(null);
   const [filtro,setFiltro]=useState('todos');
+  const [filtroMetodo,setFiltroMetodo]=useState('todos');
+  const cambiarFiltro=f=>{setFiltro(f);setFiltroMetodo('todos');};
   const ja=state.jornadaActiva;
   const mesero=deviceInfo?.meseroNombre||'';
   if(!ja)return(<div className="safe-bottom"><TopBar title="Pedidos"/>
@@ -3975,7 +3977,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
       <Btn full size="lg" onClick={abrirCrear}>+ Nuevo pedido</Btn>
       <div className="flex rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 gap-1">
         {FILTROS_PEDIDO.map(f=>(
-          <button key={f.id} onClick={()=>setFiltro(f.id)} aria-pressed={filtro===f.id}
+          <button key={f.id} onClick={()=>cambiarFiltro(f.id)} aria-pressed={filtro===f.id}
             className={`flex-1 py-2.5 min-h-[44px] text-[11px] md:text-sm font-black rounded-[16px] transition-all duration-150 ${filtro===f.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_8px_20px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>{f.l}</button>))}
       </div>
 
@@ -3987,9 +3989,28 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
         ?<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{llevarActivos.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div>
         :<EmptyState icon="bag" title="Sin pedidos para llevar" sub="Aquí salen los de recoger y envío pendientes"/>)}
 
-      {filtro==='cobrados'&&(cobrados.length
-        ?<div className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">{cobrados.map(p=><PedidoCard key={p.id} {...props(p)} showEntregar={false} compact/>)}</div>
-        :<EmptyState icon="cash" title="Sin pedidos cobrados" sub="Los pedidos pagados se agrupan aquí"/>)}
+      {filtro==='cobrados'&&(()=>{
+        const cEf=cobrados.filter(p=>(p.metodoPago||'efectivo')==='efectivo');
+        const cTr=cobrados.filter(p=>p.metodoPago==='transferencia');
+        const cMx=cobrados.filter(p=>p.metodoPago==='mixto');
+        const lista=filtroMetodo==='efectivo'?cEf:filtroMetodo==='transferencia'?cTr:filtroMetodo==='mixto'?cMx:cobrados;
+        const subFiltros=[
+          {id:'todos',l:`Todos (${cobrados.length})`},
+          {id:'efectivo',l:`Efectivo (${cEf.length})`},
+          {id:'mixto',l:`Mixto (${cMx.length})`},
+          {id:'transferencia',l:`Transfer. (${cTr.length})`},
+        ];
+        return(<React.Fragment>
+          <div className="flex rounded-[18px] border border-[rgba(104,74,56,0.10)] bg-[rgba(255,251,246,0.80)] p-1 gap-1">
+            {subFiltros.map(sf=>(
+              <button key={sf.id} onClick={()=>setFiltroMetodo(sf.id)} aria-pressed={filtroMetodo===sf.id}
+                className={`flex-1 py-2 min-h-[38px] text-[10px] md:text-xs font-black rounded-[12px] transition-all duration-150 ${filtroMetodo===sf.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_4px_12px_rgba(178,69,24,0.10)]':'text-[#7b6356]'}`}>{sf.l}</button>))}
+          </div>
+          {lista.length
+            ?<div className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">{lista.map(p=><PedidoCard key={p.id} {...props(p)} showEntregar={false} compact/>)}</div>
+            :<EmptyState icon="cash" title={`Sin pedidos ${filtroMetodo==='todos'?'cobrados':filtroMetodo}`} sub="Cambia el filtro de método de pago"/>}
+        </React.Fragment>);
+      })()}
 
       {filtro==='todos'&&(<React.Fragment>
       {nuevos.length>0&&(<div className="fade-in">
