@@ -3808,7 +3808,7 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
             <div className="grid grid-cols-3 gap-3 mt-3">
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]"><Icon name="cash" size={11} className="mr-1"/>Efectivo</p>
-                <p className="mt-1 text-[18px] font-black">{metEf.n} · {fmt(metEf.monto)}</p>
+                <p className="mt-1 text-[18px] font-black">{metEf.n+(metMx.n>0?'+':'')} · {fmt(m.cobrosEfectivo)}</p>
               </div>
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]"><Icon name="cash" size={11}/><Icon name="phone" size={11} className="mr-1"/>Mixtos</p>
@@ -3816,7 +3816,7 @@ function DashboardPage({state,syncStatus,onAbrir,onCerrar,onRegistrarAjuste,onEl
               </div>
               <div className="rounded-[20px] bg-[rgba(255,248,236,.10)] border border-[rgba(255,240,215,.14)] p-3 text-center">
                 <p className="text-[9px] uppercase tracking-[0.08em] text-[rgba(255,244,224,.68)]"><Icon name="phone" size={11} className="mr-1"/>Transferencia</p>
-                <p className="mt-1 text-[18px] font-black">{metTr.n} · {fmt(metTr.monto)}</p>
+                <p className="mt-1 text-[18px] font-black">{metTr.n+(metMx.n>0?'+':'')} · {fmt(m.cobrosTransferencia)}</p>
               </div>
             </div>
             <div className="mt-3 pt-3 border-t border-[rgba(255,237,202,.18)]">
