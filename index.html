@@ -1447,7 +1447,10 @@ function useStore(){
       }
     }
 
-    const mergedCambios={...cambios,totalProductos:newTotalProd,costoEnvio:newCostoEnvio,total:newTotal,_ts:new Date().toISOString()};
+    // Si cambiaron los items, colapsar rondas a una sola entrada para que la UI
+    // no muestre el desglose viejo de rondas sobre los items ya editados.
+    const mergedCambios={...cambios,totalProductos:newTotalProd,costoEnvio:newCostoEnvio,total:newTotal,_ts:new Date().toISOString(),
+      ...(cambios.items?{rondas:[{id:(pedOld.rondas?.[0]?.id||uid()),n:1,hora:pedOld.hora||now(),mesero:pedOld.mesero||'',items:cambios.items,_ts:new Date().toISOString()}]}:{})};
     ja.pedidos=ja.pedidos.map(p=>p.id===pedidoId?{...p,...mergedCambios}:p);
 
     // Cancel cobrado: reactivate existing anulada reversal, or create new one
@@ -2752,7 +2755,7 @@ function buildCierreDesglose(jornada){
     // nunca fuente principal.
     if(cobrado){
       const sumP=(Number(pagos.efectivo)||0)+(Number(pagos.transferencia)||0);
-      if(Math.abs(sumP-total)>0.5){
+      if(total>0&&Math.abs(sumP-total)>0.5){
         const met=metodoFromPagos(pagos,metodoRef);
         if(met==='mixto'&&sumP>0){
           const ef=_roundMoney(pagos.efectivo*(total/sumP));
@@ -2918,7 +2921,11 @@ function _validarCaja(jornada,desg,gastos){
   const ventas=jornada?.ventas||[];
   const mandaditos=jornada?.mandaditos||[];
   pedidos.forEach(p=>{
-    if(!p||p.estado==='cancelado')return;
+    if(!p)return;
+    if(p.estado==='cancelado'){
+      if(p.cobrado)w.push({code:'cobrado_cancelado',folio:p.numero,detail:`cobrado luego cancelado ($${fmt(p.total)}) – verificar si devolviste el dinero`});
+      return;
+    }
     const compTotal=num(p.totalProductos)+num(p.costoEnvio);
     if(p.total!=null&&Math.abs(num(p.total)-compTotal)>TOL){
       w.push({code:'total_descuadrado',folio:p.numero,detail:`total ${fmt(p.total)} ≠ productos ${fmt(p.totalProductos)} + envío ${fmt(p.costoEnvio)}`});
