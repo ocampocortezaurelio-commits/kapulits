@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.10';
+const APP_VERSION = '2.11';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -386,7 +386,7 @@ const PRODUCTOS_DEFAULT = [
   // Aguas naturales: un solo producto con sabores desplegables. costo 8 = punto
   // medio de los costos reales ya capturados (Jamaica 7 / Horchata 9); el dueño
   // lo ajusta en Admin si cambia. ponytail: valor derivado de datos reales, no inventado.
-  {id:'agua_natural',nombre:'Aguas 1 L',precio:35,costo:8,cat:'bebida',emoji:'🥤',activo:true,variantes:['Piña','Horchata','Jamaica','Chía con limón']},
+  {id:'agua_natural',nombre:'Aguas 1 L',precio:35,costo:8,cat:'bebida',emoji:'🥤',activo:true,variantes:['Piña','Horchata','Jamaica','Chía con limón','Naranja chía con limón']},
   // Medio litro: mismos sabores que la de litro, a $20. costo 4 = mitad del costo
   // de litro (8) por ser medio volumen; el dueño lo ajusta en Admin. ponytail: derivado, no inventado.
   {id:'agua_natural_medio',nombre:'Aguas 1/2 L',precio:20,costo:4,cat:'bebida',emoji:'🥤',activo:true,variantes:['Piña','Horchata','Jamaica','Chía con limón']},
@@ -401,7 +401,7 @@ const PRODUCTOS_DEFAULT = [
 // versionado en migrateProducts corre UNA sola vez por estado: al terminar,
 // hydrateState estampa state.catalogVersion = CATALOG_VERSION, de modo que
 // ediciones manuales posteriores del dueño nunca se revierten.
-const CATALOG_VERSION = 3;
+const CATALOG_VERSION = 4;
 
 const COMBO_DESC = {
   combo_jarocho:'4 Quesabirrias Mano + 2 Coca 600ml + 1 Consome',
@@ -971,6 +971,15 @@ function migrateProducts(prods,catalogVersion){
     // Para dejar claro el tamaño, la de litro pasa de "Aguas naturales" a "Aguas 1 L"
     // SOLO si conserva el nombre default (no se pisa un rename del dueño).
     next=next.map(p=>(p.id==='agua_natural'&&normNombreProducto(p.nombre)==='aguas naturales')?{...p,nombre:'Aguas 1 L'}:p);
+  }
+  if((Number(catalogVersion)||0)<4){
+    // v4 (2026-10): sabor "Naranja chia con limon" en Aguas 1 L. Se agrega a la
+    // lista existente sin duplicarlo ni reemplazar los sabores que el dueno ya tenga.
+    const sabor='Naranja chía con limón';
+    next=next.map(p=>{
+      if(p.id!=='agua_natural'||!Array.isArray(p.variantes))return p;
+      return p.variantes.some(v=>normNombreProducto(v)===normNombreProducto(sabor))?p:{...p,variantes:[...p.variantes,sabor]};
+    });
   }
   return next;
 }
@@ -2480,6 +2489,7 @@ function buildTicketHTML(pedido){
   h+=`<div class="s"></div>`;
   const _destLabel=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
   const _rtLabel=recogerTipoLabel(pedido.recogerTipo);
+  if(esMesa(pedido.tipoEntrega))h+=`<div class="c b" style="font-size:13px">PARA COMER AQUÍ</div>`;
   h+=`<div class="c b" style="font-size:15px;border:2px solid #000;padding:5px 2px;margin:3px 0;letter-spacing:.04em">${_destLabel}</div>`;
   if(_rtLabel)h+=`<div class="c b" style="font-size:13px">${_rtLabel}</div>`;
   if(esMesa(pedido.tipoEntrega)&&pedido.atencion)h+=`<div class="c" style="font-size:12px">Atencion ${pedido.atencion}</div>`;
@@ -2524,6 +2534,7 @@ function buildTicketsHTML(pedidos=[]){
     h+=`<div class="s"></div>`;
     const _dl=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
     const _rl=recogerTipoLabel(pedido.recogerTipo);
+    if(esMesa(pedido.tipoEntrega))h+=`<div class="c b" style="font-size:13px">PARA COMER AQUÍ</div>`;
     h+=`<div class="c b" style="font-size:15px;border:2px solid #000;padding:5px 2px;margin:3px 0;letter-spacing:.04em">${_dl}</div>`;
     if(_rl)h+=`<div class="c b" style="font-size:13px">${_rl}</div>`;
     if(esMesa(pedido.tipoEntrega)&&pedido.atencion)h+=`<div class="c" style="font-size:12px">Atencion ${pedido.atencion}</div>`;
@@ -2608,6 +2619,7 @@ function _buildBTText(pedido,opts){
   // ── DESTINO ────────────────────────────────────────────────────────
   const _destTxt=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
   t+=sep+'\n';
+  if(esMesa(pedido.tipoEntrega))t+=_ctr('PARA COMER AQUI');
   t+=_ctr(_destTxt);
   const _rtl=recogerTipoLabel(pedido.recogerTipo);
   if(_rtl)t+=_ctr(_rtl.toUpperCase());
@@ -3965,6 +3977,23 @@ function AgregarItemsModal({open,pedido,productos,mesero,onClose,onAgregar}){
 
 // Busqueda de pedidos: sin acentos ni mayusculas, para que "jose" encuentre "José".
 const normTexto=s=>String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+// Campos buscables de un pedido: texto (cliente, telefono, direccion, notas, mesero,
+// platillos, mesa, estado, metodo de pago, fecha, hora...) y montos (total,
+// subtotal, envio, pagos). Las llaves tecnicas (ids, _ts) y las cantidades no se buscan.
+const _noBuscable=k=>k.startsWith('_')||k==='id'||k==='ts'||/Id$/.test(k)||k==='cantidad'||k==='n'||k==='impresoPor';
+function camposPedido(p){
+  const texto=[],numeros=[];
+  const walk=(v,k='')=>{
+    if(v==null||v===false||v===''||_noBuscable(k))return;
+    if(Array.isArray(v)){v.forEach(x=>walk(x,k));return;}
+    if(typeof v==='object'){Object.entries(v).forEach(([kk,x])=>walk(x,kk));return;}
+    if(typeof v==='number'){numeros.push(v);return;}
+    if(typeof v==='string')texto.push(v);
+  };
+  walk(p);
+  texto.push(tipoLabelDe(p),p.cobrado?'cobrado':'por cobrar');
+  return{texto:normTexto(texto.join(' | ')),numeros};
+}
 function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgregarItems,onSetMesero,onReimprimir}){
   const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
   const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
@@ -3987,14 +4016,23 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
   const mesasActivas=activos.filter(p=>esMesa(p.tipoEntrega));
   const llevarActivos=activos.filter(p=>!esMesa(p.tipoEntrega));
   const pendientesImpresion=(state.colaImpresion||[]).filter(j=>!j.impreso).length;
-  // Busqueda: numero de pedido ("7" o "007"), nombre del cliente o telefono
-  // (8+ digitos o los ultimos digitos). Busca en TODOS los pedidos de la jornada.
+  // Busqueda en TODOS los pedidos de la jornada, sin importar la pestaña.
+  // Solo numeros ("7", "007", "355", "$355"): numero de pedido, montos exactos
+  // o telefono (3+ digitos). Con letras o separadores (":", "-", "/"): texto.
   const qTexto=normTexto(busqueda);
-  const qDig=busqueda.replace(/\D/g,'');
   const buscando=qTexto!=='';
-  const coincide=p=>(qDig&&String(p.numero)===String(Number(qDig)))
-    ||(qDig.length>=3&&String(p.telefono||'').replace(/\D/g,'').includes(qDig))
-    ||(qTexto&&!/^\d+$/.test(qTexto)&&normTexto(p.cliente).includes(qTexto));
+  const soloNumeros=/^[\d.$,\s]+$/.test(busqueda.trim());
+  const qDig=busqueda.replace(/\D/g,'');
+  const qNum=Number(busqueda.replace(/[$,\s]/g,''));
+  const coincide=p=>{
+    if(soloNumeros){
+      if(!qDig)return false;
+      if(camposPedido(p).numeros.some(x=>Math.abs(x-qNum)<0.005))return true;
+      return qDig.length>=3&&String(p.telefono||'').replace(/\D/g,'').includes(qDig);
+    }
+    return camposPedido(p).texto.includes(qTexto)
+      ||(qDig.length>=3&&String(p.telefono||'').replace(/\D/g,'').includes(qDig));
+  };
   const resultados=buscando?pedidos.filter(coincide):[];
   const props=p=>({
     pedido:p,
@@ -4024,7 +4062,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
       <Btn full size="lg" onClick={abrirCrear}>+ Nuevo pedido</Btn>
       <div className="relative">
         <input type="search" value={busqueda} onChange={e=>setBusqueda(e.target.value)}
-          placeholder="Buscar por # de pedido, cliente o teléfono" aria-label="Buscar pedido"
+          placeholder="Buscar: pedido, cliente, teléfono, monto, mesa..." aria-label="Buscar pedido"
           className="w-full rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] px-4 py-3 min-h-[44px] text-sm font-bold text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[rgba(215,101,22,.35)]"/>
         {buscando&&(<button onClick={()=>setBusqueda('')} aria-label="Limpiar búsqueda"
           className="absolute right-2 top-1/2 -translate-y-1/2 min-h-[40px] min-w-[40px] rounded-full text-[var(--text-muted)] font-black">×</button>)}
@@ -4150,6 +4188,7 @@ function buildTicketImage(pedido){
     rows.push({t:'center',s:`${pedido.fecha}   ${pedido.hora}`,size:18,c:'#7a6255'});
     rows.push({t:'sep'});
     const _imgDest=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+    if(esMesa(pedido.tipoEntrega))rows.push({t:'center',s:'PARA COMER AQUI',b:true,size:18});
     rows.push({t:'center',s:_imgDest,b:true,size:22});
     const _imgRtl=recogerTipoLabel(pedido.recogerTipo);
     if(_imgRtl)rows.push({t:'center',s:_imgRtl.toUpperCase(),b:true,size:18});

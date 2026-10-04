@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20261004-buscador-barra';
+const CACHE_NAME = 'kapulits-assets-v20261004-buscador-campos';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [
