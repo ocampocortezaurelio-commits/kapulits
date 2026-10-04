@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.8';
+const APP_VERSION = '2.9';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -406,6 +406,9 @@ const COMBO_DESC = {
   combo_clasico:'2 Quesabirrias Mano + 1 Coca 600ml + 1 Consome chico',
   combo_2x2:'2 Consome + 2 Coca 600ml + Tortillitas de mano',
 };
+// Componentes de un combo, uno por linea, para que el ticket diga que lleva
+// (cocina y caja no deben depender de recordar la receta).
+const componentesCombo=i=>{const d=COMBO_DESC[i.productoId||i.id];return d?d.split(' + ').map(s=>s.trim()):[];};
 
 const COSTOS_DEFAULT = [
   {id:'carne',nombre:'Carne (Birria)',unidad:'KG',pu:170,cat:'carne'},
@@ -2483,7 +2486,7 @@ function buildTicketHTML(pedido){
   if(pedido.telefono)h+=`<div class="b">Tel: ${pedido.telefono}</div>`;
   if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
   h+=`<div class="s"></div>`;
-  pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
+  pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;componentesCombo(i).forEach(c=>{h+=`<div class="r" style="font-size:11px"><span>&nbsp;&nbsp;- ${c}</span></div>`;});});
   h+=`<div class="s"></div>`;
   h+=`<div class="r"><span>Subtotal productos</span><span>${fmt(pedido.totalProductos)}</span></div>`;
   if(pedido.costoEnvio>0)h+=`<div class="r"><span>Costo envío</span><span>${fmt(pedido.costoEnvio)}</span></div>`;
@@ -2527,7 +2530,7 @@ function buildTicketsHTML(pedidos=[]){
     if(pedido.telefono)h+=`<div class="b">Tel: ${pedido.telefono}</div>`;
     if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
     h+=`<div class="s"></div>`;
-    pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;});
+    pedido.items.forEach(i=>{h+=`<div class="r"><span>${i.cantidad}x ${i.nombre}</span><span>${fmt(i.subtotal)}</span></div>`;componentesCombo(i).forEach(c=>{h+=`<div class="r" style="font-size:11px"><span>&nbsp;&nbsp;- ${c}</span></div>`;});});
     h+=`<div class="s"></div>`;
     h+=`<div class="r"><span>Subtotal productos</span><span>${fmt(pedido.totalProductos)}</span></div>`;
     if(pedido.costoEnvio>0)h+=`<div class="r"><span>Costo envio</span><span>${fmt(pedido.costoEnvio)}</span></div>`;
@@ -2570,7 +2573,11 @@ function _ticketField(label,value,cols=TICKET_COLS){
   for(let i=1;i<lines.length;i++)s+=base+hang+lines[i]+'\n';
   return s;
 }
-const _lineaItem=i=>` ${String(i.cantidad).padStart(2)}x ${String(i.nombre||'').substring(0,19).padEnd(19)} ${fmt(i.subtotal).padStart(6)}\n`;
+const _lineaItem=i=>{
+  let s=` ${String(i.cantidad).padStart(2)}x ${String(i.nombre||'').substring(0,19).padEnd(19)} ${fmt(i.subtotal).padStart(6)}\n`;
+  componentesCombo(i).forEach(c=>{s+=`      - ${c}\n`;});
+  return s;
+};
 // opts.ronda -> ticket de ACTUALIZACION: solo lo nuevo, para cocina. Sin total
 // de la cuenta (evita que alguien cobre una ronda suelta como si fuera todo).
 // Sin opts -> cuenta completa; si hubo varias rondas, se desglosan por tanda.
@@ -4124,7 +4131,7 @@ function buildTicketImage(pedido){
     if(pedido.telefono)rows.push({t:'left',s:'Tel: '+pedido.telefono,b:true});
     if(pedido.direccion)wrapLeft('Dir: ',pedido.direccion);
     rows.push({t:'sep'});
-    pedido.items.forEach(i=>{rows.push({t:'lr',l:`${i.cantidad}x ${i.nombre}`,r:fmt(i.subtotal)});});
+    pedido.items.forEach(i=>{rows.push({t:'lr',l:`${i.cantidad}x ${i.nombre}`,r:fmt(i.subtotal)});componentesCombo(i).forEach(c=>rows.push({t:'left',s:'    - '+c}));});
     rows.push({t:'sep'});
     if(pedido.notas){rows.push({t:'left',s:'Notas:'});_wrapWords(pedido.notas,COLS).forEach(l=>rows.push({t:'left',s:l}));rows.push({t:'sep'});}
     if(pedido.costoEnvio>0)rows.push({t:'lr',l:'Envio',r:fmt(pedido.costoEnvio)});
