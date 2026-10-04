@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.9';
+const APP_VERSION = '2.10';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -340,6 +340,8 @@ const TARIFAS_ENVIO = {
   mesa_3: {label:'Mesa 3 · Afuera',precio:0,emoji:'🪑'},
   mesa_4: {label:'Mesa 4 · Afuera',precio:0,emoji:'🪑'},
   mesa_5: {label:'Mesa 5 · Afuera',precio:0,emoji:'🪑'},
+  // Barra: se atiende igual que una mesa (atencion, cuenta abierta, ticket de cocina).
+  mesa_barra: {label:'Barra · Adentro',precio:0,emoji:'🍺'},
 };
 // Etiquetas ORIGINALES de mesa antes de habilitar 4 mesas (2 adentro / 2 afuera).
 // hydrateState congela la etiqueta de entonces en cada pedido historico para que
@@ -1883,7 +1885,7 @@ function ProductChip({id,cat,size=24,pad=14}){
     style={{background:'#fbf4ea',border:'1px solid rgba(221,192,161,.55)',width:size+pad,height:size+pad}}>
     <TwemojiIcon code={st.emoji} size={size}/></span>);
 }
-const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'home',mesa_2:'home',mesa_3:'sun',mesa_4:'sun',mesa_5:'sun'};
+const TIPO_ENVIO_ICON={recoger:'bag',zona_centro:'bike',retirado:'car',mesa_1:'home',mesa_2:'home',mesa_3:'sun',mesa_4:'sun',mesa_5:'sun',mesa_barra:'home'};
 
 // ─── INTELLIGENCE ENGINE ────────────────────────────────────────────
 function analyzeHistorico(jornadas,productos){
@@ -3769,7 +3771,7 @@ function DeliverySelector({tipo,setTipo,recogerTipo,setRecogerTipo}){
     <div>
       <p className="t-kicker mb-2">Mesa · comer aquí</p>
       <div className="grid grid-cols-3 gap-2">{mesasAfuera.map(botonMesa)}</div>
-      {mesasAdentro.length>0&&<div className="grid grid-cols-2 gap-2 mt-2">{mesasAdentro.map(botonMesa)}</div>}
+      {mesasAdentro.length>0&&<div className="grid grid-cols-3 gap-2 mt-2">{mesasAdentro.map(botonMesa)}</div>}
     </div>
   </div>);
 }
@@ -3961,6 +3963,8 @@ function AgregarItemsModal({open,pedido,productos,mesero,onClose,onAgregar}){
     </div></Modal>);
 }
 
+// Busqueda de pedidos: sin acentos ni mayusculas, para que "jose" encuentre "José".
+const normTexto=s=>String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
 function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgregarItems,onSetMesero,onReimprimir}){
   const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
   const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
@@ -3968,6 +3972,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
   const [showDividir,setShowDividir]=useState(null);
   const [filtro,setFiltro]=useState('todos');
   const [filtroMetodo,setFiltroMetodo]=useState('todos');
+  const [busqueda,setBusqueda]=useState('');
   const cambiarFiltro=f=>{setFiltro(f);setFiltroMetodo('todos');};
   const ja=state.jornadaActiva;
   const mesero=deviceInfo?.meseroNombre||'';
@@ -3982,6 +3987,15 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
   const mesasActivas=activos.filter(p=>esMesa(p.tipoEntrega));
   const llevarActivos=activos.filter(p=>!esMesa(p.tipoEntrega));
   const pendientesImpresion=(state.colaImpresion||[]).filter(j=>!j.impreso).length;
+  // Busqueda: numero de pedido ("7" o "007"), nombre del cliente o telefono
+  // (8+ digitos o los ultimos digitos). Busca en TODOS los pedidos de la jornada.
+  const qTexto=normTexto(busqueda);
+  const qDig=busqueda.replace(/\D/g,'');
+  const buscando=qTexto!=='';
+  const coincide=p=>(qDig&&String(p.numero)===String(Number(qDig)))
+    ||(qDig.length>=3&&String(p.telefono||'').replace(/\D/g,'').includes(qDig))
+    ||(qTexto&&!/^\d+$/.test(qTexto)&&normTexto(p.cliente).includes(qTexto));
+  const resultados=buscando?pedidos.filter(coincide):[];
   const props=p=>({
     pedido:p,
     onEntregar:()=>onActualizarPedido(p.id,{estado:'entregado'}),
@@ -4008,21 +4022,35 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
         <Icon name="printer" size={13} className="mr-1"/>{pendientesImpresion} ticket(s) en cola. Se imprimen solos en cuanto la impresora responda.
       </div>)}
       <Btn full size="lg" onClick={abrirCrear}>+ Nuevo pedido</Btn>
+      <div className="relative">
+        <input type="search" value={busqueda} onChange={e=>setBusqueda(e.target.value)}
+          placeholder="Buscar por # de pedido, cliente o teléfono" aria-label="Buscar pedido"
+          className="w-full rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] px-4 py-3 min-h-[44px] text-sm font-bold text-[var(--text)] focus:outline-none focus:ring-2 focus:ring-[rgba(215,101,22,.35)]"/>
+        {buscando&&(<button onClick={()=>setBusqueda('')} aria-label="Limpiar búsqueda"
+          className="absolute right-2 top-1/2 -translate-y-1/2 min-h-[40px] min-w-[40px] rounded-full text-[var(--text-muted)] font-black">×</button>)}
+      </div>
       <div className="flex rounded-[22px] border border-[rgba(104,74,56,0.12)] bg-[rgba(255,251,246,0.92)] p-1.5 gap-1">
         {FILTROS_PEDIDO.map(f=>(
           <button key={f.id} onClick={()=>cambiarFiltro(f.id)} aria-pressed={filtro===f.id}
             className={`flex-1 py-2.5 min-h-[44px] text-[11px] md:text-sm font-black rounded-[16px] transition-all duration-150 ${filtro===f.id?'bg-[rgba(255,240,228,0.98)] text-[#a14017] shadow-[0_8px_20px_rgba(178,69,24,0.1)]':'text-[#7b6356]'}`}>{f.l}</button>))}
       </div>
 
-      {filtro==='mesas'&&(mesasActivas.length
+      {buscando&&(<React.Fragment>
+        <p className="section-kicker mb-2 text-[var(--brand-strong)]">Resultados ({resultados.length})</p>
+        {resultados.length
+          ?<div className="space-y-2 md:grid md:grid-cols-2 md:gap-3 md:space-y-0">{resultados.map(p=><PedidoCard key={p.id} {...props(p)} showEntregar={false} compact={!!p.cobrado}/>)}</div>
+          :<EmptyState icon="orders" title="Sin coincidencias" sub="Prueba con el número de pedido, el nombre del cliente o el teléfono"/>}
+      </React.Fragment>)}
+
+      {!buscando&&filtro==='mesas'&&(mesasActivas.length
         ?<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{mesasActivas.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div>
         :<EmptyState icon="home" title="Sin mesas activas" sub="Los pedidos para comer aquí aparecen en esta pestaña"/>)}
 
-      {filtro==='llevar'&&(llevarActivos.length
+      {!buscando&&filtro==='llevar'&&(llevarActivos.length
         ?<div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{llevarActivos.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div>
         :<EmptyState icon="bag" title="Sin pedidos para llevar" sub="Aquí salen los de recoger y envío pendientes"/>)}
 
-      {filtro==='cobrados'&&(()=>{
+      {!buscando&&filtro==='cobrados'&&(()=>{
         const cEf=cobrados.filter(p=>(p.metodoPago||'efectivo')==='efectivo');
         const cTr=cobrados.filter(p=>p.metodoPago==='transferencia');
         const cMx=cobrados.filter(p=>p.metodoPago==='mixto');
@@ -4045,7 +4073,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
         </React.Fragment>);
       })()}
 
-      {filtro==='todos'&&(<React.Fragment>
+      {!buscando&&filtro==='todos'&&(<React.Fragment>
       {nuevos.length>0&&(<div className="fade-in">
         <p className="section-kicker mb-2 text-[rgb(136,97,23)]">Nuevos ({nuevos.length})</p>
         <div className="space-y-3 md:grid md:grid-cols-2 md:gap-4 md:space-y-0">{nuevos.map(p=><PedidoCard key={p.id} {...props(p)}/>)}</div></div>)}
