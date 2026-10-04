@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.11';
+const APP_VERSION = '2.12';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -1383,13 +1383,15 @@ function useStore(){
     save({...state,jornadas:[...state.jornadas,j],jornadaActiva:j});
   },[state,save]);
 
-  const cerrarJornada=useCallback((totalEfectivo,observaciones)=>{
+  const cerrarJornada=useCallback((totalEfectivo,observaciones,digitalContado)=>{
     if(!state.jornadaActiva)return;
     // B2: el efectivo contado no puede ser negativo (no existe conteo fisico < 0).
     const contado=Number(totalEfectivo);
     if(!(contado>=0))return;
+    // Digital contado es opcional: si no se capturo, la jornada queda sin conciliacion digital.
+    const dig=digitalContado===''||digitalContado==null?null:Number(digitalContado);
     const ja={...state.jornadaActiva,estado:'cerrada',horaCierre:now(),
-      totalEfectivo:contado,observaciones:observaciones||''};
+      totalEfectivo:contado,digitalContado:dig!=null&&dig>=0?dig:null,observaciones:observaciones||''};
     const esperado=_calcEsperadoCaja(ja);
     ja.diferencia=contado-esperado;
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
@@ -1639,11 +1641,12 @@ function useStore(){
   // Movimiento real de caja con motivo obligatorio. tipo: 'salida' resta,
   // 'entrada' suma. NO se usa para faltante/sobrante (eso es resultado del
   // conteo, no una causa).
-  const registrarAjusteCaja=useCallback(({tipo,monto,motivo})=>{
+  const registrarAjusteCaja=useCallback(({tipo,monto,motivo,medio,categoria})=>{
     if(!state.jornadaActiva)return;
     const m=Number(monto)||0;
     if(m<=0||!String(motivo||'').trim())return; // motivo obligatorio
-    const ajuste={id:uid(),hora:now(),_ts:new Date().toISOString(),tipo:tipo==='entrada'?'entrada':'salida',monto:m,motivo:String(motivo).trim()};
+    const ajuste={id:uid(),hora:now(),_ts:new Date().toISOString(),tipo:tipo==='entrada'?'entrada':'salida',monto:m,motivo:String(motivo).trim(),
+      medio:medio==='digital'?'digital':'efectivo',...(categoria?{categoria}:{})};
     const ja={...state.jornadaActiva,ajustesCaja:[...(state.jornadaActiva.ajustesCaja||[]),ajuste]};
     const js=state.jornadas.map(j=>j.id===ja.id?ja:j);
     save({...state,jornadas:js,jornadaActiva:ja});
@@ -2877,16 +2880,25 @@ function buildCajaModel(jornada){
   //    RESULTADO del conteo (diferencia), nunca una causa que fuerce el cuadre.
   const mandaditos=j.mandaditos||[];
   const mandaditosPagadosEfectivo=mandaditos.reduce((s,m)=>s+num(m.pagoRepartidorEfectivo),0);
+  // Ajustes: medio 'efectivo' (default, incluye los historicos) o 'digital'.
+  // El digital mueve el banco esperado, no la caja fisica.
   const ajustes=j.ajustesCaja||[];
-  const salidasCaja=ajustes.filter(a=>a.tipo==='salida').reduce((s,a)=>s+num(a.monto),0);
-  const entradasCaja=ajustes.filter(a=>a.tipo==='entrada').reduce((s,a)=>s+num(a.monto),0);
+  const ajustesEf=ajustes.filter(a=>a.medio!=='digital');
+  const ajustesDig=ajustes.filter(a=>a.medio==='digital');
+  const salidasCaja=ajustesEf.filter(a=>a.tipo==='salida').reduce((s,a)=>s+num(a.monto),0);
+  const entradasCaja=ajustesEf.filter(a=>a.tipo==='entrada').reduce((s,a)=>s+num(a.monto),0);
+  const ingresosDigitales=_roundMoney(ajustesDig.filter(a=>a.tipo==='entrada').reduce((s,a)=>s+num(a.monto),0));
+  const salidasDigitales=_roundMoney(ajustesDig.filter(a=>a.tipo==='salida').reduce((s,a)=>s+num(a.monto),0));
   // Conciliacion de caja fisica.
   const fondoInicial=num(j.fondoInicial);
   const cajaEsperada=_roundMoney(fondoInicial+cobrosEfectivo-gastosCaja-mandaditosPagadosEfectivo-salidasCaja+entradasCaja);
-  const transferenciaEsperada=cobrosTransferencia;
+  const transferenciaEsperada=_roundMoney(cobrosTransferencia+ingresosDigitales-salidasDigitales);
   const dineroOperado=_roundMoney(cajaEsperada+transferenciaEsperada);
   const efectivoContado=j.totalEfectivo!=null?num(j.totalEfectivo):null;
   const diferencia=efectivoContado!=null?_roundMoney(efectivoContado-cajaEsperada):null;
+  // Digital contado (banco/app) vs digital esperado. Null si no se conto.
+  const digitalContado=j.digitalContado!=null?num(j.digitalContado):null;
+  const diferenciaDigital=digitalContado!=null?_roundMoney(digitalContado-transferenciaEsperada):null;
   // Utilidad del negocio (productos menos todos los gastos).
   const utilidadBrutaProductos=_roundMoney(productosTotal-gastosTotal);
   const warnings=_validarCaja(j,desg,gastos);
@@ -2903,6 +2915,7 @@ function buildCajaModel(jornada){
     gastosTotal, gastosCaja, gastosOtroMedio,
     // D. caja fisica
     fondoInicial, cajaEsperada, transferenciaEsperada, dineroOperado, efectivoContado, diferencia,
+    digitalContado, diferenciaDigital, ingresosDigitales, salidasDigitales,
     mandaditosPagadosEfectivo, salidasCaja, entradasCaja, ajustes,
     // E. utilidad
     utilidadBrutaProductos,
@@ -3074,6 +3087,7 @@ function _buildCierreText(jornada){
     t+=L('Diferencia',m.diferencia);
   }
   t+=L('Transfer esperada',m.transferenciaEsperada);
+  if(m.digitalContado!=null){t+=L('Digital contado',m.digitalContado);t+=L('Dif. digital',m.diferenciaDigital);}
   t+=L('Saldo caja+banco',m.dineroOperado);
   t+=sep+'\n';
   // E. UTILIDAD DEL NEGOCIO
@@ -3158,6 +3172,7 @@ function buildCierreHTML(jornada){
     h+=`<div class="r b" style="color:${m.diferencia===0?'#000':m.diferencia>0?'green':'red'}"><span>Diferencia</span><span>${fmt(m.diferencia)}</span></div>`;
   }
   h+=R('Transferencia esperada (banco)',m.transferenciaEsperada);
+  if(m.digitalContado!=null){h+=R('Digital contado',m.digitalContado);h+=R('Diferencia digital',m.diferenciaDigital);}
   h+=R('Saldo esperado caja+banco',m.dineroOperado,'b');
   // E. UTILIDAD DEL NEGOCIO
   h+=`<div class="s"></div>`;
@@ -3396,11 +3411,15 @@ function AbrirJornadaModal({open,onClose,onAbrir}){
 }
 
 function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onEliminarAjuste,onPagarRepartidor,onPagarTodosRepartidores}){
-  const [efectivo,setEfectivo]=useState('');const [obs,setObs]=useState('');
+  const [efectivo,setEfectivo]=useState('');const [obs,setObs]=useState('');const [digital,setDigital]=useState('');
   if(!jornada)return null;
   const m=buildCajaModel(jornada);
   const esperado=m.cajaEsperada;
   const dif=(Number(efectivo)||0)-esperado;
+  const digitalValido=digital!==''&&Number(digital)>=0;
+  // Diferencia digital contra el banco esperado (ya incluye ajustes digitales).
+  const difDig=digitalValido?_roundMoney(Number(digital)-m.transferenciaEsperada):0;
+  const registrarDig=(monto,motivo,categoria)=>{onRegistrarAjuste&&onRegistrarAjuste({tipo:monto>0?'entrada':'salida',monto:Math.abs(monto),motivo,medio:'digital',categoria});};
   // B2: el efectivo contado debe ser un numero >= 0 para poder cerrar.
   const efectivoValido=efectivo!==''&&Number(efectivo)>=0;
   const efectivoNegativo=efectivo!==''&&!(Number(efectivo)>=0);
@@ -3492,6 +3511,17 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
       {efectivoValido&&<div className={`rounded-xl p-3 text-sm font-bold text-center ${dif===0?'bg-green-50 text-green-700':Math.abs(dif)<10?'bg-yellow-50 text-yellow-700':'bg-red-50 text-red-600'}`}>
         {dif===0?'Caja cuadrada':dif>0?`Sobrante: ${fmt(dif)}`:`Faltante: ${fmt(Math.abs(dif))}`}</div>}
 
+      <Input label="Digital contado (banco / app)" type="number" placeholder="0" prefix="$" value={digital} onChange={setDigital}/>
+      {digitalValido&&(difDig===0
+        ?<div className="rounded-xl p-3 text-sm font-bold text-center bg-green-50 text-green-700">Digital cuadrado con el banco esperado</div>
+        :<div className="rounded-xl p-3 space-y-2 bg-yellow-50 text-yellow-800 text-sm">
+          <p className="font-bold text-center">{difDig>0?`Sobra en digital: ${fmt(difDig)}`:`Falta en digital: ${fmt(Math.abs(difDig))}`}</p>
+          {difDig>0&&<Btn full color="green" size="sm" onClick={()=>registrarDig(difDig,'Mandaditos cobrados en digital','mandaditos')}>Es mandaditos cobrado en digital · registrar {fmt(difDig)}</Btn>}
+          {difDig>0&&<Btn full color="gray" variant="outline" size="sm" onClick={()=>registrarDig(difDig,'Sobrante digital (conteo)','sobrante')}>Registrar como sobrante digital</Btn>}
+          {difDig<0&&<Btn full color="red" variant="outline" size="sm" onClick={()=>registrarDig(difDig,'Faltante digital (conteo)','faltante')}>Registrar faltante digital {fmt(Math.abs(difDig))}</Btn>}
+          <p className="text-[11px] opacity-70 text-center">Se guarda como ajuste digital con motivo y aparece en el cierre.</p>
+        </div>)}
+
       {/* E. UTILIDAD DEL NEGOCIO */}
       <div className="bg-gray-50 rounded-2xl p-4 space-y-1 text-sm">
         <h3 className="font-bold text-gray-700 text-sm mb-1">E · Utilidad del negocio</h3>
@@ -3502,10 +3532,10 @@ function CerrarJornadaModal({open,onClose,onCerrar,jornada,onRegistrarAjuste,onE
       </div>
 
       <Input label="Observaciones (opcional)" value={obs} onChange={setObs} placeholder="Notas del dia..."/>
-      <Btn full color="red" size="lg" disabled={!efectivoValido} onClick={()=>{onCerrar(efectivo,obs);onClose();}}>Cerrar y guardar jornada</Btn>
+      <Btn full color="red" size="lg" disabled={!efectivoValido} onClick={()=>{onCerrar(efectivo,obs,digitalValido?digital:null);onClose();}}>Cerrar y guardar jornada</Btn>
       <Btn full color="gray" size="sm" disabled={!efectivoValido} onClick={()=>{
         const snap={...jornada,estado:'cerrada',horaCierre:new Date().toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}),
-          totalEfectivo:Number(efectivo)||0,diferencia:(Number(efectivo)||0)-esperado,observaciones:obs||''};
+          totalEfectivo:Number(efectivo)||0,digitalContado:digitalValido?Number(digital):null,diferencia:(Number(efectivo)||0)-esperado,observaciones:obs||''};
         printCierreCaja(snap);
       }}><Icon name="printer" size={15} className="mr-1.5"/>Previsualizar impresion de cierre</Btn>
     </div></Modal>);
@@ -3521,6 +3551,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
   const [aTipo,setATipo]=useState('salida');
   const [aMonto,setAMonto]=useState('');
   const [aMotivo,setAMotivo]=useState('');
+  const [aMedio,setAMedio]=useState('efectivo');
   const [askAll,setAskAll]=useState(false);
   const mandaditos=jornada.mandaditos||[];
   const ajustes=jornada.ajustesCaja||[];
@@ -3540,7 +3571,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
   const canPago=!!repId;
   const canAjuste=(Number(aMonto)||0)>0&&!!aMotivo.trim();
   const guardarPago=()=>{ if(!canPago)return; onPagarRepartidor&&onPagarRepartidor(repId,Number(repMonto)||0); setRepId('');setRepMonto(''); };
-  const addAjuste=()=>{ if(!canAjuste)return; onRegistrarAjuste&&onRegistrarAjuste({tipo:aTipo,monto:Number(aMonto),motivo:aMotivo.trim()}); setAMonto('');setAMotivo(''); };
+  const addAjuste=()=>{ if(!canAjuste)return; onRegistrarAjuste&&onRegistrarAjuste({tipo:aTipo,monto:Number(aMonto),motivo:aMotivo.trim(),medio:aMedio}); setAMonto('');setAMotivo(''); };
   const confirmarTodos=()=>{ onPagarTodosRepartidores&&onPagarTodosRepartidores(); setAskAll(false); };
   const selStyle="w-full rounded-xl border border-[rgba(221,192,161,.55)] bg-[rgba(255,250,244,.9)] px-3 py-2 text-sm";
   return(<div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 space-y-4 text-sm">
@@ -3596,6 +3627,10 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
     <div className="space-y-2">
       <p className="font-semibold text-gray-600"><Icon name="cash" size={14} className="mr-1"/>Salida / entrada de caja (motivo obligatorio)</p>
       <div className="grid grid-cols-2 gap-2">
+        <button type="button" onClick={()=>setAMedio('efectivo')} aria-pressed={aMedio==='efectivo'} className={`py-2 min-h-[40px] rounded-xl border text-center text-xs font-bold transition-colors duration-150 ${aMedio==='efectivo'?'bg-amber-100 border-amber-300 text-amber-800':'bg-white/70 border-gray-200 text-gray-500'}`}>En efectivo (caja)</button>
+        <button type="button" onClick={()=>setAMedio('digital')} aria-pressed={aMedio==='digital'} className={`py-2 min-h-[40px] rounded-xl border text-center text-xs font-bold transition-colors duration-150 ${aMedio==='digital'?'bg-blue-100 border-blue-300 text-blue-700':'bg-white/70 border-gray-200 text-gray-500'}`}>Digital (banco / app)</button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
         <button type="button" onClick={()=>setATipo('salida')} className={`py-2.5 min-h-[44px] rounded-xl border text-center text-xs font-bold transition-colors duration-150 ${aTipo==='salida'?'bg-red-100 border-red-300 text-red-700':'bg-white/70 border-gray-200 text-gray-500'}`}><Icon name="minus" size={13} className="mr-1"/>Salida (resta)</button>
         <button type="button" onClick={()=>setATipo('entrada')} className={`py-2.5 min-h-[44px] rounded-xl border text-center text-xs font-bold transition-colors duration-150 ${aTipo==='entrada'?'bg-green-100 border-green-300 text-green-700':'bg-white/70 border-gray-200 text-gray-500'}`}><Icon name="plus" size={13} className="mr-1"/>Entrada (suma)</button>
       </div>
@@ -3606,7 +3641,7 @@ function CajaReconciliacion({jornada,model,onPagarRepartidor,onPagarTodosReparti
       {!aMotivo.trim()&&(Number(aMonto)||0)>0&&<p className="text-[11px] text-amber-700">Sin motivo no se registra; el cierre lo reportaría como faltante.</p>}
       {ajustes.length>0&&<div className="space-y-1 pt-1">
         {ajustes.map(a=><div key={a.id} className="flex justify-between items-center text-xs bg-white/70 rounded-lg px-2 py-1">
-          <span className={a.tipo==='entrada'?'text-green-700':'text-red-700'}>{a.tipo==='entrada'?'+':'−'}{fmt(a.monto)} · {a.motivo}</span>
+          <span className={a.tipo==='entrada'?'text-green-700':'text-red-700'}>{a.tipo==='entrada'?'+':'−'}{fmt(a.monto)} · {a.motivo}{a.medio==='digital'?' (digital)':''}</span>
           <button className="text-gray-400 hover:text-red-500 w-8 h-8 flex items-center justify-center" onClick={()=>onEliminarAjuste&&onEliminarAjuste(a.id)} title="Eliminar" aria-label="Eliminar ajuste de caja"><Icon name="x" size={14}/></button>
         </div>)}
       </div>}
@@ -5915,7 +5950,7 @@ function App(){
   return(<div className="relative min-h-screen">
     {page==='dashboard'&&<DashboardPage state={state} syncStatus={syncStatus}
       onAbrir={(f,d)=>{abrirJornada(f,d);showToast('Jornada abierta');}}
-      onCerrar={(e,o)=>{cerrarJornada(e,o);showToast('Jornada cerrada','red');}}
+      onCerrar={(e,o,d)=>{cerrarJornada(e,o,d);showToast('Jornada cerrada','red');}}
       onRegistrarAjuste={(a)=>{registrarAjusteCaja(a);showToast(a.tipo==='entrada'?'Entrada de caja registrada':'Salida de caja registrada','orange');}}
       onEliminarAjuste={eliminarAjusteCaja}
       onPagarRepartidor={registrarPagoRepartidor}
