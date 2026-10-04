@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -835,15 +835,25 @@ async function cloudSave(state,opts={}){
   throw err;
 }
 
-// Mantiene hasta 12 snapshots en localStorage (uno cada save).
-// Si algun dia se borra la nube, se puede recuperar el ultimo desde aqui.
+// Respaldos locales: cada uno es una copia completa del estado, asi que pesan
+// lo mismo que el estado entero. Se conservan 3 (no 12) y se podan ANTES de
+// escribir el nuevo, para que nunca bloqueen el guardado principal.
+const _BACKUP_MAX=3;
+function _dropBackups(keep=0){
+  const keys=Object.keys(localStorage).filter(k=>k.startsWith('kapulits_backup_')).sort();
+  while(keys.length>keep){localStorage.removeItem(keys.shift());}
+}
 function _autoBackup(state){
   try{
+    _dropBackups(_BACKUP_MAX-1);
     const ts=new Date().toISOString();
     localStorage.setItem(`kapulits_backup_${ts}`,JSON.stringify({ts,state}));
-    const keys=Object.keys(localStorage).filter(k=>k.startsWith('kapulits_backup_')).sort();
-    while(keys.length>12){localStorage.removeItem(keys.shift());}
   }catch(e){}
+}
+// Escritura de la copia principal en este dispositivo (lo que sobrevive a un reinicio).
+function _writeLocal(ns,ts){
+  localStorage.setItem('kapulits_v2',JSON.stringify(ns));
+  localStorage.setItem('kapulits_ts',ts);
 }
 // Expuesto para que el usuario pueda recuperar manualmente desde DevTools si hace falta
 window.kapulitsBackups=()=>{
@@ -1173,13 +1183,20 @@ function useStore(){
   const [saveError,setSaveError]=useState(null);
   const persistLocal=useCallback((ns,ts=new Date().toISOString(),markDirty=true)=>{
     try{
-      localStorage.setItem('kapulits_v2',JSON.stringify(ns));
-      localStorage.setItem('kapulits_ts',ts);
-      setDirtyFlag(markDirty);
-      setSaveError(null);
+      _writeLocal(ns,ts);
     }catch(e){
-      setSaveError('No se pudo guardar localmente. Libera espacio en el dispositivo.');
+      // Cupo lleno: los respaldos automaticos no son la fuente de verdad. Se borran
+      // y se reintenta una vez. Solo si aun asi falla se avisa al usuario.
+      try{
+        _dropBackups(0);
+        _writeLocal(ns,ts);
+      }catch(e2){
+        setSaveError('No se pudo guardar localmente. Libera espacio en el dispositivo.');
+        return;
+      }
     }
+    setDirtyFlag(markDirty);
+    setSaveError(null);
   },[]);
 
   useEffect(()=>{
@@ -1447,10 +1464,12 @@ function useStore(){
       }
     }
 
-    // Si cambiaron los items, colapsar rondas a una sola entrada para que la UI
-    // no muestre el desglose viejo de rondas sobre los items ya editados.
+    // Si EDITARON los items (sin rondas explicitas), colapsar rondas a una sola
+    // entrada para que la UI no muestre el desglose viejo sobre los items editados.
+    // Si llegan rondas explicitas (alta de ronda en agregarItemsPedido), se respetan:
+    // antes este bloque pisaba la ronda nueva y la cocina nunca recibia el ticket.
     const mergedCambios={...cambios,totalProductos:newTotalProd,costoEnvio:newCostoEnvio,total:newTotal,_ts:new Date().toISOString(),
-      ...(cambios.items?{rondas:[{id:(pedOld.rondas?.[0]?.id||uid()),n:1,hora:pedOld.hora||now(),mesero:pedOld.mesero||'',items:cambios.items,_ts:new Date().toISOString()}]}:{})};
+      ...(cambios.items&&!cambios.rondas?{rondas:[{id:(pedOld.rondas?.[0]?.id||uid()),n:1,hora:pedOld.hora||now(),mesero:pedOld.mesero||'',items:cambios.items,_ts:new Date().toISOString()}]}:{})};
     ja.pedidos=ja.pedidos.map(p=>p.id===pedidoId?{...p,...mergedCambios}:p);
 
     // Cancel cobrado: reactivate existing anulada reversal, or create new one
@@ -5807,9 +5826,9 @@ function App(){
         _jobsEnVuelo.add(job.id);
         const ped=(stateRef.current.jornadaActiva?.pedidos||[]).find(p=>p.id===job.pedidoId);
         const ronda=ped&&job.tipo==='ronda'?rondasDe(ped).find(r=>r.id===job.rondaId):null;
-        // Trabajo huerfano (pedido o ronda que ya no existen): se cierra para que
-        // no bloquee la cola para siempre.
-        if(!ped||(job.tipo==='ronda'&&!ronda)){hechos.push(job.id);continue;}
+        // Pedido que ya no existe: se cierra para que no bloquee la cola para siempre.
+        // Ronda que no se encuentra: se imprime la cuenta completa, nunca se descarta en silencio.
+        if(!ped){hechos.push(job.id);continue;}
         const ok=await _sendRaw(_buildBTText(ped,ronda?{ronda}:undefined));
         if(ok){snd.print();hechos.push(job.id);}
         else{_jobsEnVuelo.delete(job.id);break;}

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20260913d-dividir-atencion';
+const CACHE_NAME = 'kapulits-assets-v20261004-rondas-respaldo';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [
