@@ -269,7 +269,7 @@ setTimeout(function(){
 const {useState,useEffect,useCallback,useMemo,useRef} = React;
 
 // ─── CONFIG ─────────────────────────────────────────────────────────
-const APP_VERSION = '2.12';
+const APP_VERSION = '2.13';
 
 // ─── SONIDOS ────────────────────────────────────────────────────────
 // click = al SELECCIONAR (evento click, no al rozar): dos tonos sintetizados.
@@ -348,8 +348,26 @@ const TARIFAS_ENVIO = {
 // reportes, cierres e impresiones NO reescriban el pasado con la numeracion nueva.
 const TIPO_LABEL_LEGACY={mesa_1:'Mesa 1 · Afuera',mesa_2:'Mesa 2 · Adentro'};
 // Etiqueta visible de un pedido: la congelada al crearlo manda sobre el catalogo.
-const tipoLabelDe=p=>(p&&p.tipoLabel)||TARIFAS_ENVIO[p&&p.tipoEntrega]?.label||(p&&p.tipoEntrega)||'';
 const recogerTipoLabel=rt=>rt==='mandaditos'?'Mandaditos':rt==='cliente'?'El cliente pasa':null;
+// En "recoger" el subtipo (El cliente pasa / Mandaditos) ES la etiqueta: nunca
+// "Pasa a recoger" + subtipo a la vez. Legacy sin subtipo sigue "Pasa a recoger".
+const tipoLabelDe=p=>(p&&p.tipoEntrega==='recoger'&&recogerTipoLabel(p.recogerTipo))
+  ||(p&&p.tipoLabel)||TARIFAS_ENVIO[p&&p.tipoEntrega]?.label||(p&&p.tipoEntrega)||'';
+// Destino impreso en el ticket de cliente (una sola linea, sin duplicados).
+const destinoTicket=p=>esMesa(p.tipoEntrega)?tipoLabelDe(p).toUpperCase()
+  :p.tipoEntrega==='recoger'?(recogerTipoLabel(p.recogerTipo)||'Pasa a recoger').toUpperCase():'ENVIO A DOMICILIO';
+// Nombre generico cuando el cliente no dio nombre: "Cliente Mesa 2" / "Cliente sin nombre".
+const nombreGenerico=tipo=>esMesa(tipo)?`Cliente ${(TARIFAS_ENVIO[tipo]?.label||'Mesa').split(' · ')[0]}`:'Cliente sin nombre';
+// Personas (comensales) distintas registradas en una lista de items, ordenadas.
+const comensalesDe=items=>[...new Set((items||[]).map(i=>Number(i.comensal)||0).filter(n=>n>0))].sort((a,b)=>a-b);
+// Agrupa items por comensal: [{n, items}], los sin asignar (n=0) al final.
+const agruparPorComensal=items=>{
+  const ns=comensalesDe(items);
+  const g=ns.map(n=>({n,items:(items||[]).filter(i=>Number(i.comensal)===n)}));
+  const sin=(items||[]).filter(i=>!(Number(i.comensal)>0));
+  if(sin.length)g.push({n:0,items:sin});
+  return g;
+};
 // Mesa = cuenta abierta en local (tarifa 0). Reutiliza todo el flujo de pedido:
 // el pedido queda "nuevo" hasta cobrar; se le agregan rondas con "Agregar".
 const esMesa=t=>/^mesa_/.test(String(t||''));
@@ -997,7 +1015,19 @@ function buildItem(i){
   const it={productoId:i.productoId||i.id,nombre:i.nombre,cantidad:i.cantidad,precio:i.precio,subtotal:i.subtotal,emoji:i.emoji};
   if(i.esVariado){it.esVariado=true;it.id=i.id;it.costo=0;}
   else if(i.id&&i.id!==it.productoId){it.id=i.id;}
+  // Comensal (persona de la mesa): etiqueta de la linea, no cambia el dinero.
+  // Su linea lleva id propio para no colisionar con el mismo platillo de otra persona.
+  if(Number(i.comensal)>0){it.comensal=Number(i.comensal);if(!it.id)it.id=lineaUid();}
   return it;
+}
+// Al agregar una ronda: ¿la linea nueva n suma a la existente m? Solo si es el
+// mismo platillo (y sabor), mismo precio y la MISMA persona.
+function mismaLinea(m,n){
+  if(m.esVariado||n.esVariado)return false;
+  if((Number(m.comensal)||0)!==(Number(n.comensal)||0))return false;
+  if(Number(m.precio)!==Number(n.precio))return false;
+  if(Number(n.comensal)>0)return(m.productoId||m.id)===(n.productoId||n.id)&&m.nombre===n.nombre;
+  return(m.id||m.productoId)===(n.id||n.productoId);
 }
 // Alta/actualizacion de cliente frecuente. Clave = telefono normalizado (unico;
 // los nombres se repiten, el numero no). Idempotente: si el telefono ya existe
@@ -1404,12 +1434,13 @@ function useStore(){
 
   // Trabajo de impresion para la cola compartida. tipo 'completo' = la cuenta
   // entera; 'ronda' = SOLO la tanda nueva (lo que va a cocina).
-  const _nuevoJob=useCallback((pedidoId,tipo,rondaId)=>({
+  // ticket: 'cocina' (letra grande, solo que preparar) | 'cliente' (cuenta).
+  const _nuevoJob=useCallback((pedidoId,tipo,rondaId,ticket)=>({
     id:uid(),_ts:new Date().toISOString(),ts:Date.now(),
-    pedidoId,tipo,rondaId:rondaId||null,origen:deviceInfo.id,impreso:false
+    pedidoId,tipo,rondaId:rondaId||null,ticket:ticket||'cliente',origen:deviceInfo.id,impreso:false
   }),[deviceInfo.id]);
 
-  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir,mesero,recogerTipo)=>{
+  const crearPedido=useCallback((items,tipoEntrega,cliente,direccion,notas,telefono,etiquetaDir,mesero,recogerTipo,sinNombre)=>{
     if(!state.jornadaActiva)return null;
     const ja=state.jornadaActiva;
     const totalProductos=items.reduce((s,i)=>s+i.subtotal,0);
@@ -1430,6 +1461,7 @@ function useStore(){
       items,totalProductos,costoEnvio,total:totalProductos+costoEnvio,
       tipoEntrega,tipoLabel:(TARIFAS_ENVIO[tipoEntrega]||{}).label||tipoEntrega,atencion,
       recogerTipo:(tipoEntrega==='recoger'&&recogerTipo)||null,
+      sinNombre:!!sinNombre,
       mesero:mesero||'',rondas:[rondaInicial],
       cliente:cliente||'',telefono:telefono||'',direccion:direccion||'',notas:notas||'',
       estado:'nuevo',cobrado:false,metodoPago:null};
@@ -1441,15 +1473,13 @@ function useStore(){
     }
     const js=state.jornadas.map(j=>j.id===jaNew.id?jaNew:j);
     // Al crear el pedido se guarda/actualiza el cliente frecuente por telefono.
-    const clientes=upsertClienteList(state.clientes,{telefono,nombre:cliente,direccion,etiqueta:etiquetaDir});
-    // Auto-imprimir = encolar. El dispositivo con impresora (aunque sea otro)
-    // lo saca de la cola y lo imprime: el mesero no depende de la computadora.
-    const cola=state.impresora?.autoImprimir!==false
-      ?_prunePrintQueue([...(state.colaImpresion||[]),_nuevoJob(pedido.id,'completo',rondaInicial.id)])
-      :(state.colaImpresion||[]);
-    save({...state,clientes,jornadas:js,jornadaActiva:jaNew,colaImpresion:cola});
+    // "Cliente sin nombre" no se guarda como nombre del cliente frecuente.
+    const clientes=upsertClienteList(state.clientes,{telefono,nombre:sinNombre?'':cliente,direccion,etiqueta:etiquetaDir});
+    // No se imprime solo: la UI pregunta que ticket (cocina/cliente) y llama a
+    // encolarImpresion. El equipo con impresora lo saca de la cola compartida.
+    save({...state,clientes,jornadas:js,jornadaActiva:jaNew});
     return pedido;
-  },[state,save,_nuevoJob]);
+  },[state,save]);
 
   const actualizarPedido=useCallback((pedidoId,cambios,opts)=>{
     if(!state.jornadaActiva)return;
@@ -1549,7 +1579,7 @@ function useStore(){
     // Editar tambien mantiene al dia el cliente frecuente (telefono/nombre/direccion).
     const pedFin=ja.pedidos.find(p=>p.id===pedidoId);
     const clientes=(cambios.telefono||cambios.cliente||cambios.direccion)&&pedFin
-      ?upsertClienteList(state.clientes,{telefono:pedFin.telefono,nombre:pedFin.cliente,direccion:pedFin.direccion,etiqueta:cambios.etiquetaDir})
+      ?upsertClienteList(state.clientes,{telefono:pedFin.telefono,nombre:pedFin.sinNombre?'':pedFin.cliente,direccion:pedFin.direccion,etiqueta:cambios.etiquetaDir})
       :state.clientes;
     // El trabajo de impresion viaja en el MISMO save que el cambio del pedido:
     // dos save() seguidos en el mismo tick perderian uno de los dos (closure).
@@ -1570,23 +1600,25 @@ function useStore(){
     const its=nuevosItems.map(i=>buildItem(i));
     const merged=(ped.items||[]).map(i=>({...i}));
     for(const n of its){
-      const k=n.id||n.productoId;
-      const ex=merged.find(m=>!m.esVariado&&!n.esVariado&&(m.id||m.productoId)===k&&Number(m.precio)===Number(n.precio));
+      // Mismo platillo de OTRA persona = otra linea (la division por comensal no se pierde).
+      const ex=merged.find(m=>mismaLinea(m,n));
       if(ex){ex.cantidad=(Number(ex.cantidad)||0)+(Number(n.cantidad)||0);ex.subtotal=_roundMoney(ex.cantidad*(Number(ex.precio)||0));}
       else merged.push({...n});
     }
     const previas=rondasDe(ped);
     const ronda={id:uid(),n:previas.length+1,hora:now(),_ts:new Date().toISOString(),mesero:mesero||'',items:its};
-    const job=state.impresora?.autoImprimir!==false?_nuevoJob(pedidoId,'ronda',ronda.id):null;
-    actualizarPedido(pedidoId,{items:merged,rondas:[...previas,ronda]},{printJob:job});
+    // Sin impresion automatica: la UI pregunta cocina/cliente (encolarImpresion).
+    actualizarPedido(pedidoId,{items:merged,rondas:[...previas,ronda]});
     return ronda;
-  },[state,actualizarPedido,_nuevoJob]);
+  },[state,actualizarPedido]);
 
-  // Encola una reimpresion manual de la cuenta completa.
-  const encolarImpresion=useCallback(pedidoId=>{
-    const job=_nuevoJob(pedidoId,'completo');
-    save({...state,colaImpresion:_prunePrintQueue([...(state.colaImpresion||[]),job])});
-    return job;
+  // Encola impresion. ticket: 'cocina' | 'cliente' | 'ambos'. Con rondaId, el
+  // de cocina lleva solo esa tanda; el de cliente siempre es la cuenta completa.
+  const encolarImpresion=useCallback((pedidoId,{ticket='cliente',rondaId=null}={})=>{
+    const tipos=ticket==='ambos'?['cocina','cliente']:[ticket];
+    const jobs=tipos.map(t=>_nuevoJob(pedidoId,rondaId?'ronda':'completo',rondaId,t));
+    save({...state,colaImpresion:_prunePrintQueue([...(state.colaImpresion||[]),...jobs])});
+    return jobs;
   },[state,save,_nuevoJob]);
 
   // Marca trabajos como impresos (los ejecuta el dispositivo con impresora).
@@ -2490,14 +2522,12 @@ function buildTicketHTML(pedido){
   h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
   h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
   h+=`<div class="s"></div>`;
-  const _destLabel=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
-  const _rtLabel=recogerTipoLabel(pedido.recogerTipo);
+  const _destLabel=destinoTicket(pedido);
   if(esMesa(pedido.tipoEntrega))h+=`<div class="c b" style="font-size:13px">PARA COMER AQUÍ</div>`;
   h+=`<div class="c b" style="font-size:15px;border:2px solid #000;padding:5px 2px;margin:3px 0;letter-spacing:.04em">${_destLabel}</div>`;
-  if(_rtLabel)h+=`<div class="c b" style="font-size:13px">${_rtLabel}</div>`;
   if(esMesa(pedido.tipoEntrega)&&pedido.atencion)h+=`<div class="c" style="font-size:12px">Atencion ${pedido.atencion}</div>`;
   h+=`<div class="s"></div>`;
-  if(pedido.cliente)h+=`<div class="b" style="font-size:13px">Cliente: ${pedido.cliente}</div>`;
+  if(pedido.cliente&&!pedido.sinNombre)h+=`<div class="b" style="font-size:13px">Cliente: ${pedido.cliente}</div>`;
   if(pedido.telefono)h+=`<div class="b">Tel: ${pedido.telefono}</div>`;
   if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
   h+=`<div class="s"></div>`;
@@ -2535,14 +2565,12 @@ function buildTicketsHTML(pedidos=[]){
     h+=`<div class="c b" style="font-size:14px">PEDIDO #${String(pedido.numero).padStart(3,'0')}</div>`;
     h+=`<div class="c sm">${pedido.fecha} · ${pedido.hora}</div>`;
     h+=`<div class="s"></div>`;
-    const _dl=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
-    const _rl=recogerTipoLabel(pedido.recogerTipo);
+    const _dl=destinoTicket(pedido);
     if(esMesa(pedido.tipoEntrega))h+=`<div class="c b" style="font-size:13px">PARA COMER AQUÍ</div>`;
     h+=`<div class="c b" style="font-size:15px;border:2px solid #000;padding:5px 2px;margin:3px 0;letter-spacing:.04em">${_dl}</div>`;
-    if(_rl)h+=`<div class="c b" style="font-size:13px">${_rl}</div>`;
     if(esMesa(pedido.tipoEntrega)&&pedido.atencion)h+=`<div class="c" style="font-size:12px">Atencion ${pedido.atencion}</div>`;
     h+=`<div class="s"></div>`;
-    if(pedido.cliente)h+=`<div class="b" style="font-size:13px">Cliente: ${pedido.cliente}</div>`;
+    if(pedido.cliente&&!pedido.sinNombre)h+=`<div class="b" style="font-size:13px">Cliente: ${pedido.cliente}</div>`;
     if(pedido.telefono)h+=`<div class="b">Tel: ${pedido.telefono}</div>`;
     if(pedido.direccion)h+=`<div>Dir: ${pedido.direccion}</div>`;
     h+=`<div class="s"></div>`;
@@ -2594,11 +2622,11 @@ const _lineaItem=i=>{
   componentesCombo(i).forEach(c=>{s+=`      - ${c}\n`;});
   return s;
 };
-// opts.ronda -> ticket de ACTUALIZACION: solo lo nuevo, para cocina. Sin total
-// de la cuenta (evita que alguien cobre una ronda suelta como si fuera todo).
-// Sin opts -> cuenta completa; si hubo varias rondas, se desglosan por tanda.
-function _buildBTText(pedido,opts){
-  const ronda=opts&&opts.ronda;
+// Ticket de CLIENTE (cobro): cuenta completa con datos del local. Si la mesa se
+// tomo por persona, los platillos salen agrupados por persona con su subtotal;
+// si no, y hubo varias rondas, se desglosan por tanda. Lo de cocina es otro
+// ticket (_buildCocinaText).
+function _buildBTText(pedido){
   const C=TICKET_COLS;
   const sep='-'.repeat(C);
   const sepD='='.repeat(C);
@@ -2615,43 +2643,34 @@ function _buildBTText(pedido,opts){
   t+=sepD+'\n';
 
   // ── FOLIO Y FECHA ──────────────────────────────────────────────────
-  const folioLine=`PEDIDO #${String(pedido.numero).padStart(3,'0')}${ronda?`   RONDA ${ronda.n||''}`:``}`;
-  t+=_ctr(folioLine);
-  t+=_ctr(`${pedido.fecha}  ${ronda?(ronda.hora||pedido.hora):pedido.hora}`);
+  t+=_ctr(`PEDIDO #${String(pedido.numero).padStart(3,'0')}`);
+  t+=_ctr(`${pedido.fecha}  ${pedido.hora}`);
 
   // ── DESTINO ────────────────────────────────────────────────────────
-  const _destTxt=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+  const _destTxt=destinoTicket(pedido);
   t+=sep+'\n';
   if(esMesa(pedido.tipoEntrega))t+=_ctr('PARA COMER AQUI');
   t+=_ctr(_destTxt);
-  const _rtl=recogerTipoLabel(pedido.recogerTipo);
-  if(_rtl)t+=_ctr(_rtl.toUpperCase());
   if(esMesa(pedido.tipoEntrega)&&pedido.atencion)t+=_ctr('Atencion '+String(pedido.atencion));
   t+=sep+'\n';
 
   // ── DATOS DEL CLIENTE ──────────────────────────────────────────────
-  if(pedido.cliente)t+=_ticketField('Cliente: ',pedido.cliente);
-  if(pedido.telefono&&!ronda)t+=`  Tel: ${pedido.telefono}\n`;
-  const mesero=(ronda&&ronda.mesero)||pedido.mesero;
-  if(mesero)t+=_ticketField('Atiende: ',mesero);
-  if(pedido.direccion&&!ronda)t+=_ticketField('Dir: ',pedido.direccion);
-  t+=sep+'\n';
-
-  // ── RONDA (actualizacion de cocina) ───────────────────────────────
-  if(ronda){
-    t+=_ctr('** ACTUALIZACION DE PEDIDO **');
-    (ronda.items||[]).forEach(i=>{t+=_lineaItem(i);});
-    t+=sep+'\n';
-    const sub=(ronda.items||[]).reduce((a,i)=>a+(Number(i.subtotal)||0),0);
-    t+=_lr('  Suma ronda:',sub);
-    t+=sep+'\n';
-    t+=_ctr('(Cuenta completa al cobrar)');
-    t+='\n\n\n';
-    return sanitize(t);
-  }
+  let datos='';
+  if(pedido.cliente&&!pedido.sinNombre)datos+=_ticketField('Cliente: ',pedido.cliente);
+  if(pedido.telefono)datos+=`  Tel: ${pedido.telefono}\n`;
+  if(pedido.mesero)datos+=_ticketField('Atiende: ',pedido.mesero);
+  if(pedido.direccion)datos+=_ticketField('Dir: ',pedido.direccion);
+  if(datos)t+=datos+sep+'\n';
 
   // ── ITEMS ──────────────────────────────────────────────────────────
-  if(rondas.length>1){
+  if(comensalesDe(pedido.items).length){
+    agruparPorComensal(pedido.items).forEach((g,gi)=>{
+      if(gi)t+=sep+'\n';
+      t+=`  ${g.n?'PERSONA '+g.n:'SIN ASIGNAR'}\n`;
+      g.items.forEach(i=>{t+=_lineaItem(i);});
+      t+=_lr(`  Subtotal ${g.n?'persona '+g.n:''}:`,g.items.reduce((a,i)=>a+(Number(i.subtotal)||0),0));
+    });
+  }else if(rondas.length>1){
     rondas.forEach(r=>{
       const rHdr=`Ronda ${r.n||''}${r.hora?'  '+r.hora:''}${r.mesero?'  '+r.mesero:''}`;
       t+=sep+'\n';
@@ -2691,6 +2710,49 @@ function _buildBTText(pedido,opts){
   t+=_ctr(`Tel.: ${NEGOCIO.telefono}`);
   t+=_ctr('Gracias por tu compra!');
   t+='\n\n\n';
+  return sanitize(t);
+}
+
+// ── TICKET DE COCINA ──────────────────────────────────────────────────
+// Solo lo que hay que preparar, en letra doble (alto y ancho): folio, destino y
+// platillos, separados por persona si la mesa se tomo asi. Sin datos del local,
+// sin precios ni totales: menos papel y se lee de lejos.
+// ESC @ = reinicia la impresora; ESC ! n = modo de impresion. Son bytes <128:
+// pasan sanitize() y el &0x7F de BT/USB/nativo.
+// ponytail: doble ancho deja 16 columnas en 58mm. Si una impresora no respeta
+// el doble ancho, cambiar COCINA_ESC a '\x1b!\x10' (solo doble alto) y COCINA_COLS a 32.
+const COCINA_ESC='\x1b!\x30';
+const COCINA_COLS=16;
+function _buildCocinaText(pedido,ronda){
+  const C=COCINA_COLS;
+  const items=ronda?(ronda.items||[]):(pedido.items||[]);
+  const linea=s=>_wrapWords(s,C).map(l=>l+'\n').join('');
+  // Item: "5x Quesabirria" con la continuacion alineada bajo el nombre.
+  const item=i=>{
+    const pre=`${i.cantidad}x `;
+    const ls=_wrapWords(String(i.nombre||'').replace(/\s*·\s*/g,' '),C-pre.length);
+    let s=pre+ls[0]+'\n';
+    for(let k=1;k<ls.length;k++)s+=' '.repeat(pre.length)+ls[k]+'\n';
+    componentesCombo(i).forEach(c=>{s+=_wrapWords('- '+c,C).map(l=>' '+l+'\n').join('');});
+    return s;
+  };
+  const folio='#'+String(pedido.numero).padStart(3,'0');
+  let destino,sub='';
+  if(esMesa(pedido.tipoEntrega))destino=tipoLabelDe(pedido).split(' · ')[0];
+  else if(pedido.tipoEntrega==='recoger'){destino='LLEVAR';sub=recogerTipoLabel(pedido.recogerTipo)||'';}
+  else{destino='LLEVAR';sub='Envio';}
+  let t='\x1b@'+COCINA_ESC;
+  t+=linea(`${folio} ${destino}`.toUpperCase());
+  if(sub)t+=linea(sub.toUpperCase());
+  if(ronda&&(ronda.n||0)>1)t+=linea(`RONDA ${ronda.n}`);
+  t+='='.repeat(C)+'\n';
+  const grupos=comensalesDe(items).length?agruparPorComensal(items):[{n:-1,items}];
+  grupos.forEach((g,ix)=>{
+    if(g.n>=0){if(ix>0)t+='-'.repeat(C)+'\n';t+=linea(g.n?`PERSONA ${g.n}`:'SIN ASIGNAR');}
+    g.items.forEach(i=>{t+=item(i);});
+  });
+  if(pedido.notas&&!ronda){t+='-'.repeat(C)+'\n'+linea('NOTA: '+pedido.notas.toUpperCase());}
+  t+='\x1b!\x00\n\n\n';
   return sanitize(t);
 }
 
@@ -2748,9 +2810,9 @@ async function pedirWakeLock(){
 }
 async function soltarWakeLock(){try{await _wakeLock?.release();}catch(e){}_wakeLock=null;}
 
-async function printTicket(pedido,opts){
+async function printTicket(pedido){
   snd.print();
-  const ok=await _sendRaw(_buildBTText(pedido,opts));
+  const ok=await _sendRaw(_buildBTText(pedido));
   if(ok)return{success:true,method:printerCharacteristic?'bluetooth':'usb'};
   // Fallback: preview en-app
   if(_showTicketPreview)_showTicketPreview(pedido);
@@ -3763,7 +3825,7 @@ function CartSummary({cart,costoEnvio,onAdd,onRem}){
   if(!items.length)return null;
   return(<div className="bg-orange-50 rounded-2xl p-3 space-y-1">
     {items.map(i=>(<div key={i.id||i.productoId} className="flex items-center justify-between">
-      <span className="text-xs text-gray-600">{i.nombre}{items.some(o=>o!==i&&(o.productoId||o.id)===(i.productoId||i.id)&&!i.esVariado)?` (${fmt(i.precio)})`:''}</span>
+      <span className="text-xs text-gray-600">{i.nombre}{i.comensal?<b className="text-orange-700"> · P{i.comensal}</b>:items.some(o=>o!==i&&(o.productoId||o.id)===(i.productoId||i.id)&&!i.esVariado)?` (${fmt(i.precio)})`:''}</span>
       <div className="flex items-center gap-2">
         <button onClick={()=>onRem(i.id||i.productoId)} aria-label={`Quitar uno de ${i.nombre}`} className="w-8 h-8 rounded-full bg-gray-200 text-gray-700 font-black text-xs flex items-center justify-center transition-transform duration-150 active:scale-90"><Icon name="minus" size={12}/></button>
         <span className="font-black text-xs w-4 text-center">{i.cantidad}</span>
@@ -3782,7 +3844,10 @@ function DeliverySelector({tipo,setTipo,recogerTipo,setRecogerTipo}){
   // Dos bloques separados: lo que SALE del negocio y lo que se consume AQUI.
   // Boton plano; el seleccionado crece y toma el aro de marca.
   const claseBtn=sel=>`py-3 min-h-[60px] rounded-xl border shadow-[0_5px_14px_rgba(120,60,15,.12)] flex flex-col items-center justify-center gap-0.5 transition-transform duration-200 hover:scale-[1.03] active:scale-95 ${sel?'scale-105 border-[var(--brand)] ring-2 ring-[var(--brand-strong)] ring-offset-2 ring-offset-[var(--surface)]':'border-[#ecd6bd]'}`;
-  const salida=Object.entries(TARIFAS_ENVIO).filter(([k])=>!esMesa(k));
+  // "Recoger" se ofrece directo como sus dos casos reales; nunca "Pasa a recoger"
+  // y luego el subtipo (eso imprimia dos destinos contradictorios).
+  const salida=Object.entries(TARIFAS_ENVIO).filter(([k])=>!esMesa(k)&&k!=='recoger');
+  const opcionesRecoger=setRecogerTipo?[['cliente','El cliente pasa'],['mandaditos','Mandaditos']]:[];
   const mesas=Object.entries(TARIFAS_ENVIO).filter(([k])=>esMesa(k));
   // Afuera arriba (3), adentro abajo (2). Dos rejillas separadas para que cada
   // fila quede llena y pareja, en vez de 4+1 desbalanceado.
@@ -3796,24 +3861,17 @@ function DeliverySelector({tipo,setTipo,recogerTipo,setRecogerTipo}){
   return(<div className="space-y-3">
     <div>
       <p className="t-kicker mb-2">Para llevar o envío</p>
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
+        {opcionesRecoger.map(([rt,label])=>{const sel=tipo==='recoger'&&recogerTipo===rt;return(
+          <button key={rt} onClick={()=>{setTipo('recoger');setRecogerTipo(rt);}} aria-pressed={sel} style={{background:'linear-gradient(180deg,#fff9f0,#fbeedb)'}} className={claseBtn(sel)}>
+            <span className="text-[11px] font-black leading-tight text-[var(--text)] text-center px-1">{label}</span>
+          </button>);})}
         {salida.map(([k,v])=>(
           <button key={k} onClick={()=>setTipo(k)} aria-pressed={tipo===k} style={{background:'linear-gradient(180deg,#fff9f0,#fbeedb)'}} className={claseBtn(tipo===k)}>
             <span className="text-[11px] font-black leading-tight text-[var(--text)] text-center px-1">{v.label}</span>
             {v.precio>0&&<span className="text-[10px] font-black text-[var(--brand-strong)]">+{fmt(v.precio)}</span>}
           </button>))}
       </div>
-      {tipo==='recoger'&&setRecogerTipo&&(
-        <div className="mt-2 grid grid-cols-2 gap-2">
-          {[['cliente','El cliente pasa'],['mandaditos','Mandaditos']].map(([k,label])=>(
-            <button key={k} onClick={()=>setRecogerTipo(recogerTipo===k?null:k)} aria-pressed={recogerTipo===k}
-              style={{background:recogerTipo===k?'linear-gradient(180deg,#d4f5d4,#b6edb6)':'linear-gradient(180deg,#f4fdf4,#e8f8e8)'}}
-              className={`py-2.5 min-h-[48px] rounded-xl border shadow-[0_3px_10px_rgba(40,120,40,.10)] flex flex-col items-center justify-center transition-transform duration-200 hover:scale-[1.02] active:scale-95 ${recogerTipo===k?'scale-105 border-green-500 ring-2 ring-green-400 ring-offset-1 ring-offset-[var(--surface)]':'border-[#c6e8c6]'}`}>
-              <span className="text-[11px] font-black leading-tight text-[#1a6b1a] text-center px-2">{label}</span>
-            </button>
-          ))}
-        </div>
-      )}
     </div>
     <div>
       <p className="t-kicker mb-2">Mesa · comer aquí</p>
@@ -3988,24 +4046,24 @@ function MeseroModal({open,empleados,meseroId,onClose,onElegir}){
 // Al guardar se imprime SOLO esta tanda (va a cocina); la cuenta completa se
 // imprime al cobrar.
 function AgregarItemsModal({open,pedido,productos,mesero,onClose,onAgregar}){
-  const [cart,setCart]=useState({});
-  useEffect(()=>{if(open)setCart({});},[open,pedido&&pedido.id]);
+  // En mesa la ronda tambien se toma por persona (las que ya hay + nuevas).
+  const existentes=pedido?comensalesDe(pedido.items):[];
+  const [carts,setCarts]=useState({});const [activa,setActiva]=useState(existentes[0]||1);
+  useEffect(()=>{if(open){setCarts({});setActiva(existentes[0]||1);}},[open,pedido&&pedido.id]);
   if(!pedido)return null;
-  const items=Object.values(cart);
+  const porPersona=esMesa(pedido.tipoEntrega);
+  const items=aplanarCarritos(carts,porPersona);
   const totalNuevo=items.reduce((a,i)=>a+i.subtotal,0);
-  const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
-  const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   return(<Modal open={open} onClose={onClose} title={`Agregar a #${String(pedido.numero).padStart(3,'0')}`} fullScreen>
     <div className="space-y-4 menu-upper">
       <div className="surface-card p-3">
         <p className="text-xs text-[var(--text-soft)]">{tipoLabelDe(pedido)}{pedido.cliente?` · ${pedido.cliente}`:''}</p>
         <p className="text-xs text-[var(--text-muted)] mt-1">Ya consumido: <b className="text-[var(--text)]">{fmt(pedido.total)}</b> · Ronda {rondasDe(pedido).length+1}{mesero?` · ${mesero}`:''}</p>
       </div>
-      <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
-      <CartSummary cart={cart} costoEnvio={0} onAdd={add} onRem={rem}/>
+      <CarritoPorPersona productos={productos} carts={carts} setCarts={setCarts} activa={activa} setActiva={setActiva} porPersona={porPersona} existentes={existentes}/>
       {items.length>0&&(<React.Fragment>
-        <p className="text-xs text-[var(--text-soft)] text-center">Se imprime solo esta ronda para cocina. Nueva cuenta: <b>{fmt((Number(pedido.total)||0)+totalNuevo)}</b></p>
-        <Btn full color="green" size="lg" onClick={()=>{onAgregar(items);onClose();}}><Icon name="plus" size={17} className="mr-1.5"/>Agregar y mandar a cocina · {fmt(totalNuevo)}</Btn>
+        <p className="text-xs text-[var(--text-soft)] text-center">El ticket de cocina lleva solo esta ronda. Nueva cuenta: <b>{fmt((Number(pedido.total)||0)+totalNuevo)}</b></p>
+        <Btn full color="green" size="lg" onClick={()=>{onAgregar(items);onClose();}}><Icon name="plus" size={17} className="mr-1.5"/>Agregar ronda · {fmt(totalNuevo)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
 }
@@ -4029,8 +4087,25 @@ function camposPedido(p){
   texto.push(tipoLabelDe(p),p.cobrado?'cobrado':'por cobrar');
   return{texto:normTexto(texto.join(' | ')),numeros};
 }
-function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgregarItems,onSetMesero,onReimprimir}){
+// Al imprimir se decide QUE ticket sale: cocina (letra grande, solo que
+// preparar) o cliente (cuenta). Normalmente el primero es para cocina.
+function ElegirTicketModal({req,onClose,onElegir}){
+  if(!req)return null;
+  const elegir=t=>{onElegir(req,t);onClose();};
+  return(<Modal open={!!req} onClose={onClose} title={`Imprimir #${String(req.numero).padStart(3,'0')}${req.rondaN>1?` · Ronda ${req.rondaN}`:''}`}>
+    <div className="space-y-3">
+      <Btn full color="orange" size="lg" onClick={()=>elegir('cocina')}><Icon name="printer" size={17} className="mr-1.5"/>Ticket de cocina</Btn>
+      <Btn full color="blue" size="lg" onClick={()=>elegir('cliente')}><Icon name="file" size={17} className="mr-1.5"/>Ticket para el cliente</Btn>
+      <Btn full color="orange" variant="outline" onClick={()=>elegir('ambos')}>Los dos (cocina y cliente)</Btn>
+      <button type="button" onClick={onClose} className="w-full py-3 min-h-[44px] text-sm font-bold text-[var(--text-muted)]">No imprimir</button>
+    </div></Modal>);
+}
+
+function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgregarItems,onSetMesero,onImprimir}){
   const [showCrear,setShowCrear]=useState(false);const [showCobrar,setShowCobrar]=useState(null);
+  // {pedidoId, numero, rondaId, rondaN}: pedido/ronda esperando eleccion de ticket.
+  const [pedirTicket,setPedirTicket]=useState(null);
+  const preguntar=state.impresora?.autoImprimir!==false;
   const [showEditar,setShowEditar]=useState(null);const [confirmCancel,setConfirmCancel]=useState(null);
   const [showAgregar,setShowAgregar]=useState(null);const [showMesero,setShowMesero]=useState(false);
   const [showDividir,setShowDividir]=useState(null);
@@ -4077,7 +4152,7 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
     onEditar:()=>setShowEditar(p),
     onAgregar:()=>setShowAgregar(p),
     onDividir:()=>setShowDividir(p),
-    onPrint:()=>onReimprimir(p),
+    onPrint:()=>setPedirTicket({pedidoId:p.id,numero:p.numero}),
     onWhatsApp:()=>shareWhatsApp(p),
   });
   const abrirCrear=()=>{if(!mesero)setShowMesero(true);else setShowCrear(true);};
@@ -4173,13 +4248,17 @@ function PedidosPage({state,deviceInfo,onCrearPedido,onActualizarPedido,onAgrega
       <CrearPedidoModal open={showCrear} onClose={()=>setShowCrear(false)} productos={state.productos}
         clientes={state.clientes} impresora={state.impresora} mesero={mesero}
         pedidosActivos={activos} onAgregarACuenta={p=>{setShowCrear(false);setShowAgregar(p);}}
-        onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir,recogerTipo)=>{
-          onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir,recogerTipo);
-          setShowCrear(false);}}/>
+        onCrear={(items,tipo,cliente,dir,notas,telefono,etiquetaDir,recogerTipo,sinNombre)=>{
+          const p=onCrearPedido(items,tipo,cliente,dir,notas,telefono,etiquetaDir,recogerTipo,sinNombre);
+          setShowCrear(false);
+          if(p&&preguntar)setPedirTicket({pedidoId:p.id,numero:p.numero,rondaId:p.rondas?.[0]?.id,rondaN:1});}}/>
       {showAgregar&&<AgregarItemsModal open={!!showAgregar} pedido={(ja.pedidos||[]).find(p=>p.id===showAgregar.id)||showAgregar}
         productos={state.productos} mesero={mesero}
         onClose={()=>setShowAgregar(null)}
-        onAgregar={items=>onAgregarItems(showAgregar.id,items)}/>}
+        onAgregar={items=>{const r=onAgregarItems(showAgregar.id,items);
+          if(r&&preguntar)setPedirTicket({pedidoId:showAgregar.id,numero:showAgregar.numero,rondaId:r.id,rondaN:r.n});}}/>}
+      <ElegirTicketModal req={pedirTicket} onClose={()=>setPedirTicket(null)}
+        onElegir={(r,ticket)=>onImprimir(r.pedidoId,{ticket,rondaId:r.rondaId})}/>
       <CobrarModal open={!!showCobrar} pedido={showCobrar} onClose={()=>setShowCobrar(null)}
         onCobrar={pago=>{snd.coin();onActualizarPedido(showCobrar.id,{cobrado:true,estado:'entregado',...pago});setShowCobrar(null);}}/>
       <SplitModal open={!!showDividir} pedido={showDividir} onClose={()=>setShowDividir(null)}
@@ -4222,14 +4301,12 @@ function buildTicketImage(pedido){
     rows.push({t:'center',s:`PEDIDO #${String(pedido.numero).padStart(3,'0')}`,b:true,size:24});
     rows.push({t:'center',s:`${pedido.fecha}   ${pedido.hora}`,size:18,c:'#7a6255'});
     rows.push({t:'sep'});
-    const _imgDest=esMesa(pedido.tipoEntrega)?tipoLabelDe(pedido).toUpperCase():pedido.tipoEntrega==='recoger'?'PASA A RECOGER':'ENVIO A DOMICILIO';
+    const _imgDest=destinoTicket(pedido);
     if(esMesa(pedido.tipoEntrega))rows.push({t:'center',s:'PARA COMER AQUI',b:true,size:18});
     rows.push({t:'center',s:_imgDest,b:true,size:22});
-    const _imgRtl=recogerTipoLabel(pedido.recogerTipo);
-    if(_imgRtl)rows.push({t:'center',s:_imgRtl.toUpperCase(),b:true,size:18});
     if(esMesa(pedido.tipoEntrega)&&pedido.atencion)rows.push({t:'center',s:'Atencion '+String(pedido.atencion),size:18});
     rows.push({t:'sep'});
-    if(pedido.cliente)wrapLeft('Cliente: ',pedido.cliente);
+    if(pedido.cliente&&!pedido.sinNombre)wrapLeft('Cliente: ',pedido.cliente);
     if(pedido.telefono)rows.push({t:'left',s:'Tel: '+pedido.telefono,b:true});
     if(pedido.direccion)wrapLeft('Dir: ',pedido.direccion);
     rows.push({t:'sep'});
@@ -4344,7 +4421,15 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,on
       </div>
     </div>
     {(!compact||expanded)&&<div className="rounded-[22px] border border-[rgba(180,118,54,0.16)] bg-[rgba(255,251,246,0.96)] px-3 py-3">
-      {rondas.length>1
+      {comensalesDe(pedido.items).length
+        ?agruparPorComensal(pedido.items).map((g,gi)=>(<div key={g.n} className={gi?'mt-2 pt-2 border-t border-[rgba(180,118,54,0.14)]':''}>
+            <p className="flex justify-between text-[10px] font-black uppercase tracking-[.12em] text-[var(--text-muted)]">
+              <span>{g.n?`Persona ${g.n}`:'Sin asignar'}</span><span>{fmt(g.items.reduce((s,i)=>s+(Number(i.subtotal)||0),0))}</span></p>
+            {g.items.map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-1">
+              <span className="text-[#574239]">{i.cantidad}x {i.nombre}</span>
+              <span className="font-bold text-[#2f1d17]">{fmt(i.subtotal)}</span></div>))}
+          </div>))
+        :rondas.length>1
         ?rondas.map((r,ri)=>(<div key={r.id||ri} className={ri?'mt-2 pt-2 border-t border-[rgba(180,118,54,0.14)]':''}>
             <p className="text-[10px] font-black uppercase tracking-[.12em] text-[var(--text-muted)]">Ronda {r.n||ri+1}{r.hora?` · ${r.hora}`:''}{r.mesero?` · ${r.mesero}`:''}</p>
             {(r.items||[]).map((i,idx)=>(<div key={idx} className="flex justify-between text-xs py-1">
@@ -4379,7 +4464,7 @@ function PedidoCard({pedido,onEntregar,onCobrar,onCancelar,onEditar,onAgregar,on
 // al escribir el numero busca clientes frecuentes y autocompleta nombre y
 // direcciones guardadas. La direccion solo se pide cuando la recoge un
 // repartidor/servicio (recoger o envio), no en mesa.
-function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,direccion,setDireccion,etiqueta,setEtiqueta,sinTel,setSinTel}){
+function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,direccion,setDireccion,etiqueta,setEtiqueta,sinTel,setSinTel,sinNombre,setSinNombre}){
   const tel=normTel(telefono);
   const lista=Array.isArray(clientes)?clientes:[];
   const match=(!sinTel&&tel.length>=3)?lista.find(c=>normTel(c.telefono)===tel):null;
@@ -4392,8 +4477,9 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
         &&!(normVariadoNombre(c.nombre)===nomQ&&normTel(c.telefono)===tel)).slice(0,6)
     : [];
   const pedirDir=necesitaDireccion(tipo);
-  const usarCliente=c=>{setTelefono(c.telefono||'');if(c.telefono&&setSinTel)setSinTel(false);setCliente(c.nombre||'');const d=(c.direcciones||[])[0];if(d&&pedirDir){setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}};
+  const usarCliente=c=>{setTelefono(c.telefono||'');if(c.telefono&&setSinTel)setSinTel(false);setCliente(c.nombre||'');if(c.nombre&&setSinNombre)setSinNombre(false);const d=(c.direcciones||[])[0];if(d&&pedirDir){setDireccion(d.texto||'');setEtiqueta(d.etiqueta||'Otro');}};
   const toggleSinTel=()=>{const n=!sinTel;setSinTel&&setSinTel(n);if(n)setTelefono('');};
+  const toggleSinNombre=()=>{const n=!sinNombre;setSinNombre&&setSinNombre(n);if(n)setCliente('');};
   return(<div className="space-y-3">
     <div className="flex flex-col gap-1.5">
       <label className="t-kicker">Teléfono {sinTel?'· sin número':'· 10 dígitos'}</label>
@@ -4412,7 +4498,13 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
         <span className="text-xs text-[var(--text-muted)] ml-2">{c.telefono}</span></button>))}
     </div>}
     {match&&<div className="rounded-[14px] bg-[rgba(45,139,87,.10)] border border-[rgba(45,139,87,.24)] px-3 py-2 text-xs font-bold text-[#2c7a54]"><Icon name="check" size={12} className="mr-1"/>Cliente frecuente: {match.nombre||'Sin nombre'}</div>}
-    <Input label="Nombre del cliente (puedes buscar aquí)" value={cliente} onChange={setCliente} placeholder="Nombre"/>
+    {sinNombre
+      ?<div className="flex flex-col gap-1.5"><label className="t-kicker">Nombre · sin nombre</label>
+        <div className="px-4 py-3.5 rounded-[18px] border border-[rgba(221,192,161,.5)] bg-[rgba(121,87,67,.05)] text-[15px] font-bold text-[var(--text-soft)]">{nombreGenerico(tipo)}</div></div>
+      :<Input label="Nombre del cliente (puedes buscar aquí)" value={cliente} onChange={setCliente} placeholder="Nombre"/>}
+    {setSinNombre&&<button type="button" onClick={toggleSinNombre} aria-pressed={!!sinNombre}
+      className={`w-full flex items-center justify-center gap-2 text-[13px] font-black px-3 py-2.5 min-h-[44px] rounded-[14px] border-2 transition-colors ${sinNombre?'border-orange-500 bg-orange-50 text-orange-700':'border-dashed border-[#e2c4a4] text-[var(--text-soft)] bg-[rgba(255,250,244,.7)]'}`}>
+      <Icon name={sinNombre?'check':'users'} size={15}/>{sinNombre?'Cliente SIN nombre (activado)':'El cliente no dio nombre'}</button>}
     {sugerenciasNombre.length>0&&<div className="rounded-[16px] border border-[rgba(221,192,161,.7)] bg-[rgba(255,250,244,.95)] overflow-hidden divide-y divide-[rgba(221,192,161,.4)]">
       {sugerenciasNombre.map(c=>(<button key={c.id} type="button" onClick={()=>usarCliente(c)} className="w-full flex items-center justify-between gap-2 px-4 py-2.5 hover:bg-[rgba(242,191,90,.12)]">
         <span className="text-sm font-bold text-[var(--text)] text-left"><Icon name="users" size={12} className="mr-1.5"/>{c.nombre||'Sin nombre'}</span>
@@ -4433,37 +4525,81 @@ function ClienteFields({tipo,clientes,telefono,setTelefono,cliente,setCliente,di
   </div>);
 }
 
+// Carritos por persona (comensal) para tomar el pedido de una mesa persona por
+// persona. carts = {1:{...cart}, 2:{...}}. Sin porPersona es un carrito normal.
+function aplanarCarritos(carts,porPersona){
+  // Cada linea de una persona lleva id propio: el mismo platillo en dos personas
+  // son dos lineas distintas (edicion y division no las colapsan).
+  return Object.entries(carts||{}).flatMap(([n,c])=>Object.values(c||{}).map(i=>
+    porPersona?{...i,id:i.esVariado?i.id:lineaUid(),comensal:Number(n)}:i));
+}
+function CarritoPorPersona({productos,carts,setCarts,activa,setActiva,porPersona,existentes=[],costoEnvio=0}){
+  const cart=carts[activa]||{};
+  const setCart=fn=>setCarts(c=>({...c,[activa]:typeof fn==='function'?fn(c[activa]||{}):fn}));
+  const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
+  const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
+  if(!porPersona)return(<React.Fragment>
+    <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
+    <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
+  </React.Fragment>);
+  const ns=[...new Set([...existentes,...Object.keys(carts).map(Number),activa])].sort((a,b)=>a-b);
+  const siguiente=Math.max(0,...ns)+1;
+  const piezas=n=>Object.values(carts[n]||{}).reduce((s,i)=>s+i.cantidad,0);
+  const totalDe=n=>Object.values(carts[n]||{}).reduce((s,i)=>s+i.subtotal,0);
+  const conItems=ns.filter(n=>piezas(n)>0);
+  return(<React.Fragment>
+    <div className="surface-card p-3 space-y-2">
+      <p className="t-kicker">Tomando el pedido de</p>
+      <div className="flex flex-wrap gap-2">{ns.map(n=>(
+        <button key={n} type="button" onClick={()=>setActiva(n)} aria-pressed={activa===n}
+          className={`px-3 py-2 min-h-[44px] rounded-[14px] border-2 text-[13px] font-black ${activa===n?'border-orange-500 bg-orange-50 text-orange-700':'border-[#e0cdb5] text-[var(--text-soft)]'}`}>
+          Persona {n}{piezas(n)?` · ${piezas(n)}`:''}</button>))}</div>
+      <Btn full color="orange" variant="outline" disabled={!piezas(activa)} onClick={()=>{setCarts(c=>({...c,[siguiente]:{}}));setActiva(siguiente);}}>
+        <Icon name="check" size={14} className="mr-1"/>Guardar persona {activa} · seguir con persona {siguiente}</Btn>
+    </div>
+    <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
+    <p className="t-kicker">Persona {activa}</p>
+    <CartSummary cart={cart} costoEnvio={0} onAdd={add} onRem={rem}/>
+    {conItems.length>1&&<div className="surface-card p-3 space-y-1">
+      {conItems.map(n=>(<div key={n} className="flex justify-between text-xs"><span className="text-[var(--text-soft)]">Persona {n} · {piezas(n)} pza</span><span className="font-bold">{fmt(totalDe(n))}</span></div>))}
+      <div className="flex justify-between border-t border-orange-200 pt-1 mt-1"><span className="font-black text-sm">Total</span><span className="font-black text-sm text-orange-600">{fmt(conItems.reduce((s,n)=>s+totalDe(n),0))}</span></div>
+    </div>}
+  </React.Fragment>);
+}
+
 function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCrear,pedidosActivos=[],onAgregarACuenta}){
-  const [cart,setCart]=useState({});const [tipo,setTipo]=useState('recoger');
-  const [recogerTipo,setRecogerTipo]=useState(null);
+  const [carts,setCarts]=useState({1:{}});const [activa,setActiva]=useState(1);const [tipo,setTipo]=useState('recoger');
+  const [recogerTipo,setRecogerTipo]=useState('cliente');
   const [cliente,setCliente]=useState('');const [telefono,setTelefono]=useState('');const [direccion,setDireccion]=useState('');
   const [etiqueta,setEtiqueta]=useState('Casa');const [notas,setNotas]=useState('');
-  const [sinTel,setSinTel]=useState(false);
+  const [sinTel,setSinTel]=useState(false);const [sinNombre,setSinNombre]=useState(false);
   // Cuando la mesa elegida ya tiene cuenta abierta, avisamos. clienteNuevo=true
   // significa que el usuario confirmo que es OTRO cliente (nueva atencion).
   const [clienteNuevo,setClienteNuevo]=useState(false);
-  useEffect(()=>{if(open){setCart({});setTipo('recoger');setRecogerTipo(null);setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);setClienteNuevo(false);}},[open]);
+  useEffect(()=>{if(open){setCarts({1:{}});setActiva(1);setTipo('recoger');setRecogerTipo('cliente');setCliente('');setTelefono('');setDireccion('');setEtiqueta('Casa');setNotas('');setSinTel(false);setSinNombre(false);setClienteNuevo(false);}},[open]);
   // Al cambiar de mesa/tipo se reevalua el aviso desde cero.
   const setTipoReset=t=>{setTipo(t);setClienteNuevo(false);if(t!=='recoger')setRecogerTipo(null);};
   // Mesa con cuenta abierta (no cobrada, no cancelada) = posible mismo cliente.
   const mesaOcupada=esMesa(tipo)?(pedidosActivos||[]).find(p=>p.tipoEntrega===tipo&&!p.cobrado&&p.estado!=='cancelado'):null;
-  const items=Object.values(cart);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
+  // En mesa se toma por persona; para llevar/envio es un solo carrito.
+  const porPersona=esMesa(tipo);
+  const items=aplanarCarritos(carts,porPersona);const totalProd=items.reduce((s,i)=>s+i.subtotal,0);
   const costoEnvio=(TARIFAS_ENVIO[tipo]||TARIFAS_ENVIO.recoger).precio;
   const totalFinal=totalProd+costoEnvio;
-  const add=p=>setCart(c=>{const k=p.id||p.productoId;const q=(c[k]?.cantidad||0)+1;return{...c,[k]:{...(c[k]||p),productoId:p.productoId||p.id,cantidad:q,subtotal:q*p.precio}};});
-  const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   // Validacion en la frontera: telefono y nombre SIEMPRE; direccion cuando la
   // recoge un repartidor/servicio (recoger o envio), no en mesa.
   const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
   // El telefono deja de ser obligatorio si el cliente no lo dio (sinTel).
   // Si SE captura, debe ser un numero real de 10 digitos (movil MX).
   const telOk=sinTel||normTel(telefono).length===10;
-  const puedeCrear=items.length>0&&telOk&&cliente.trim().length>0&&!faltaDir&&!(mesaOcupada&&!clienteNuevo);
+  // El nombre deja de ser obligatorio si el cliente no lo dio (sinNombre).
+  const nombreOk=sinNombre||cliente.trim().length>0;
+  const puedeCrear=items.length>0&&telOk&&nombreOk&&!faltaDir&&!(mesaOcupada&&!clienteNuevo);
   const crear=()=>{
     if(!puedeCrear)return;
     const its=items.map(i=>buildItem(i));
-    onCrear(its,tipo,cliente.trim(),direccion.trim(),notas,sinTel?'':telefono.trim(),etiqueta,recogerTipo);
-    setCart({});setCliente('');setTelefono('');setDireccion('');setNotas('');};
+    onCrear(its,tipo,sinNombre?nombreGenerico(tipo):cliente.trim(),direccion.trim(),notas,sinTel?'':telefono.trim(),etiqueta,tipo==='recoger'?recogerTipo:null,sinNombre);
+    setCarts({1:{}});setActiva(1);setCliente('');setTelefono('');setDireccion('');setNotas('');};
   return(<Modal open={open} onClose={onClose} title="NUEVO PEDIDO" fullScreen>
     <div className="space-y-4 menu-upper">
       {mesero&&<p className="t-kicker">Atiende: <span className="text-[var(--brand-strong)]">{mesero}</span></p>}
@@ -4478,12 +4614,12 @@ function CrearPedidoModal({open,onClose,productos,clientes,impresora,mesero,onCr
           </div>
         </div>)}
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
-        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
-      <ProductSelector productos={productos} cart={cart} setCart={setCart}/>
-      <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
+        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}
+        sinNombre={sinNombre} setSinNombre={setSinNombre}/>
+      <CarritoPorPersona productos={productos} carts={carts} setCarts={setCarts} activa={activa} setActiva={setActiva} porPersona={porPersona} costoEnvio={costoEnvio}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'El teléfono debe tener 10 dígitos (o marca “Sin teléfono”)':!cliente.trim()?'Captura el nombre del cliente':faltaDir?'Captura la dirección':''}</p>}
+        {!puedeCrear&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'El teléfono debe tener 10 dígitos (o marca “Sin teléfono”)':!nombreOk?'Captura el nombre del cliente (o marca “No dio nombre”)':faltaDir?'Captura la dirección':''}</p>}
         <Btn full color="green" size="lg" disabled={!puedeCrear} onClick={crear}><Icon name="check" size={17} className="mr-1.5"/>Crear pedido · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
@@ -4506,15 +4642,17 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const [pagoTransferencia,setPagoTransferencia]=useState('');
   const [sinTel,setSinTel]=useState(!(pedido.telefono&&normTel(pedido.telefono).length===10));
   const [recogerTipo,setRecogerTipo]=useState(pedido.recogerTipo||null);
+  const [sinNombre,setSinNombre]=useState(!!pedido.sinNombre);
   useEffect(()=>{
     if(!open)return;
     setSinTel(!(pedido.telefono&&normTel(pedido.telefono).length===10));
+    setSinNombre(!!pedido.sinNombre);
     setRecogerTipo(pedido.recogerTipo||null);
     const c={};
     pedido.items.forEach(i=>{const k=i.id||i.productoId;c[k]={...i,id:k};});
     setCart(c);
     setTipo(pedido.tipoEntrega);
-    setCliente(pedido.cliente||'');
+    setCliente(pedido.sinNombre?'':(pedido.cliente||''));
     setTelefono(pedido.telefono||'');
     setDireccion(pedido.direccion||'');
     setNotas(pedido.notas||'');
@@ -4531,12 +4669,13 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
   const rem=pid=>setCart(c=>{const n={...c};if(n[pid]?.cantidad>1){n[pid]={...n[pid],cantidad:n[pid].cantidad-1,subtotal:(n[pid].cantidad-1)*n[pid].precio};}else{delete n[pid];}return n;});
   const faltaDir=necesitaDireccion(tipo)&&!direccion.trim();
   const telOk=sinTel||normTel(telefono).length===10;
-  const datosOk=telOk&&cliente.trim().length>0&&!faltaDir;
+  const datosOk=telOk&&(sinNombre||cliente.trim().length>0)&&!faltaDir;
   const guardar=()=>{
     if(!items.length||!datosOk)return;
     const its=items.map(i=>buildItem(i));
     const pagoSimple=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
-    onGuardar({items:its,tipoEntrega:tipo,recogerTipo:tipo==='recoger'?recogerTipo:null,cliente:cliente.trim(),telefono:sinTel?'':telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
+    // Sin nombre: el generico se recalcula por si cambio la mesa.
+    onGuardar({items:its,tipoEntrega:tipo,recogerTipo:tipo==='recoger'?recogerTipo:null,cliente:sinNombre?nombreGenerico(tipo):cliente.trim(),sinNombre,telefono:sinTel?'':telefono.trim(),direccion:direccion.trim(),etiquetaDir:etiqueta,notas,...(pedido.cobrado?{metodoPago,pagos:pagoSimple}:{} )});
   };
   const pagoEditado=metodoPago==='mixto'?{efectivo:Number(pagoEfectivo)||0,transferencia:Number(pagoTransferencia)||0}:normalizePagos(null,totalFinal,metodoPago);
   const pagoOk=!pedido.cobrado||metodoPago!=='mixto'||(pagoEditado.efectivo>=0&&pagoEditado.transferencia>=0&&sumPagos(pagoEditado)===_roundMoney(totalFinal));
@@ -4544,7 +4683,8 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
     <div className="space-y-4">
       <DeliverySelector tipo={tipo} setTipo={t=>{setTipo(t);if(t!=='recoger')setRecogerTipo(null);}} recogerTipo={recogerTipo} setRecogerTipo={setRecogerTipo}/>
       <ClienteFields tipo={tipo} clientes={clientes} telefono={telefono} setTelefono={setTelefono}
-        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}/>
+        cliente={cliente} setCliente={setCliente} direccion={direccion} setDireccion={setDireccion} etiqueta={etiqueta} setEtiqueta={setEtiqueta} sinTel={sinTel} setSinTel={setSinTel}
+        sinNombre={sinNombre} setSinNombre={setSinNombre}/>
       {pedido.cobrado&&<div className="surface-card space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -4578,7 +4718,7 @@ function EditarPedidoModal({open,pedido,productos,clientes,onClose,onGuardar}){
       <CartSummary cart={cart} costoEnvio={costoEnvio} onAdd={add} onRem={rem}/>
       {items.length>0&&(<React.Fragment>
         <Input label="Notas del pedido (opcional)" value={notas} onChange={setNotas} placeholder="Sin cebolla, extra salsa..."/>
-        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'El teléfono debe tener 10 dígitos (o marca “Sin teléfono”)':!cliente.trim()?'Captura el nombre del cliente':'Captura la dirección'}</p>}
+        {!datosOk&&<p className="text-xs font-bold text-[var(--danger)] text-center">{!telOk?'El teléfono debe tener 10 dígitos (o marca “Sin teléfono”)':!(sinNombre||cliente.trim())?'Captura el nombre del cliente (o marca “No dio nombre”)':'Captura la dirección'}</p>}
         <Btn full color="orange" size="lg" disabled={!pagoOk||!datosOk} onClick={guardar}><Icon name="save" size={17} className="mr-1.5"/>Guardar cambios · {fmt(totalFinal)}</Btn>
       </React.Fragment>)}
     </div></Modal>);
@@ -4658,14 +4798,23 @@ function CobrarModal({open,pedido,onClose,onCobrar}){
 // caja ni la regla de "una venta por pedido". La suma de personas debe dar el
 // total exacto del pedido.
 function SplitModal({open,pedido,onClose,onCobrar}){
-  const [personas,setPersonas]=useState([{id:'p1',metodo:'efectivo'},{id:'p2',metodo:'efectivo'}]);
+  const [personas,setPersonas]=useState([{id:'p1',n:1,metodo:'efectivo'},{id:'p2',n:2,metodo:'efectivo'}]);
   const [asign,setAsign]=useState({}); // asign[itemKey][personaId] = unidades
-  useEffect(()=>{if(open&&pedido){setPersonas([{id:'p1',metodo:'efectivo'},{id:'p2',metodo:'efectivo'}]);setAsign({});}},[open,pedido]);
+  // Si la mesa se tomo por persona, todo llega ya repartido: solo falta el
+  // metodo de pago de cada quien. Lo que no tenga persona se asigna a mano.
+  useEffect(()=>{if(!open||!pedido)return;
+    const ns=comensalesDe(pedido.items);
+    if(!ns.length){setPersonas([{id:'p1',n:1,metodo:'efectivo'},{id:'p2',n:2,metodo:'efectivo'}]);setAsign({});return;}
+    setPersonas(ns.map(n=>({id:'p'+n,n,metodo:'efectivo'})));
+    const a={};(pedido.items||[]).forEach((i,idx)=>{if(Number(i.comensal)>0)a['it'+idx]={['p'+i.comensal]:Number(i.cantidad)||0};});
+    setAsign(a);
+  },[open,pedido]);
   if(!open||!pedido)return null;
+  // Llave por posicion: dos lineas pueden compartir productoId (una por persona).
   const items=(pedido.items||[]).map((i,idx)=>{
     const cant=Number(i.cantidad)||0;
     const precio=Number(i.precio)||(cant?_roundMoney((Number(i.subtotal)||0)/cant):0);
-    return{key:i.id||i.productoId||('it'+idx),nombre:i.nombre||'',precio,cantidad:cant};
+    return{key:'it'+idx,nombre:i.nombre||'',precio,cantidad:cant};
   });
   const total=Number(pedido.total)||0;
   const asignadasDe=k=>Object.values(asign[k]||{}).reduce((a,b)=>a+(Number(b)||0),0);
@@ -4679,7 +4828,7 @@ function SplitModal({open,pedido,onClose,onCobrar}){
     let next=cur+delta;if(next<0)next=0;if(next+otros>it.cantidad)next=it.cantidad-otros;
     return{...a,[itKey]:{...(a[itKey]||{}),[pid]:next}};
   });
-  const addPersona=()=>setPersonas(ps=>[...ps,{id:'p'+Date.now(),metodo:'efectivo'}]);
+  const addPersona=()=>setPersonas(ps=>[...ps,{id:'p'+Date.now(),n:Math.max(0,...ps.map(p=>p.n||0))+1,metodo:'efectivo'}]);
   const removePersona=pid=>{setPersonas(ps=>ps.length<=1?ps:ps.filter(p=>p.id!==pid));
     setAsign(a=>{const n={};for(const k in a){const c={...a[k]};delete c[pid];n[k]=c;}return n;});};
   const setMetodo=(pid,m)=>setPersonas(ps=>ps.map(p=>p.id===pid?{...p,metodo:m}:p));
@@ -4691,7 +4840,7 @@ function SplitModal({open,pedido,onClose,onCobrar}){
     const tr=personas.filter(p=>p.metodo==='transferencia').reduce((s,p)=>s+totalPersona(p.id),0);
     const pagos={efectivo:_roundMoney(ef),transferencia:_roundMoney(tr)};
     const metodoPago=(ef>0&&tr>0)?'mixto':(tr>0?'transferencia':'efectivo');
-    const split=personas.map((p,i)=>({persona:i+1,metodo:p.metodo,total:_roundMoney(totalPersona(p.id)),
+    const split=personas.map((p,i)=>({persona:p.n||i+1,metodo:p.metodo,total:_roundMoney(totalPersona(p.id)),
       items:items.filter(it=>(asign[it.key]?.[p.id]||0)>0).map(it=>({nombre:it.nombre,cantidad:asign[it.key][p.id],subtotal:_roundMoney((asign[it.key][p.id])*it.precio)}))}));
     onCobrar({metodoPago,pagos,split});
   };
@@ -4705,7 +4854,7 @@ function SplitModal({open,pedido,onClose,onCobrar}){
       <div className="grid grid-cols-1 gap-2">
         {personas.map((p,i)=>(
           <div key={p.id} className="surface-card p-3 flex items-center justify-between gap-2">
-            <div className="min-w-0"><p className="font-black text-sm text-[var(--text)]">Persona {i+1}</p>
+            <div className="min-w-0"><p className="font-black text-sm text-[var(--text)]">Persona {p.n||i+1}</p>
               <p className="text-xs text-[var(--text-muted)]">{fmt(totalPersona(p.id))}</p></div>
             <div className="flex items-center gap-1.5 shrink-0">
               <button onClick={()=>setMetodo(p.id,'efectivo')} aria-pressed={p.metodo==='efectivo'} className={`text-[11px] font-black px-2.5 py-2 rounded-[12px] border ${p.metodo==='efectivo'?'border-green-500 bg-green-50 text-green-700':'border-[#e0cdb5] text-[var(--text-soft)]'}`}>Efectivo</button>
@@ -4725,7 +4874,7 @@ function SplitModal({open,pedido,onClose,onCobrar}){
             <div className="mt-2 space-y-1.5">
               {personas.map((p,i)=>(
                 <div key={p.id} className="flex items-center justify-between">
-                  <span className="text-xs text-[var(--text-soft)]">Persona {i+1}</span>
+                  <span className="text-xs text-[var(--text-soft)]">Persona {p.n||i+1}</span>
                   <div className="flex items-center gap-2">
                     <button onClick={()=>asignar(it.key,p.id,-1)} className="w-8 h-8 rounded-full border border-[#e0cdb5] font-black text-[var(--text)]">−</button>
                     <span className="w-6 text-center font-black text-sm">{asign[it.key]?.[p.id]||0}</span>
@@ -5789,8 +5938,8 @@ function ImpresoraTab({impresora,cola,onActualizar,esServidor,onServidor}){
           <p className="text-[11px] text-[var(--text-soft)] mt-1">Los meseros mandan el pedido desde su telefono y el equipo servidor lo imprime solo, sin que nadie toque la computadora. Si la impresora se cae, el ticket se queda en la cola y sale al reconectar.</p>
         </div>
         <div className="flex items-center justify-between">
-          <div><p className="text-sm font-bold">Auto-imprimir</p><p className="text-xs text-gray-400">Al crear pedido y al agregar una ronda</p></div>
-          <button onClick={()=>onActualizar({autoImprimir:!impresora.autoImprimir})} role="switch" aria-checked={impresora.autoImprimir} aria-label="Auto-imprimir al crear pedido"
+          <div><p className="text-sm font-bold">Preguntar qué ticket imprimir</p><p className="text-xs text-gray-400">Al guardar un pedido o una ronda: cocina, cliente o los dos</p></div>
+          <button onClick={()=>onActualizar({autoImprimir:!impresora.autoImprimir})} role="switch" aria-checked={impresora.autoImprimir} aria-label="Preguntar qué ticket imprimir al guardar"
             className={`w-12 h-6 rounded-full transition-colors duration-150 ${impresora.autoImprimir?'bg-green-500':'bg-gray-300'} relative`}>
             <span className={`absolute top-0.5 w-5 h-5 bg-white rounded-full shadow transition-all duration-150 ${impresora.autoImprimir?'right-0.5':'left-0.5'}`}/></button></div>
         {status&&<p role="status" className={`text-center text-sm font-bold ${status.kind==='ok'?'text-green-700':status.kind==='err'?'text-red-600':'text-gray-600'}`}><Icon name={status.kind==='ok'?'check':status.kind==='err'?'alert':'info'} size={14} className="mr-1"/>{status.text}</p>}
@@ -5936,9 +6085,11 @@ function App(){
         const ped=(stateRef.current.jornadaActiva?.pedidos||[]).find(p=>p.id===job.pedidoId);
         const ronda=ped&&job.tipo==='ronda'?rondasDe(ped).find(r=>r.id===job.rondaId):null;
         // Pedido que ya no existe: se cierra para que no bloquee la cola para siempre.
-        // Ronda que no se encuentra: se imprime la cuenta completa, nunca se descarta en silencio.
+        // Ronda que no se encuentra: se imprime el pedido completo, nunca se descarta en silencio.
         if(!ped){hechos.push(job.id);continue;}
-        const ok=await _sendRaw(_buildBTText(ped,ronda?{ronda}:undefined));
+        // Jobs previos a v2.13 no traen ticket: los de ronda eran para cocina.
+        const ticket=job.ticket||(job.tipo==='ronda'?'cocina':'cliente');
+        const ok=await _sendRaw(ticket==='cocina'?_buildCocinaText(ped,ronda):_buildBTText(ped));
         if(ok){snd.print();hechos.push(job.id);}
         else{_jobsEnVuelo.delete(job.id);break;}
       }
@@ -5957,10 +6108,10 @@ function App(){
       onPagarTodosRepartidores={()=>{pagarRepartidoresPendientes();showToast('Repartidores pagados desde caja','orange');}}/>}
     {page==='pedidos'&&<PedidosPage state={state} deviceInfo={deviceInfo}
       onSetMesero={(id,nombre)=>{setMesero(id,nombre);showToast(`Atiende ${nombre}`);}}
-      onReimprimir={p=>{encolarImpresion(p.id);showToast(`Cuenta #${String(p.numero).padStart(3,'0')} enviada a impresora`);}}
+      onImprimir={(id,opts)=>{encolarImpresion(id,opts);showToast(opts.ticket==='cocina'?'Ticket de cocina enviado':opts.ticket==='cliente'?'Ticket de cliente enviado':'Tickets enviados a impresora');}}
       onAgregarItems={(id,items)=>{const r=agregarItemsPedido(id,items,deviceInfo.meseroNombre||'');
-        showToast(r?`Ronda ${r.n} enviada a cocina`:'No se pudo agregar',r?'green':'red');}}
-      onCrearPedido={(i,t,c,dir,n,tel,et,rt)=>{const p=crearPedido(i,t,c,dir,n,tel,et,deviceInfo.meseroNombre||'',rt);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
+        showToast(r?`Ronda ${r.n} agregada`:'No se pudo agregar',r?'green':'red');return r;}}
+      onCrearPedido={(i,t,c,dir,n,tel,et,rt,sn)=>{const p=crearPedido(i,t,c,dir,n,tel,et,deviceInfo.meseroNombre||'',rt,sn);showToast(`Pedido #${String(p?.numero||0).padStart(3,'0')} creado`);return p;}}
       onActualizarPedido={(id,c)=>{actualizarPedido(id,c);
         if(c.cobrado)showToast('Cobrado','green');
         else if(c.estado==='entregado')showToast('Entregado','green');

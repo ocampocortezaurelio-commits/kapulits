@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kapulits-assets-v20261004-conciliacion-digital';
+const CACHE_NAME = 'kapulits-assets-v20261008-tickets-cocina';
 
 // App shell: sin esto la PWA no abre offline.
 const APP_SHELL = [
